@@ -32,3 +32,7 @@ Each ADR MUST include the following sections, using the headings exactly:
 4. Mark the initial status as **Proposed**; update to **Accepted** after review/approval.
 5. If an ADR replaces an older one, mark the predecessor as **Superseded** and link between them.
 6. Reference the ADR from related documentation (e.g., `ARCHITECTURE.md`, `ROADMAP.md`, or component READMEs) when applicable.
+
+## Index
+- [0001: Record architecture decisions with ADRs](decisions/0001-record-architecture-decisions.md)
+- [0002: Gateway sequencing, idempotency, and echo-before-apply](decisions/0002-gateway-sequencing-and-idempotency.md)
