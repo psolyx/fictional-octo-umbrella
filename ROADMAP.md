@@ -6,6 +6,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Keep milestone names stable; append new milestones rather than renaming.
 - Every milestone MUST include: deliverables, exit criteria, risk retired.
 - If scope changes, update the “MVP scope” section first, then ripple changes downward.
+- Before implementing MLS/presence beyond scaffolding, add/update ADRs in [DECISIONS.md](DECISIONS.md) and risks in [RISK_REGISTER.md](RISK_REGISTER.md).
 
 ---
 
