@@ -1,0 +1,360 @@
+
+diff --git a/gateway/src/gateway/cursors.py b/gateway/src/gateway/cursors.py
+index 1ffcd182927bec66552e56351024a3b0591708a0..7ef28abe0c7ae9dacf59395f52c1222264a04ca7 100644
+--- a/gateway/src/gateway/cursors.py
++++ b/gateway/src/gateway/cursors.py
+@@ -1,25 +1,32 @@
+ from __future__ import annotations
+ 
+ from typing import Dict, Tuple
+ 
+ 
+ class CursorStore:
+     """Tracks per-device acknowledgement cursors per conversation."""
+ 
+     def __init__(self) -> None:
+         self._positions: Dict[Tuple[str, str], int] = {}
+ 
+-    def ack(self, device_id: str, conv_id: str, seq: int) -> int:
+-        """Advance the acknowledgement cursor; rejects regressions."""
++    def ack(self, device_id: str, conv_id: str, acked_seq: int) -> int:
++        """Advance the acknowledgement cursor while preserving monotonicity."""
++
++        if acked_seq < 0:
++            raise ValueError("acked_seq must be non-negative")
+ 
+         key = (device_id, conv_id)
+-        current = self._positions.get(key, 0)
+-        if seq < current:
+-            raise ValueError("ack cursor must be monotonic")
+-        self._positions[key] = seq
+-        return seq
++        current_next = self._positions.get(key, 1)
++        next_seq = max(current_next, acked_seq + 1)
++        self._positions[key] = next_seq
++        return next_seq
++
++    def next_seq(self, device_id: str, conv_id: str) -> int:
++        """Return the next sequence number to deliver for the device/conversation."""
++
++        return self._positions.get((device_id, conv_id), 1)
+ 
+     def last_ack(self, device_id: str, conv_id: str) -> int:
+         """Return the last acknowledged sequence for the device/conversation."""
+ 
+-        return self._positions.get((device_id, conv_id), 0)
++        return self.next_seq(device_id, conv_id) - 1
+diff --git a/gateway/src/gateway/log.py b/gateway/src/gateway/log.py
+index 29c780fc8769db8ac24d1442bc524771f3bf9db3..30dd38ed2d5805e4b350ea828be44310de7650c2 100644
+--- a/gateway/src/gateway/log.py
++++ b/gateway/src/gateway/log.py
+@@ -51,30 +51,45 @@ class ConversationLog:
+             seq=seq,
+             msg_id=msg_id,
+             envelope_b64=envelope_b64,
+             sender_device_id=sender_device_id,
+             ts_ms=ts_ms,
+         )
+ 
+         self._events.setdefault(conv_id, []).append(event)
+         self._idempotency[key] = event
+         return seq, event
+ 
+     def list_since(self, conv_id: str, after_seq: int, limit: int | None = None) -> list[ConversationEvent]:
+         """Return events for ``conv_id`` with ``seq`` greater than ``after_seq``.
+ 
+         Results are ordered by ascending ``seq`` and constrained by ``limit``
+         when provided.
+         """
+ 
+         if after_seq < 0:
+             raise ValueError("after_seq must be non-negative")
+         events = self._events.get(conv_id, [])
+         start_index = after_seq
+         slice_end = None if limit is None else start_index + max(limit, 0)
+         return list(events[start_index:slice_end])
+ 
++    def list_from(self, conv_id: str, from_seq: int, limit: int | None = None) -> list[ConversationEvent]:
++        """Return events for ``conv_id`` with ``seq`` greater than or equal to ``from_seq``.
++
++        Results are ordered by ascending ``seq`` and constrained by ``limit``
++        when provided.
++        """
++
++        if from_seq < 1:
++            raise ValueError("from_seq must be at least 1")
++
++        events = self._events.get(conv_id, [])
++        start_index = from_seq - 1
++        slice_end = None if limit is None else start_index + max(limit, 0)
++        return list(events[start_index:slice_end])
++
+     @staticmethod
+     def _to_b64(envelope_bytes_or_b64: bytes | str) -> str:
+         if isinstance(envelope_bytes_or_b64, bytes):
+             return base64.b64encode(envelope_bytes_or_b64).decode("ascii")
+         return envelope_bytes_or_b64
+diff --git a/gateway/src/gateway/server.py b/gateway/src/gateway/server.py
+index 71c9f144f48c472e63e869139d271882b06ceb3c..41bfc084334f88ff2b1cebe28076c5b840998c43 100644
+--- a/gateway/src/gateway/server.py
++++ b/gateway/src/gateway/server.py
+@@ -41,53 +41,60 @@ def simulate(frames: Iterable[dict], output: TextIO) -> None:
+                     "ts_ms": event.ts_ms,
+                 }
+                 output.write(json.dumps(message) + "\n")
+ 
+             callbacks[device_id] = _callback
+         return callbacks[device_id]
+ 
+     for frame in frames:
+         frame_type = frame.get("t")
+         if frame_type == "conv.subscribe":
+             device_id = frame["device_id"]
+             conv_id = frame["conv_id"]
+             hub.subscribe(device_id, conv_id, callback_for(device_id))
+         elif frame_type == "conv.send":
+             conv_id = frame["conv_id"]
+             msg_id = frame["msg_id"]
+             envelope_b64 = frame["envelope_b64"]
+             sender_device_id = frame["sender_device_id"]
+             ts_ms = frame["ts_ms"]
+             _, event = log.append(conv_id, msg_id, envelope_b64, sender_device_id, ts_ms)
+             hub.broadcast(event)
+         elif frame_type == "conv.ack":
+             cursors.ack(frame["device_id"], frame["conv_id"], frame["seq"])
+         elif frame_type == "conv.replay":
+             conv_id = frame["conv_id"]
+-            after_seq = frame.get("after_seq", 0)
++            device_id = frame["device_id"]
++            from_seq = frame.get("from_seq")
++            after_seq = frame.get("after_seq")
+             limit = frame.get("limit")
+-            events = log.list_since(conv_id, after_seq, limit)
++            if from_seq is None:
++                if after_seq is not None:
++                    from_seq = after_seq + 1
++                else:
++                    from_seq = cursors.next_seq(device_id, conv_id)
++            events = log.list_from(conv_id, from_seq, limit)
+             for event in events:
+                 hub.broadcast(event)
+         else:
+             raise ValueError(f"unsupported frame type: {frame_type}")
+ 
+ 
+ def _load_frames(handle: TextIO) -> Iterable[dict]:
+     content = handle.read()
+     if not content.strip():
+         return []
+ 
+     try:
+         parsed = json.loads(content)
+     except json.JSONDecodeError:
+         parsed = None
+ 
+     if parsed is None:
+         frames: list[dict] = []
+         for line in content.splitlines():
+             if line.strip():
+                 frames.append(json.loads(line))
+         return frames
+ 
+     if isinstance(parsed, list):
+         return parsed
+diff --git a/gateway/tests/test_core.py b/gateway/tests/test_core.py
+index 036c34018460b13400e1be8c5d2a7663416d93a5..ba6ae807ba01761daeb7c95917d1015da0359f34 100644
+--- a/gateway/tests/test_core.py
++++ b/gateway/tests/test_core.py
+@@ -13,54 +13,63 @@ class TestConversationLog(unittest.TestCase):
+         s2, e2 = log.append("c1", "m2", "b", "d2", 2)
+         s3, e3 = log.append("c2", "m1", "c", "d3", 3)
+ 
+         self.assertEqual((s1, e1.seq), (1, 1))
+         self.assertEqual((s2, e2.seq), (2, 2))
+         self.assertEqual((s3, e3.seq), (1, 1))
+ 
+     def test_idempotent_append_returns_original_event(self):
+         log = ConversationLog()
+ 
+         first_seq, first_event = log.append("c1", "m1", b"payload", "d1", 10)
+         repeat_seq, repeat_event = log.append("c1", "m1", b"payload", "d2", 20)
+ 
+         self.assertEqual(first_seq, 1)
+         self.assertEqual(repeat_seq, 1)
+         self.assertIs(first_event, repeat_event)
+ 
+     def test_list_since_orders_and_limits(self):
+         log = ConversationLog()
+         for i in range(5):
+             log.append("c1", f"m{i}", str(i), "d1", i)
+ 
+         window = log.list_since("c1", after_seq=2, limit=2)
+         self.assertEqual([e.seq for e in window], [3, 4])
+ 
++    def test_list_from_is_inclusive(self):
++        log = ConversationLog()
++        for i in range(1, 6):
++            log.append("c1", f"m{i}", str(i), "d1", i)
++
++        window = log.list_from("c1", from_seq=3, limit=3)
++        self.assertEqual([e.seq for e in window], [3, 4, 5])
++
+ 
+ class TestCursorStore(unittest.TestCase):
+     def test_ack_monotonicity(self):
+         cursors = CursorStore()
+ 
+         cursors.ack("d1", "c1", 2)
+-        with self.assertRaises(ValueError):
+-            cursors.ack("d1", "c1", 1)
+-        self.assertEqual(cursors.last_ack("d1", "c1"), 2)
++        cursors.ack("d1", "c1", 1)
++        cursors.ack("d1", "c1", 5)
++        self.assertEqual(cursors.next_seq("d1", "c1"), 6)
++        self.assertEqual(cursors.last_ack("d1", "c1"), 5)
+ 
+ 
+ class TestSubscriptionHub(unittest.TestCase):
+     def test_echo_to_sender(self):
+         hub = SubscriptionHub()
+         log = ConversationLog()
+         events = []
+ 
+         def capture(event):
+             events.append(event.seq)
+ 
+         hub.subscribe("d1", "c1", capture)
+         _, event = log.append("c1", "m1", "payload", "d1", 1)
+         hub.broadcast(event)
+ 
+         self.assertEqual(events, [1])
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/gateway/tests/test_server.py b/gateway/tests/test_server.py
+index 672b47c9148cbecbcff51954910db8e1f2e80784..c0ea3ed171e3abe71e933784f038b53912ab4907 100644
+--- a/gateway/tests/test_server.py
++++ b/gateway/tests/test_server.py
+@@ -25,28 +25,121 @@ class TestGatewayServer(unittest.TestCase):
+ 
+         self.assertEqual(list(_load_frames(array_buffer)), [{"t": "ping"}])
+         self.assertEqual(list(_load_frames(ndjson_buffer)), [{"t": "one"}, {"t": "two"}])
+ 
+     def test_simulate_streams_events(self):
+         frames = [
+             {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
+             {
+                 "t": "conv.send",
+                 "conv_id": "c1",
+                 "msg_id": "m1",
+                 "envelope_b64": "ZXZlbnQ=",
+                 "sender_device_id": "d1",
+                 "ts_ms": 1,
+             },
+         ]
+         buffer = io.StringIO()
+ 
+         simulate(frames, buffer)
+ 
+         lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
+         self.assertEqual(len(lines), 1)
+         self.assertEqual(lines[0]["seq"], 1)
+         self.assertEqual(lines[0]["device_id"], "d1")
+ 
++    def test_replay_defaults_to_cursor(self):
++        frames = []
++        for i in range(1, 7):
++            frames.append(
++                {
++                    "t": "conv.send",
++                    "conv_id": "c1",
++                    "msg_id": f"m{i}",
++                    "envelope_b64": "ZXZlbnQ=",
++                    "sender_device_id": "ds",  # sender doesn't matter here
++                    "ts_ms": i,
++                }
++            )
++
++        frames.extend(
++            [
++                {"t": "conv.ack", "device_id": "d1", "conv_id": "c1", "seq": 5},
++                {"t": "conv.ack", "device_id": "d1", "conv_id": "c1", "seq": 3},
++                {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
++                {"t": "conv.replay", "device_id": "d1", "conv_id": "c1"},
++            ]
++        )
++
++        buffer = io.StringIO()
++        simulate(frames, buffer)
++
++        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
++        self.assertEqual([line["seq"] for line in lines], [6])
++
++    def test_replay_from_seq_is_inclusive(self):
++        frames = [
++            {
++                "t": "conv.send",
++                "conv_id": "c1",
++                "msg_id": "m1",
++                "envelope_b64": "ZXZlbnQ=",
++                "sender_device_id": "ds",
++                "ts_ms": 1,
++            },
++            {
++                "t": "conv.send",
++                "conv_id": "c1",
++                "msg_id": "m2",
++                "envelope_b64": "ZXZlbnQ=",
++                "sender_device_id": "ds",
++                "ts_ms": 2,
++            },
++            {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
++            {"t": "conv.replay", "device_id": "d1", "conv_id": "c1", "from_seq": 2},
++        ]
++
++        buffer = io.StringIO()
++        simulate(frames, buffer)
++
++        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
++        self.assertEqual([line["seq"] for line in lines], [2])
++
++    def test_replay_after_seq_backcompat(self):
++        frames = [
++            {
++                "t": "conv.send",
++                "conv_id": "c1",
++                "msg_id": "m1",
++                "envelope_b64": "ZXZlbnQ=",
++                "sender_device_id": "ds",
++                "ts_ms": 1,
++            },
++            {
++                "t": "conv.send",
++                "conv_id": "c1",
++                "msg_id": "m2",
++                "envelope_b64": "ZXZlbnQ=",
++                "sender_device_id": "ds",
++                "ts_ms": 2,
++            },
++            {
++                "t": "conv.send",
++                "conv_id": "c1",
++                "msg_id": "m3",
++                "envelope_b64": "ZXZlbnQ=",
++                "sender_device_id": "ds",
++                "ts_ms": 3,
++            },
++            {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
++            {"t": "conv.replay", "device_id": "d1", "conv_id": "c1", "after_seq": 1},
++        ]
++
++        buffer = io.StringIO()
++        simulate(frames, buffer)
++
++        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
++        self.assertEqual([line["seq"] for line in lines], [2, 3])
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

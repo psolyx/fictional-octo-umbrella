@@ -73,6 +73,21 @@ class ConversationLog:
         slice_end = None if limit is None else start_index + max(limit, 0)
         return list(events[start_index:slice_end])
 
+    def list_from(self, conv_id: str, from_seq: int, limit: int | None = None) -> list[ConversationEvent]:
+        """Return events for ``conv_id`` with ``seq`` greater than or equal to ``from_seq``.
+
+        Results are ordered by ascending ``seq`` and constrained by ``limit``
+        when provided.
+        """
+
+        if from_seq < 1:
+            raise ValueError("from_seq must be at least 1")
+
+        events = self._events.get(conv_id, [])
+        start_index = from_seq - 1
+        slice_end = None if limit is None else start_index + max(limit, 0)
+        return list(events[start_index:slice_end])
+
     @staticmethod
     def _to_b64(envelope_bytes_or_b64: bytes | str) -> str:
         if isinstance(envelope_bytes_or_b64, bytes):

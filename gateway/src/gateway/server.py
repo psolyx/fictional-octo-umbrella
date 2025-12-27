@@ -63,9 +63,16 @@ def simulate(frames: Iterable[dict], output: TextIO) -> None:
             cursors.ack(frame["device_id"], frame["conv_id"], frame["seq"])
         elif frame_type == "conv.replay":
             conv_id = frame["conv_id"]
-            after_seq = frame.get("after_seq", 0)
+            device_id = frame["device_id"]
+            from_seq = frame.get("from_seq")
+            after_seq = frame.get("after_seq")
             limit = frame.get("limit")
-            events = log.list_since(conv_id, after_seq, limit)
+            if from_seq is None:
+                if after_seq is not None:
+                    from_seq = after_seq + 1
+                else:
+                    from_seq = cursors.next_seq(device_id, conv_id)
+            events = log.list_from(conv_id, from_seq, limit)
             for event in events:
                 hub.broadcast(event)
         else:

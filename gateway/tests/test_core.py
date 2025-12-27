@@ -35,15 +35,24 @@ class TestConversationLog(unittest.TestCase):
         window = log.list_since("c1", after_seq=2, limit=2)
         self.assertEqual([e.seq for e in window], [3, 4])
 
+    def test_list_from_is_inclusive(self):
+        log = ConversationLog()
+        for i in range(1, 6):
+            log.append("c1", f"m{i}", str(i), "d1", i)
+
+        window = log.list_from("c1", from_seq=3, limit=3)
+        self.assertEqual([e.seq for e in window], [3, 4, 5])
+
 
 class TestCursorStore(unittest.TestCase):
     def test_ack_monotonicity(self):
         cursors = CursorStore()
 
         cursors.ack("d1", "c1", 2)
-        with self.assertRaises(ValueError):
-            cursors.ack("d1", "c1", 1)
-        self.assertEqual(cursors.last_ack("d1", "c1"), 2)
+        cursors.ack("d1", "c1", 1)
+        cursors.ack("d1", "c1", 5)
+        self.assertEqual(cursors.next_seq("d1", "c1"), 6)
+        self.assertEqual(cursors.last_ack("d1", "c1"), 5)
 
 
 class TestSubscriptionHub(unittest.TestCase):
