@@ -59,6 +59,20 @@ class ConversationLog:
         self._idempotency[key] = event
         return seq, event
 
+    def list_from(self, conv_id: str, from_seq: int, limit: int | None = None) -> list[ConversationEvent]:
+        """Return events for ``conv_id`` with ``seq`` greater than or equal to ``from_seq``.
+
+        Results are ordered by ascending ``seq`` and constrained by ``limit``
+        when provided.
+        """
+
+        if from_seq < 0:
+            raise ValueError("from_seq must be non-negative")
+        events = self._events.get(conv_id, [])
+        start_index = max(from_seq - 1, 0)
+        slice_end = None if limit is None else start_index + max(limit, 0)
+        return list(events[start_index:slice_end])
+
     def list_since(self, conv_id: str, after_seq: int, limit: int | None = None) -> list[ConversationEvent]:
         """Return events for ``conv_id`` with ``seq`` greater than ``after_seq``.
 
@@ -68,10 +82,7 @@ class ConversationLog:
 
         if after_seq < 0:
             raise ValueError("after_seq must be non-negative")
-        events = self._events.get(conv_id, [])
-        start_index = after_seq
-        slice_end = None if limit is None else start_index + max(limit, 0)
-        return list(events[start_index:slice_end])
+        return self.list_from(conv_id, after_seq + 1, limit)
 
     @staticmethod
     def _to_b64(envelope_bytes_or_b64: bytes | str) -> str:

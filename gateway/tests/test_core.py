@@ -27,23 +27,35 @@ class TestConversationLog(unittest.TestCase):
         self.assertEqual(repeat_seq, 1)
         self.assertIs(first_event, repeat_event)
 
-    def test_list_since_orders_and_limits(self):
+    def test_list_from_inclusive_orders_and_limits(self):
         log = ConversationLog()
         for i in range(5):
             log.append("c1", f"m{i}", str(i), "d1", i)
 
-        window = log.list_since("c1", after_seq=2, limit=2)
+        window = log.list_from("c1", from_seq=3, limit=2)
         self.assertEqual([e.seq for e in window], [3, 4])
+        inclusive = log.list_from("c1", from_seq=1)
+        self.assertEqual([e.seq for e in inclusive], [1, 2, 3, 4, 5])
 
 
 class TestCursorStore(unittest.TestCase):
-    def test_ack_monotonicity(self):
+    def test_ack_tracks_next_seq(self):
         cursors = CursorStore()
 
+        self.assertEqual(cursors.next_seq("d1", "c1"), 1)
         cursors.ack("d1", "c1", 2)
-        with self.assertRaises(ValueError):
-            cursors.ack("d1", "c1", 1)
-        self.assertEqual(cursors.last_ack("d1", "c1"), 2)
+        self.assertEqual(cursors.next_seq("d1", "c1"), 3)
+
+        cursors.ack("d1", "c1", 1)
+        self.assertEqual(cursors.next_seq("d1", "c1"), 3)
+
+    def test_advance_is_monotonic(self):
+        cursors = CursorStore()
+
+        cursors.advance("d1", "c1", 2)
+        cursors.advance("d1", "c1", 2)
+        cursors.advance("d1", "c1", 1)
+        self.assertEqual(cursors.next_seq("d1", "c1"), 2)
 
 
 class TestSubscriptionHub(unittest.TestCase):

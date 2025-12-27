@@ -47,6 +47,100 @@ class TestGatewayServer(unittest.TestCase):
         self.assertEqual(lines[0]["seq"], 1)
         self.assertEqual(lines[0]["device_id"], "d1")
 
+    def test_replay_defaults_to_cursor(self):
+        frames = []
+        for i in range(6):
+            frames.append(
+                {
+                    "t": "conv.send",
+                    "conv_id": "c1",
+                    "msg_id": f"m{i}",
+                    "envelope_b64": "ZXZlbnQ=",
+                    "sender_device_id": "d1",
+                    "ts_ms": i,
+                }
+            )
+
+        frames.extend(
+            [
+                {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
+                {"t": "conv.ack", "device_id": "d1", "conv_id": "c1", "seq": 5},
+                {"t": "conv.replay", "device_id": "d1", "conv_id": "c1"},
+            ]
+        )
+        buffer = io.StringIO()
+
+        simulate(frames, buffer)
+
+        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
+        self.assertEqual([line["seq"] for line in lines], [6])
+
+    def test_replay_includes_from_seq(self):
+        frames = []
+        for i in range(6):
+            frames.append(
+                {
+                    "t": "conv.send",
+                    "conv_id": "c1",
+                    "msg_id": f"m{i}",
+                    "envelope_b64": "ZXZlbnQ=",
+                    "sender_device_id": "d1",
+                    "ts_ms": i,
+                }
+            )
+
+        frames.extend(
+            [
+                {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
+                {"t": "conv.ack", "device_id": "d1", "conv_id": "c1", "seq": 5},
+                {
+                    "t": "conv.replay",
+                    "device_id": "d1",
+                    "conv_id": "c1",
+                    "from_seq": 5,
+                },
+            ]
+        )
+        buffer = io.StringIO()
+
+        simulate(frames, buffer)
+
+        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
+        self.assertEqual([line["seq"] for line in lines], [5, 6])
+
+    def test_replay_updates_cursor_for_resume(self):
+        frames = []
+        for i in range(4):
+            frames.append(
+                {
+                    "t": "conv.send",
+                    "conv_id": "c1",
+                    "msg_id": f"m{i}",
+                    "envelope_b64": "ZXZlbnQ=",
+                    "sender_device_id": "d1",
+                    "ts_ms": i,
+                }
+            )
+
+        frames.extend(
+            [
+                {"t": "conv.subscribe", "device_id": "d1", "conv_id": "c1"},
+                {
+                    "t": "conv.replay",
+                    "device_id": "d1",
+                    "conv_id": "c1",
+                    "limit": 2,
+                },
+                {"t": "conv.replay", "device_id": "d1", "conv_id": "c1"},
+            ]
+        )
+        buffer = io.StringIO()
+
+        simulate(frames, buffer)
+
+        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
+        self.assertEqual([line["seq"] for line in lines], [1, 2, 3, 4])
+
 
 if __name__ == "__main__":
     unittest.main()

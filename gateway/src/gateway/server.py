@@ -62,12 +62,23 @@ def simulate(frames: Iterable[dict], output: TextIO) -> None:
         elif frame_type == "conv.ack":
             cursors.ack(frame["device_id"], frame["conv_id"], frame["seq"])
         elif frame_type == "conv.replay":
+            device_id = frame["device_id"]
             conv_id = frame["conv_id"]
-            after_seq = frame.get("after_seq", 0)
             limit = frame.get("limit")
-            events = log.list_since(conv_id, after_seq, limit)
+            from_seq = frame.get("from_seq")
+            after_seq = frame.get("after_seq")
+
+            if from_seq is None and after_seq is not None:
+                from_seq = after_seq + 1
+            if from_seq is None:
+                from_seq = cursors.next_seq(device_id, conv_id)
+
+            events = log.list_from(conv_id, from_seq, limit)
             for event in events:
                 hub.broadcast(event)
+
+            if events:
+                cursors.advance(device_id, conv_id, events[-1].seq + 1)
         else:
             raise ValueError(f"unsupported frame type: {frame_type}")
 
