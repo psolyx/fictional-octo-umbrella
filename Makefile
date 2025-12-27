@@ -25,15 +25,15 @@ help:
 
 # ---- Meta targets ----
 
-setup: components setup-node setup-rust setup-go
+setup: components-setup setup-node setup-rust setup-go
 
-fmt: components fmt-node fmt-rust fmt-go
+fmt: fmt-node fmt-rust fmt-go
 
-lint: components lint-node lint-rust lint-go
+lint: lint-node lint-rust lint-go
 
-test: components test-node test-rust test-go
+test: components-test test-node test-rust test-go
 
-check: fmt lint test
+check: components-check fmt lint test
 
 clean:
 	@echo "Nothing to clean at root by default. Add component clean targets as needed."
@@ -41,7 +41,25 @@ clean:
 # ---- Component dispatch (optional) ----
 # If you add gateway/Makefile or clients/cli/Makefile later, these will run automatically.
 
-components:
+components-setup:
+	@set -euo pipefail; \
+	for d in gateway clients/cli clients/web; do \
+	  if [[ -f "$$d/Makefile" ]]; then \
+	    echo "==> make -C $$d setup (component)"; \
+	    $(MAKE) -C "$$d" setup; \
+	  fi; \
+	done
+
+components-test:
+	@set -euo pipefail; \
+	for d in gateway clients/cli clients/web; do \
+	  if [[ -f "$$d/Makefile" ]]; then \
+	    echo "==> make -C $$d test (component)"; \
+	    $(MAKE) -C "$$d" test; \
+	  fi; \
+	done
+
+components-check:
 	@set -euo pipefail; \
 	for d in gateway clients/cli clients/web; do \
 	  if [[ -f "$$d/Makefile" ]]; then \
