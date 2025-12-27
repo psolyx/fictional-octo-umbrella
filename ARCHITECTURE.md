@@ -8,6 +8,10 @@ This repo implements a Polycentric-based social platform with a separate realtim
 - Protocol details live in `GATEWAY_SPEC.md`; roadmap lives in `ROADMAP.md`.
 - Use MUST/SHOULD/MAY only for protocol invariants.
 
+### Decision and risk tracking
+- Architecture decisions are logged in [DECISIONS.md](DECISIONS.md) with ADRs stored under `decisions/`.
+- Active risks and proof tests are tracked in [RISK_REGISTER.md](RISK_REGISTER.md).
+
 ---
 
 ## 1. Goals
