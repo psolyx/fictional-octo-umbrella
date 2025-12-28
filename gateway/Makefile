@@ -9,21 +9,20 @@ PYTHONPATH := $(CURDIR)/src
 
 .PHONY: setup fmt lint test check
 
-ALLOW_AIOHTTP_STUB ?= 1
+ALLOW_AIOHTTP_STUB ?= 0
 
 setup:
 	@echo "==> gateway: creating virtualenv and installing deps"
-	@test -d $(VENV) || python3 -m venv --system-site-packages $(VENV)
+	@test -d $(VENV) || python3 -m venv $(VENV)
 	@. $(VENV)/bin/activate && \
-		( python -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("aiohttp") else 1)' && \
-		  echo "aiohttp already installed; skipping download" || \
-		  if [ "$(ALLOW_AIOHTTP_STUB)" = "1" ]; then \
-		    echo "aiohttp not found; using stub modules (set ALLOW_AIOHTTP_STUB=0 to enforce install)"; \
-		  else \
-		    $(PYTHON) -m pip install -U pip && \
-		    $(PIP) install -r requirements.txt; \
-		  fi )
-
+	if [ "$(ALLOW_AIOHTTP_STUB)" = "1" ]; then \
+	echo "aiohttp stub explicitly requested; skipping dependency installation"; \
+	else \
+	$(PIP) install -r requirements.txt; \
+	$(PYTHON) -c 'import importlib.metadata as md, sys; expected="3.13.2"; installed=md.version("aiohttp"); '"'"'\
+	    sys.exit(f"Expected aiohttp=={expected}, found {installed}") if installed != expected else None'"'"''
+	fi
+	
 fmt:
 	@echo "==> gateway: no formatting configured; skipping"
 

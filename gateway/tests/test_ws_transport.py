@@ -1,12 +1,21 @@
 import asyncio
 import importlib
+import importlib.metadata
 import unittest
 
+EXPECTED_AIOHTTP_VERSION = "3.13.2"
+
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
-if _aiohttp_spec is not None:
-    from aiohttp.test_utils import TestClient, TestServer
-else:  # pragma: no cover - offline fallback
-    from gateway.aiohttp_stub.test_utils import TestClient, TestServer
+if _aiohttp_spec is None:
+    raise RuntimeError("aiohttp must be installed for gateway WS tests")
+
+from aiohttp.test_utils import TestClient, TestServer
+
+_installed_aiohttp = importlib.metadata.version("aiohttp")
+if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
+    raise RuntimeError(
+        f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway WS tests, found {_installed_aiohttp}"
+    )
 
 from gateway import ws_transport as wst
 from gateway.ws_transport import create_app
