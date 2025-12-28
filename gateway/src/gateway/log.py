@@ -31,18 +31,25 @@ class ConversationLog:
         envelope_bytes_or_b64: bytes | str,
         sender_device_id: str,
         ts_ms: int,
-    ) -> tuple[int, ConversationEvent]:
+    ) -> tuple[int, ConversationEvent, bool]:
         """Append a new event or return the existing one for the idempotency key.
 
         Sequence numbers are monotonic per conversation starting at 1. The
         original event is returned when the same ``(conv_id, msg_id)`` is
         appended multiple times.
+
+        Returns
+        -------
+        tuple
+            (seq, event, created) where ``created`` indicates whether a new
+            event was inserted (``True``) or an existing idempotent event was
+            returned (``False``).
         """
 
         key = (conv_id, msg_id)
         if key in self._idempotency:
             event = self._idempotency[key]
-            return event.seq, event
+            return event.seq, event, False
 
         envelope_b64 = self._to_b64(envelope_bytes_or_b64)
         seq = len(self._events.get(conv_id, [])) + 1
@@ -57,7 +64,7 @@ class ConversationLog:
 
         self._events.setdefault(conv_id, []).append(event)
         self._idempotency[key] = event
-        return seq, event
+        return seq, event, True
 
     def list_since(self, conv_id: str, after_seq: int, limit: int | None = None) -> list[ConversationEvent]:
         """Return events for ``conv_id`` with ``seq`` greater than ``after_seq``.

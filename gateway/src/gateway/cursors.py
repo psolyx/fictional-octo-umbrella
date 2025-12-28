@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 
 class CursorStore:
@@ -30,3 +30,9 @@ class CursorStore:
         """Return the last acknowledged sequence for the device/conversation."""
 
         return self.next_seq(device_id, conv_id) - 1
+
+    def list_cursors(self, device_id: str) -> List[tuple[str, int]]:
+        """Return all (conv_id, next_seq) tuples for the device sorted by conv_id."""
+
+        entries = [(conv, next_seq) for (dev, conv), next_seq in self._positions.items() if dev == device_id]
+        return sorted(entries, key=lambda item: item[0])

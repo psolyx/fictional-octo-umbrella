@@ -30,6 +30,17 @@ class SubscriptionHub:
         self._subscriptions.setdefault(conv_id, []).append(subscription)
         return subscription
 
+    def unsubscribe(self, subscription: Subscription) -> None:
+        subs = self._subscriptions.get(subscription.conv_id)
+        if not subs:
+            return
+        try:
+            subs.remove(subscription)
+        except ValueError:
+            return
+        if not subs:
+            self._subscriptions.pop(subscription.conv_id, None)
+
     def broadcast(self, event: ConversationEvent) -> None:
         for subscription in list(self._subscriptions.get(event.conv_id, [])):
             subscription.deliver(event)
