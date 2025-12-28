@@ -8,6 +8,7 @@ if _aiohttp_spec is not None:
 else:  # pragma: no cover - offline fallback
     from gateway.aiohttp_stub.test_utils import TestClient, TestServer
 
+from gateway import ws_transport as wst
 from gateway.ws_transport import create_app
 
 
@@ -127,6 +128,89 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws2.receive_json(), timeout=0.2)
 
         await ws2.close()
+
+    async def test_broadcasts_preserve_seq_order_with_concurrent_sends(self):
+        original_send_json = wst.web.WebSocketResponse.send_json
+
+        async def delayed_send_json(self, data, *args, **kwargs):
+            if data.get("t") == "conv.acked" and data.get("body", {}).get("msg_id") == "m1":
+                await asyncio.sleep(0.05)
+            return await original_send_json(self, data, *args, **kwargs)
+
+        wst.web.WebSocketResponse.send_json = delayed_send_json
+
+        sub_ws, _ = await self._start_session()
+        await sub_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
+
+        ws1, _ = await self._start_session()
+        ws2, _ = await self._start_session()
+
+        try:
+            await asyncio.gather(
+                ws1.send_json(
+                    {"v": 1, "t": "conv.send", "id": "send1", "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4=", "ts": 1}}
+                ),
+                ws2.send_json(
+                    {"v": 1, "t": "conv.send", "id": "send2", "body": {"conv_id": "c1", "msg_id": "m2", "env": "ZW4=", "ts": 2}}
+                ),
+            )
+
+            ack1 = await ws1.receive_json()
+            ack2 = await ws2.receive_json()
+
+            self.assertEqual(ack1["t"], "conv.acked")
+            self.assertEqual(ack2["t"], "conv.acked")
+
+            seqs = []
+            while len(seqs) < 2:
+                msg = await sub_ws.receive_json()
+                if msg["t"] == "conv.event":
+                    seqs.append(msg["body"]["seq"])
+
+            self.assertEqual(seqs, [1, 2])
+        finally:
+            wst.web.WebSocketResponse.send_json = original_send_json
+            await ws1.close()
+            await ws2.close()
+            await sub_ws.close()
+
+    async def test_replay_events_flush_before_live_events(self):
+        runtime = self.app["runtime"]
+
+        ws_sender, _ = await self._start_session()
+        await ws_sender.send_json(
+            {"v": 1, "t": "conv.send", "id": "send1", "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4=", "ts": 1}}
+        )
+        await ws_sender.receive_json()  # ack
+
+        original_subscribe = runtime.hub.subscribe
+
+        def wrapped_subscribe(device_id: str, conv_id: str, callback):
+            subscription = original_subscribe(device_id, conv_id, callback)
+            seq, event, created = runtime.log.append(conv_id, "m2", "ZW52Mg==", "d1", wst._now_ms())
+            if created:
+                runtime.hub.broadcast(event)
+            return subscription
+
+        runtime.hub.subscribe = wrapped_subscribe
+
+        ws_sub, _ = await self._start_session()
+
+        try:
+            await ws_sub.send_json({"v": 1, "t": "conv.subscribe", "id": "sub2", "body": {"conv_id": "c1", "from_seq": 1}})
+
+            events = []
+            while len(events) < 2:
+                msg = await ws_sub.receive_json()
+                if msg["t"] == "conv.event":
+                    events.append(msg)
+
+            self.assertEqual(events[0]["body"]["seq"], 1)
+            self.assertEqual(events[1]["body"]["seq"], 2)
+        finally:
+            runtime.hub.subscribe = original_subscribe
+            await ws_sender.close()
+            await ws_sub.close()
 
 
 if __name__ == "__main__":

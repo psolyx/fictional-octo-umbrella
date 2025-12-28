@@ -280,10 +280,24 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             from_seq = runtime.cursors.next_seq(session.device_id, conv_id)
                     events = runtime.log.list_from(conv_id, from_seq, limit=1000)
 
-                    subscription = runtime.hub.subscribe(session.device_id, conv_id, enqueue_event)
+                    buffered_events: List[ConversationEvent] = []
+                    buffering = True
+
+                    def buffering_enqueue(event: ConversationEvent) -> None:
+                        nonlocal buffering
+                        if buffering:
+                            buffered_events.append(event)
+                            return
+                        enqueue_event(event)
+
+                    subscription = runtime.hub.subscribe(session.device_id, conv_id, buffering_enqueue)
                     subscriptions.append(subscription)
 
                     for event in events:
+                        enqueue_event(event)
+
+                    buffering = False
+                    for event in buffered_events:
                         enqueue_event(event)
                 elif frame_type == "conv.send":
                     conv_id = body.get("conv_id")
@@ -297,6 +311,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     seq, event, created = runtime.log.append(
                         conv_id, msg_id, env, session.device_id, body.get("ts") or _now_ms()
                     )
+                    if created:
+                        runtime.hub.broadcast(event)
                     await ws.send_json(
                         {
                             "v": 1,
@@ -305,8 +321,6 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             "body": {"conv_id": conv_id, "msg_id": msg_id, "seq": seq},
                         }
                     )
-                    if created:
-                        runtime.hub.broadcast(event)
                 elif frame_type == "conv.ack":
                     conv_id = body.get("conv_id")
                     seq = body.get("seq")

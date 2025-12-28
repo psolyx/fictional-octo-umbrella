@@ -13,9 +13,7 @@ setup:
 	@echo "==> gateway: creating virtualenv and installing deps"
 	@test -d $(VENV) || python3 -m venv $(VENV)
 	$(PYTHON) -m pip install -U pip
-	@if ! $(PIP) install -r requirements.txt; then \
-	echo "==> gateway: pip install failed; continuing with existing environment"; \
-	fi
+	$(PIP) install -r requirements.txt
 
 fmt:
 	@echo "==> gateway: no formatting configured; skipping"
