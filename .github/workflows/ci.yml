@@ -10,5 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install gateway dependencies
+        run: ALLOW_AIOHTTP_STUB=0 make -C gateway setup
       - name: Run make check
-        run: make check
+        run: ALLOW_AIOHTTP_STUB=0 make check

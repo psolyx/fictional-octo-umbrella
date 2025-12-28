@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from typing import Callable, Iterable, TextIO
 
+_aiohttp_spec = importlib.util.find_spec("aiohttp")
+if _aiohttp_spec is not None:  # pragma: no cover - exercised when deps installed
+    from aiohttp import web
+else:  # pragma: no cover - offline fallback
+    from gateway.aiohttp_stub import web
+
 from .cursors import CursorStore
 from .hub import SubscriptionHub
 from .log import ConversationEvent, ConversationLog
+from .ws_transport import create_app
 
 
 def greet(name: str = "world") -> str:
@@ -57,8 +65,9 @@ def simulate(frames: Iterable[dict], output: TextIO) -> None:
             envelope_b64 = frame["envelope_b64"]
             sender_device_id = frame["sender_device_id"]
             ts_ms = frame["ts_ms"]
-            _, event = log.append(conv_id, msg_id, envelope_b64, sender_device_id, ts_ms)
-            hub.broadcast(event)
+            _, event, created = log.append(conv_id, msg_id, envelope_b64, sender_device_id, ts_ms)
+            if created:
+                hub.broadcast(event)
         elif frame_type == "conv.ack":
             cursors.ack(frame["device_id"], frame["conv_id"], frame["seq"])
         elif frame_type == "conv.replay":
@@ -118,11 +127,19 @@ def _run_greet(name: str, output: TextIO | None) -> int:
     return 0
 
 
+def _run_serve(args: argparse.Namespace) -> int:
+    app = create_app(ping_interval_s=args.ping_interval)
+    web.run_app(app, host=args.host, port=args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
     """Entry point for CLI commands."""
 
-    argv = argv or []
-    if not argv or (argv[0] not in {"simulate", "greet"} and not argv[0].startswith("-")):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv or (argv[0] not in {"simulate", "greet", "serve"} and not argv[0].startswith("-")):
         name = argv[0] if argv else "world"
         return _run_greet(name, output)
 
@@ -141,10 +158,22 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
         help="Path to JSON frames file; defaults to stdin",
     )
 
+    serve_parser = subparsers.add_parser("serve", help="Run the aiohttp gateway server")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    serve_parser.add_argument("--port", type=int, default=8080, help="Port to bind")
+    serve_parser.add_argument(
+        "--ping-interval",
+        type=int,
+        default=30,
+        help="Seconds between heartbeat pings",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "simulate":
         return _run_simulation(args, output or sys.stdout)
+    if args.command == "serve":
+        return _run_serve(args)
 
     return _run_greet(args.name, output)
 
