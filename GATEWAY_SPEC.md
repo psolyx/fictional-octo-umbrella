@@ -78,14 +78,23 @@ Semantics match WS frames.
      "t": "session.ready",
      "id": "s_01J...",
      "body": {
-       "session_token": "st_01J...",   
+       "session_token": "st_01J...",
        "resume_token": "rt_01J...",
-       "expires_at": 1766797200123
+       "expires_at": 1766797200123,
+       "cursors": [
+         { "conv_id": "c_7N7...", "next_seq": 1025 },
+         { "conv_id": "c_9X9...", "next_seq": 8 }
+       ]
      }
    }
    ```
    - `session_token` MUST be presented on subsequent writes (e.g., `Authorization: Session st_...` header for HTTP inbox).
    - `resume_token` MUST allow lossless reconnection without repeating authentication while it remains valid.
+   - `cursors` describes persisted per-device replay positions used as defaults for subscriptions.
+   - Each entry is `{conv_id, next_seq}` where `next_seq` is the next server-assigned seq the device SHOULD request (inclusive replay).
+   - If the server has no stored cursor for a conversation, the implicit default is `next_seq = 1`.
+   - Monotonicity: for a given (`device_id`, `conv_id`), `next_seq` MUST NOT decrease across responses.
+   - Back-compat: the field MAY be omitted; if omitted, clients must treat it as an empty list (no disclosure), and server-side cursor state is unchanged by omission.
 5. On authentication failure the server responds with `error` and closes the connection.
 
 ### 4.2 Resume flow
@@ -96,17 +105,15 @@ Semantics match WS frames.
     "t": "session.resume",
     "id": "c_02J...",
     "body": {
-      "resume_token": "rt_01J...",
-      "cursor": {
-        "conv_id": "c_7N7...",
-        "seq": 1024
-      }
+      "resume_token": "rt_01J..."
     }
   }
   ```
-- If the resume token is valid and within expiry, the server MUST accept it without re-authentication and reply with `session.ready` including a fresh `resume_token` and the persisted cursor (if any).
+- If the resume token is valid and within expiry, the server MUST accept it without re-authentication and reply with `session.ready` including a fresh `resume_token` and `cursors` as defined above.
 - If the resume token is invalid or expired, the server MUST respond with `error` (`resume_failed`) and require a new `session.start`.
 - A server MAY bound resume age; clients MUST be prepared to re-authenticate when requested.
+- Clients use the returned `cursors` as the default replay position when later sending `conv.subscribe` without `from_seq`.
+- Deprecated legacy cursor compatibility: servers MAY accept `session.resume.body.cursor` as a best-effort hint shaped like `{ "conv_id": "...", "after_seq": <int> }` (or `seq` defined as `after_seq`). This hint is exclusive and maps to `from_seq = after_seq + 1`, is optional, and MUST NOT regress stored cursors.
 
 ---
 
@@ -167,7 +174,21 @@ Semantics match WS frames.
     }
   }
   ```
-  - `from_seq` OPTIONAL: when provided, server MUST replay from `from_seq` (inclusive) subject to replay window; otherwise server resumes from the stored cursor for this device.
+  - `from_seq` OPTIONAL: when provided, server MUST replay from `from_seq` (inclusive) subject to replay window; otherwise server resumes from the stored cursor (`next_seq`) for this device as last surfaced in `session.ready` (default 1).
+- Legacy example (deprecated):
+  ```json
+  {
+    "v": 1,
+    "t": "conv.subscribe",
+    "id": "c_sub_legacy_01...",
+    "body": {
+      "conv_id": "c_7N7...",
+      "after_seq": 511
+    }
+  }
+  ```
+  - `after_seq` OPTIONAL, DEPRECATED: exclusive cursor hint; server maps to `from_seq = after_seq + 1`.
+  - If both `from_seq` and `after_seq` are provided, `from_seq` wins.
 - Server behavior:
   - Validate membership; reject with `error` if unauthorized.
   - Perform bounded replay (implementation-defined window) and then stream new events.
@@ -198,7 +219,9 @@ Semantics match WS frames.
     }
   }
   ```
-- The gateway MUST persist the highest acknowledged `seq` per (`device_id`, `conv_id`) and use it to resume after reconnect (including during `session.resume`).
+- The gateway MUST persist per (`device_id`, `conv_id`) acknowledged progress as a cursor stored as `next_seq`.
+- Acknowledging `seq = N` advances stored `next_seq` to at least `N + 1`, monotonically.
+- The stored `next_seq` is used to resume after reconnect (including during `session.resume`).
 
 ### 7.3 Send
 - Clients send ciphertext envelopes with `conv.send`:
