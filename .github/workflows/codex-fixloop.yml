@@ -1,0 +1,122 @@
+name: codex-fixloop
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number"
+        required: true
+        type: number
+      max_iters:
+        description: "Maximum iterations"
+        required: false
+        default: 3
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR head
+        id: resolve
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt(process.env.PR_NUMBER, 10);
+            if (Number.isNaN(prNumber)) {
+              core.setFailed('Invalid PR number');
+              return;
+            }
+            const { data: pr } = await github.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            if (pr.head.repo.full_name !== pr.base.repo.full_name) {
+              core.setFailed('Refusing to run on forks');
+              return;
+            }
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_repo_full_name', pr.head.repo.full_name);
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.resolve.outputs.head_sha }}
+      - name: Prepare branch
+        run: |
+          git checkout -B "${{ steps.resolve.outputs.head_ref }}" "${{ steps.resolve.outputs.head_sha }}"
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Install dependencies
+        run: |
+          ALLOW_AIOHTTP_STUB=0 make -C gateway setup
+      - name: Run PR checks and generate prompt
+        id: run_checks
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          LOG_PATH=/tmp/pr-check.log
+          PROMPT_PATH=/tmp/pr-fix-prompt.md
+          set +e
+          ./scripts/codex_fixloop.sh "$PR_NUMBER" "$LOG_PATH" "$PROMPT_PATH"
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=$EXIT_CODE" >>"$GITHUB_OUTPUT"
+          if [[ -f "$PROMPT_PATH" ]]; then
+            echo "prompt_exists=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "prompt_exists=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Upload check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-check-log
+          path: /tmp/pr-check.log
+      - name: Upload prompt
+        if: always() && steps.run_checks.outputs.prompt_exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-fix-prompt
+          path: /tmp/pr-fix-prompt.md
+      - name: Write summary
+        if: always()
+        run: |
+          EXIT_CODE="${{ steps.run_checks.outputs.exit_code }}"
+          LOG_PATH=/tmp/pr-check.log
+          PROMPT_PATH=/tmp/pr-fix-prompt.md
+          {
+            echo "## codex-fixloop summary"
+            if [[ "$EXIT_CODE" == "0" ]]; then
+              echo "Checks passed."
+            else
+              echo "Checks failed. Download the prompt artifact (if present), paste it into ChatGPT Plus, apply the resulting diff locally, push, and re-run this workflow."
+            fi
+            echo
+            echo "### Log tail"
+            echo '```'
+            tail -n 80 "$LOG_PATH" || true
+            echo '```'
+            if [[ -f "$PROMPT_PATH" ]]; then
+              echo
+              echo "### Prompt preview"
+              echo '```'
+              head -n 120 "$PROMPT_PATH"
+              echo '```'
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Fail on check failure
+        if: steps.run_checks.outputs.exit_code != '0'
+        run: exit 1
