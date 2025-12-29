@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import secrets
-from typing import Any, List
+from typing import Any, List, Union
 
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
 if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
@@ -16,6 +16,7 @@ from .hub import Subscription, SubscriptionHub
 # In-memory conversation log implementation used when SQLite durability is disabled.
 from .keypackages import InMemoryKeyPackageStore, SQLiteKeyPackageStore
 from .log import ConversationEvent, ConversationLog
+from .presence import LimitExceeded, Presence, RateLimitExceeded
 from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
 from .sqlite_log import SQLiteConversationLog
@@ -95,6 +96,7 @@ class Runtime:
         sessions: SessionStore,
         keypackages,
         backend: SQLiteBackend | None = None,
+        presence: Presence,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -102,6 +104,7 @@ class Runtime:
         self.sessions = sessions
         self.keypackages = keypackages
         self.backend = backend
+        self.presence = presence
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -114,6 +117,19 @@ def _unauthorized() -> web.Response:
 
 def _invalid_request(message: str) -> web.Response:
     return web.json_response({"code": "invalid_request", "message": message}, status=400)
+
+
+def _rate_limited(message: str) -> web.Response:
+    return web.json_response({"code": "rate_limited", "message": message}, status=429)
+
+
+def _limit_exceeded(message: str) -> web.Response:
+    return web.json_response({"code": "limit_exceeded", "message": message}, status=429)
+
+
+def _with_no_store(response: web.Response) -> web.Response:
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _authenticate_request(request: web.Request) -> Session | None:
@@ -194,12 +210,111 @@ async def handle_keypackage_rotate(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+def _no_store_response(data: dict[str, Any], status: int = 200) -> web.Response:
+    response = web.json_response(data, status=status)
+    return _with_no_store(response)
+
+
+async def handle_presence_lease(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    device_id = body.get("device_id")
+    ttl_seconds = body.get("ttl_seconds")
+    invisible = bool(body.get("invisible", False))
+    if not isinstance(device_id, str) or not isinstance(ttl_seconds, int):
+        return _with_no_store(_invalid_request("device_id and ttl_seconds required"))
+    if device_id != session.device_id:
+        return _with_no_store(_unauthorized())
+    try:
+        expires_at = runtime.presence.lease(device_id, ttl_seconds, invisible=invisible)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    return _no_store_response({"status": "ok", "expires_at": expires_at})
+
+
+async def handle_presence_renew(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    device_id = body.get("device_id")
+    ttl_seconds = body.get("ttl_seconds")
+    invisible = body.get("invisible")
+    if not isinstance(device_id, str) or not isinstance(ttl_seconds, int):
+        return _with_no_store(_invalid_request("device_id and ttl_seconds required"))
+    if invisible is not None and not isinstance(invisible, bool):
+        return _with_no_store(_invalid_request("invisible must be a boolean if provided"))
+    if device_id != session.device_id:
+        return _with_no_store(_unauthorized())
+    try:
+        expires_at = runtime.presence.renew(device_id, ttl_seconds, invisible=invisible)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    return _no_store_response({"status": "ok", "expires_at": expires_at})
+
+
+async def handle_presence_watch(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    contacts = body.get("contacts")
+    if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
+        return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
+    try:
+        runtime.presence.watch(session.device_id, contacts)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    except LimitExceeded as exc:
+        return _with_no_store(_limit_exceeded(str(exc)))
+    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.device_id)})
+
+
+async def handle_presence_unwatch(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    contacts = body.get("contacts")
+    if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
+        return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
+    try:
+        runtime.presence.unwatch(session.device_id, contacts)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.device_id)})
+
+
 def create_app(
     *,
     ping_interval_s: int = 30,
     ping_miss_limit: int = 2,
     max_msg_size: int = 1_048_576,
     db_path: str | None = None,
+    presence: Presence | None = None,
+    start_presence_sweeper: bool = True,
 ) -> web.Application:
     backend: SQLiteBackend | None = None
     if db_path is not None:
@@ -214,6 +329,7 @@ def create_app(
         sessions = SessionStore()
         keypackages = InMemoryKeyPackageStore()
 
+    presence = presence or Presence()
     hub = SubscriptionHub()
     runtime = Runtime(
         log=log,
@@ -222,6 +338,7 @@ def create_app(
         sessions=sessions,
         keypackages=keypackages,
         backend=backend,
+        presence=presence,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -234,12 +351,26 @@ def create_app(
     app.router.add_post("/v1/keypackages", handle_keypackage_publish)
     app.router.add_post("/v1/keypackages/fetch", handle_keypackage_fetch)
     app.router.add_post("/v1/keypackages/rotate", handle_keypackage_rotate)
+    app.router.add_post("/v1/presence/lease", handle_presence_lease)
+    app.router.add_post("/v1/presence/renew", handle_presence_renew)
+    app.router.add_post("/v1/presence/watch", handle_presence_watch)
+    app.router.add_post("/v1/presence/unwatch", handle_presence_unwatch)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
             backend.close()
 
         app.on_cleanup.append(close_db)
+
+    async def start_presence(_: web.Application) -> None:
+        if start_presence_sweeper:
+            presence.start_sweeper()
+
+    async def stop_presence(_: web.Application) -> None:
+        await presence.stop_sweeper()
+
+    app.on_startup.append(start_presence)
+    app.on_cleanup.append(stop_presence)
     return app
 
 
@@ -256,7 +387,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
     last_activity = asyncio.get_event_loop().time()
     missed_heartbeats = 0
-    outbound: asyncio.Queue[ConversationEvent | None] = asyncio.Queue(maxsize=1000)
+    outbound: asyncio.Queue[Union[ConversationEvent, dict, None]] = asyncio.Queue(maxsize=1000)
     subscriptions: List[Subscription] = []
     session: Session | None = None
     closed = False
@@ -273,7 +404,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         last_activity = asyncio.get_event_loop().time()
         missed_heartbeats = 0
 
-    def enqueue_event(event: ConversationEvent) -> None:
+    def enqueue_event(event: ConversationEvent | dict) -> None:
         try:
             outbound.put_nowait(event)
         except asyncio.QueueFull:
@@ -285,19 +416,22 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 event = await outbound.get()
                 if event is None:
                     break
-                await ws.send_json(
-                    {
-                        "v": 1,
-                        "t": "conv.event",
-                        "body": {
-                            "conv_id": event.conv_id,
-                            "seq": event.seq,
-                            "msg_id": event.msg_id,
-                            "env": event.envelope_b64,
-                            "sender_device_id": event.sender_device_id,
-                        },
-                    }
-                )
+                if isinstance(event, ConversationEvent):
+                    await ws.send_json(
+                        {
+                            "v": 1,
+                            "t": "conv.event",
+                            "body": {
+                                "conv_id": event.conv_id,
+                                "seq": event.seq,
+                                "msg_id": event.msg_id,
+                                "env": event.envelope_b64,
+                                "sender_device_id": event.sender_device_id,
+                            },
+                        }
+                    )
+                else:
+                    await ws.send_json(event)
         except asyncio.CancelledError:
             return
 
@@ -386,6 +520,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             },
         }
         await ws.send_json(ready_frame)
+
+        runtime.presence.register_callback(device_id, enqueue_event)
 
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
@@ -485,6 +621,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         writer_task.cancel()
         for subscription in subscriptions:
             runtime.hub.unsubscribe(subscription)
+        if session is not None:
+            runtime.presence.unregister_callback(session.device_id)
         if not outbound.empty():
             try:
                 outbound.put_nowait(None)

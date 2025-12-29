@@ -328,6 +328,8 @@ Semantics match WS frames.
 ## 9. Presence (ephemeral lease model)
 - All presence endpoints MUST include `Cache-Control: no-store` and responses MUST NOT be cached by intermediaries or clients.
 - Presence APIs MUST be rate-limited at the application layer.
+- Lease TTLs MUST be clamped server-side to a minimum of 15 seconds and a maximum of 300 seconds.
+- Until Polycentric contact graphs are available, delivery MUST be gated by mutual watch: a watcher only receives updates if the target's watchlist includes the watcher.
 
 ### 9.1 Lease and renew
 - Endpoint: `POST /v1/presence/lease`
@@ -367,7 +369,7 @@ Semantics match WS frames.
   ```
 - Status is lease-based; absence of renewal implies expiration.
 - “Invisible mode” hides a user from watchers except whitelisted contacts; server MUST suppress updates accordingly.
-- `last_seen_bucket` is coarse (e.g., `now`, `5m`, `1h`, `1d`).
+- `last_seen_bucket` is coarse (e.g., `now`, `5m`, `1h`, `1d`, `7d`).
 
 ### 9.4 SSE/WS consumption
 - Presence updates MAY be delivered on the same WS connection as conversations or via SSE.
