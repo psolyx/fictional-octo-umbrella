@@ -167,6 +167,70 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         await ws1.close()
         await ws2.close()
 
+    async def test_blocklist_prevents_updates_and_unblock_restores(self):
+        clock = FakeClock()
+        presence = Presence(PresenceConfig(min_ttl_seconds=1), now_func=clock.now)
+        await self._setup_app(presence)
+
+        target_session = await self._create_session("target", "t1")
+        watcher_session1 = await self._create_session("watcher", "w1")
+        watcher_session2 = await self._create_session("watcher", "w2")
+
+        await self.client.post(
+            "/v1/presence/watch",
+            json={"contacts": ["target"]},
+            headers={"Authorization": f"Bearer {watcher_session1.session_token}"},
+        )
+        await self.client.post(
+            "/v1/presence/watch",
+            json={"contacts": ["watcher"]},
+            headers={"Authorization": f"Bearer {target_session.session_token}"},
+        )
+
+        ws1 = await self._start_ws("watcher", "w1")
+        ws2 = await self._start_ws("watcher", "w2")
+
+        block_resp = await self.client.post(
+            "/v1/presence/block",
+            json={"contacts": ["target"]},
+            headers={"Authorization": f"Bearer {watcher_session1.session_token}"},
+        )
+        self.assertEqual(block_resp.status, 200)
+        self.assertEqual((await block_resp.json())["blocked"], 1)
+
+        await self.client.post(
+            "/v1/presence/lease",
+            json={"device_id": "t1", "ttl_seconds": 2},
+            headers={"Authorization": f"Bearer {target_session.session_token}"},
+        )
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(ws1.receive_json(), timeout=0.5)
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(ws2.receive_json(), timeout=0.5)
+
+        unblock_resp = await self.client.post(
+            "/v1/presence/unblock",
+            json={"contacts": ["target"]},
+            headers={"Authorization": f"Bearer {watcher_session1.session_token}"},
+        )
+        self.assertEqual(unblock_resp.status, 200)
+        self.assertEqual((await unblock_resp.json())["blocked"], 0)
+
+        await self.client.post(
+            "/v1/presence/lease",
+            json={"device_id": "t1", "ttl_seconds": 3},
+            headers={"Authorization": f"Bearer {target_session.session_token}"},
+        )
+
+        update1 = await asyncio.wait_for(ws1.receive_json(), timeout=1)
+        update2 = await asyncio.wait_for(ws2.receive_json(), timeout=1)
+        self.assertEqual(update1["body"]["status"], "online")
+        self.assertEqual(update2["body"]["status"], "online")
+
+        await ws1.close()
+        await ws2.close()
+
     async def test_mutual_watch_gating_user_level(self):
         clock = FakeClock()
         presence = Presence(PresenceConfig(min_ttl_seconds=1), now_func=clock.now)

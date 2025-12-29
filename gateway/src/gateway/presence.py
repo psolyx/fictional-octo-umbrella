@@ -14,6 +14,8 @@ class PresenceConfig:
     max_watchlist_size: int = 256
     max_watchers_per_target: int = 256
     watch_mutations_per_min: int = 60
+    max_blocklist_size: int = 256
+    block_mutations_per_min: int = 60
     renews_per_min: int = 60
     sweeper_interval_seconds: float = 1.0
 
@@ -62,12 +64,14 @@ class Presence:
         self._now = now_func
         self._leases: Dict[str, Lease] = {}
         self._watchlists: Dict[str, Set[str]] = {}
+        self._blocklists: Dict[str, Set[str]] = {}
         self._reverse_watchers: Dict[str, Set[str]] = {}
         self._callbacks: Dict[str, Callable[[dict], None]] = {}
         self._device_users: Dict[str, str] = {}
         self._user_devices: Dict[str, Set[str]] = {}
         self._user_status: Dict[str, UserStatus] = {}
         self._watch_rate = FixedWindowRateLimiter(self.config.watch_mutations_per_min)
+        self._block_rate = FixedWindowRateLimiter(self.config.block_mutations_per_min)
         self._renew_rate = FixedWindowRateLimiter(self.config.renews_per_min)
         self._sweeper_task: asyncio.Task | None = None
 
@@ -129,7 +133,7 @@ class Presence:
         target_watchlist = self._watchlists.get(target_user_id, set())
         watchers = self._reverse_watchers.get(target_user_id, set())
         for watcher in watchers:
-            if watcher in target_watchlist:
+            if watcher in target_watchlist and not self.is_blocked(watcher, target_user_id):
                 yield watcher
 
     def _fanout(self, watcher_user_id: str, frame: dict) -> None:
@@ -237,7 +241,7 @@ class Presence:
         now_ms = self._now()
         if not self._watch_rate.allow(watcher_user_id, now_ms):
             raise RateLimitExceeded("watch mutations exceeded")
-        contacts_set = {c for c in contacts if isinstance(c, str)}
+        contacts_set = {c for c in contacts if isinstance(c, str) and not self.is_blocked(watcher_user_id, c)}
         watchlist = self._watchlists.get(watcher_user_id, set())
         new_total = len(watchlist | contacts_set)
         if new_total > self.config.max_watchlist_size:
@@ -279,4 +283,42 @@ class Presence:
 
     def watchlist_size(self, watcher_user_id: str) -> int:
         return len(self._watchlists.get(watcher_user_id, set()))
+
+    def block(self, blocker_user_id: str, targets: Iterable[str]) -> None:
+        now_ms = self._now()
+        if not self._block_rate.allow(blocker_user_id, now_ms):
+            raise RateLimitExceeded("block mutations exceeded")
+
+        targets_set = {t for t in targets if isinstance(t, str)}
+        blocklist = self._blocklists.get(blocker_user_id, set())
+        new_total = len(blocklist | targets_set)
+        if new_total > self.config.max_blocklist_size:
+            raise LimitExceeded("blocklist too large")
+
+        if targets_set:
+            blocklist |= targets_set
+            self._blocklists[blocker_user_id] = blocklist
+
+    def unblock(self, blocker_user_id: str, targets: Iterable[str]) -> None:
+        now_ms = self._now()
+        if not self._block_rate.allow(blocker_user_id, now_ms):
+            raise RateLimitExceeded("block mutations exceeded")
+
+        targets_set = {t for t in targets if isinstance(t, str)}
+        blocklist = self._blocklists.get(blocker_user_id, set())
+        for target in targets_set:
+            blocklist.discard(target)
+
+        if blocklist:
+            self._blocklists[blocker_user_id] = blocklist
+        elif blocker_user_id in self._blocklists:
+            self._blocklists.pop(blocker_user_id, None)
+
+    def is_blocked(self, user_a: str, user_b: str) -> bool:
+        if user_a == user_b:
+            return False
+        return user_b in self._blocklists.get(user_a, set()) or user_a in self._blocklists.get(user_b, set())
+
+    def blocklist_size(self, user_id: str) -> int:
+        return len(self._blocklists.get(user_id, set()))
 
