@@ -1,0 +1,70 @@
+name: codex-fixloop
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to run codex-fixloop against"
+        required: true
+  issue_comment:
+    types: [created]
+
+jobs:
+  codex-fixloop:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve PR head
+        id: resolve_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = (() => {
+              if (context.payload?.inputs?.pr) {
+                return Number(context.payload.inputs.pr);
+              }
+
+              if (context.payload?.issue?.pull_request) {
+                return context.issue.number;
+              }
+
+              return undefined;
+            })();
+
+            if (!prNumber || Number.isNaN(prNumber)) {
+              core.setFailed('No pull request number provided.');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+              core.setFailed('Refusing to run codex-fixloop on forked PR.');
+              return;
+            }
+
+            core.setOutput('pr-number', prNumber.toString());
+            core.setOutput('ref', pr.head.sha);
+            core.setOutput('ref-name', pr.head.ref);
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve_pr.outputs.ref }}
+
+      - name: Run codex fixloop
+        run: ./scripts/codex_fixloop.sh
+
+      - name: Upload codex fixloop log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-check-log-${{ steps.resolve_pr.outputs.pr-number }}
+          path: /tmp/pr-check.log
+          if-no-files-found: ignore
