@@ -284,6 +284,89 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         await member_ws.close()
         await outsider_ws.close()
 
+    async def test_subscription_revoked_on_removal(self):
+        owner_ws, owner_ready = await self._start_session(auth_token="owner", device_id="downer")
+        await self._create_room(owner_ready["body"]["session_token"], "c1", members=["member"])
+
+        member_ws, _ = await self._start_session(auth_token="member", device_id="dmember")
+        await member_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1"}})
+
+        resp = await self.client.post(
+            "/v1/rooms/remove",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {owner_ready['body']['session_token']}"},
+        )
+        self.assertEqual(resp.status, 200)
+        await resp.json()
+
+        await owner_ws.send_json(
+            {
+                "v": 1,
+                "t": "conv.send",
+                "id": "send1",
+                "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4=", "ts": 1},
+            }
+        )
+        await owner_ws.receive_json()  # ack
+
+        error = await member_ws.receive_json()
+        self.assertEqual(error["t"], "error")
+        self.assertEqual(error["body"], {"code": "forbidden", "message": "membership revoked"})
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(member_ws.receive_json(), timeout=0.2)
+
+        await owner_ws.close()
+        await member_ws.close()
+
+    async def test_owner_can_promote_and_demote_admin(self):
+        owner_ws, owner_ready = await self._start_session(auth_token="owner", device_id="downer")
+        await self._create_room(owner_ready["body"]["session_token"], "c1", members=["member"])
+
+        resp = await self.client.post(
+            "/v1/rooms/promote",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {owner_ready['body']['session_token']}"},
+        )
+        self.assertEqual(resp.status, 200)
+        await resp.json()
+
+        admin_ws, admin_ready = await self._start_session(auth_token="member", device_id="dmember")
+        invite_resp = await self.client.post(
+            "/v1/rooms/invite",
+            json={"conv_id": "c1", "members": ["new"]},
+            headers={"Authorization": f"Bearer {admin_ready['body']['session_token']}"},
+        )
+        self.assertEqual(invite_resp.status, 200)
+        await invite_resp.json()
+
+        remove_resp = await self.client.post(
+            "/v1/rooms/remove",
+            json={"conv_id": "c1", "members": ["new"]},
+            headers={"Authorization": f"Bearer {admin_ready['body']['session_token']}"},
+        )
+        self.assertEqual(remove_resp.status, 200)
+        await remove_resp.json()
+
+        demote_resp = await self.client.post(
+            "/v1/rooms/demote",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {owner_ready['body']['session_token']}"},
+        )
+        self.assertEqual(demote_resp.status, 200)
+        await demote_resp.json()
+
+        forbidden_resp = await self.client.post(
+            "/v1/rooms/invite",
+            json={"conv_id": "c1", "members": ["late"]},
+            headers={"Authorization": f"Bearer {admin_ready['body']['session_token']}"},
+        )
+        self.assertEqual(forbidden_resp.status, 403)
+        await forbidden_resp.json()
+
+        await admin_ws.close()
+        await owner_ws.close()
+
 
 if __name__ == "__main__":
     unittest.main()

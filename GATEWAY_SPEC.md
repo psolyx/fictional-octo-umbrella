@@ -293,6 +293,7 @@ Semantics match WS frames.
 - Server MUST enforce membership for both streaming and persistence operations:
   - `conv.subscribe`/replay MUST return `error.forbidden` to non-members and MUST NOT deliver history.
   - `conv.send` MUST return `error.forbidden` to non-members and MUST NOT append or broadcast the payload.
+  - Active subscriptions MUST stop receiving `conv.event` once membership is revoked; servers SHOULD unsubscribe the device and MAY emit a one-time `{code: "forbidden", message: "membership revoked"}` error frame instead of closing the socket.
 - Deterministic caps and rate limits (per conversation):
   - MAX_MEMBERS_PER_CONV: 1024 (server MAY reject above this cap using `limit_exceeded`).
   - INVITES_PER_MIN, REMOVES_PER_MIN: 60 per actor; excess MUST return `rate_limited`.
@@ -338,6 +339,28 @@ Semantics match WS frames.
   - Only owners/admins may remove; removing the owner MUST be rejected (`forbidden`).
   - Rate limited per actor per conversation (errors: `rate_limited`).
   - Success response: `{ "status": "ok" }`.
+
+### 8.4 Promote admin
+- Endpoint: `POST /v1/rooms/promote` (HTTP, authenticated as above).
+- Body:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "members": ["u_03F...", "u_04F..."]
+  }
+  ```
+- Semantics:
+  - Only the `owner` may promote.
+  - Promoting a non-member is a no-op; the owner cannot be demoted or re-labeled.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+### 8.5 Demote admin
+- Endpoint: `POST /v1/rooms/demote` (HTTP, authenticated as above).
+- Body matches promote.
+- Semantics:
+  - Only the `owner` may demote; demoting non-admins is a no-op.
+  - The owner role is immutable and MUST NOT be changed.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
 
 ---
 

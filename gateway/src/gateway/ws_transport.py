@@ -465,6 +465,56 @@ async def handle_room_remove(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_room_promote(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.promote_admin(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_demote(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.demote_admin(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
 def create_app(
     *,
     ping_interval_s: int = 30,
@@ -526,6 +576,8 @@ def create_app(
     app.router.add_post("/v1/rooms/create", handle_room_create)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
+    app.router.add_post("/v1/rooms/promote", handle_room_promote)
+    app.router.add_post("/v1/rooms/demote", handle_room_demote)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
@@ -746,22 +798,53 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     buffered_events: List[ConversationEvent] = []
                     buffering = True
 
+                    revoked = False
+                    error_sent = False
+                    subscription: Subscription | None = None
+
+                    def stop_subscription() -> None:
+                        nonlocal revoked, error_sent
+                        if revoked:
+                            return
+                        revoked = True
+                        if subscription is not None:
+                            runtime.hub.unsubscribe(subscription)
+                        if not error_sent:
+                            enqueue_event(
+                                {
+                                    "v": 1,
+                                    "t": "error",
+                                    "body": {"code": "forbidden", "message": "membership revoked"},
+                                }
+                            )
+                            error_sent = True
+
+                    def guarded_enqueue(event: ConversationEvent) -> None:
+                        if revoked:
+                            return
+                        if not runtime.conversations.is_member(event.conv_id, session.user_id):
+                            stop_subscription()
+                            return
+                        enqueue_event(event)
+
                     def buffering_enqueue(event: ConversationEvent) -> None:
                         nonlocal buffering
+                        if revoked:
+                            return
                         if buffering:
                             buffered_events.append(event)
                             return
-                        enqueue_event(event)
+                        guarded_enqueue(event)
 
                     subscription = runtime.hub.subscribe(session.device_id, conv_id, buffering_enqueue)
                     subscriptions.append(subscription)
 
                     for event in events:
-                        enqueue_event(event)
+                        guarded_enqueue(event)
 
                     buffering = False
                     for event in buffered_events:
-                        enqueue_event(event)
+                        guarded_enqueue(event)
                 elif frame_type == "conv.send":
                     conv_id = body.get("conv_id")
                     msg_id = body.get("msg_id")
