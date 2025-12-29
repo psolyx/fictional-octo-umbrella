@@ -27,40 +27,44 @@ jobs:
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # github-script defaults to the workflow GITHUB_TOKEN; explicit token not required
+          # github-token: ${{ github.token }}
           script: |
             const prNumber = parseInt(process.env.PR_NUMBER, 10);
             if (Number.isNaN(prNumber)) {
               core.setFailed('Invalid PR number');
               return;
             }
-            const { data: pr } = await github.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+
+            const { owner, repo } = context.repo;
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
               pull_number: prNumber,
             });
+
             if (pr.head.repo.full_name !== pr.base.repo.full_name) {
               core.setFailed('Refusing to run on forks');
               return;
             }
+
             core.setOutput('head_ref', pr.head.ref);
             core.setOutput('head_sha', pr.head.sha);
-            core.setOutput('head_repo_full_name', pr.head.repo.full_name);
+
       - name: Checkout PR head
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ steps.resolve.outputs.head_sha }}
+
       - name: Prepare branch
         run: |
           git checkout -B "${{ steps.resolve.outputs.head_ref }}" "${{ steps.resolve.outputs.head_sha }}"
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Install dependencies
         run: |
           ALLOW_AIOHTTP_STUB=0 make -C gateway setup
+
       - name: Run PR checks and generate prompt
         id: run_checks
         continue-on-error: true
@@ -79,18 +83,23 @@ jobs:
           else
             echo "prompt_exists=false" >>"$GITHUB_OUTPUT"
           fi
+
       - name: Upload check log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr-check-log
           path: /tmp/pr-check.log
+          if-no-files-found: ignore
+
       - name: Upload prompt
         if: always() && steps.run_checks.outputs.prompt_exists == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pr-fix-prompt
           path: /tmp/pr-fix-prompt.md
+          if-no-files-found: ignore
+
       - name: Write summary
         if: always()
         run: |
@@ -113,10 +122,11 @@ jobs:
               echo
               echo "### Prompt preview"
               echo '```'
-              head -n 120 "$PROMPT_PATH"
+              head -n 120 "$PROMPT_PATH" || true
               echo '```'
             fi
           } >>"$GITHUB_STEP_SUMMARY"
+
       - name: Fail on check failure
         if: steps.run_checks.outputs.exit_code != '0'
         run: exit 1

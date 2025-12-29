@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import secrets
-import time
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, List
 
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
 if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
@@ -15,15 +13,12 @@ else:  # pragma: no cover - offline fallback
 
 from .cursors import CursorStore
 from .hub import Subscription, SubscriptionHub
+# In-memory conversation log implementation used when SQLite durability is disabled.
 from .log import ConversationEvent, ConversationLog
-
-
-@dataclass
-class Session:
-    device_id: str
-    session_token: str
-    resume_token: str
-    expires_at_ms: int
+from .sqlite_backend import SQLiteBackend
+from .sqlite_cursors import SQLiteCursorStore
+from .sqlite_log import SQLiteConversationLog
+from .sqlite_sessions import Session, SQLiteSessionStore, _now_ms
 
 
 class SessionStore:
@@ -31,8 +26,8 @@ class SessionStore:
 
     def __init__(self, ttl_ms: int = 60 * 60 * 1000) -> None:
         self._ttl_ms = ttl_ms
-        self._by_session: Dict[str, Session] = {}
-        self._by_resume: Dict[str, Session] = {}
+        self._by_session: dict[str, Session] = {}
+        self._by_resume: dict[str, Session] = {}
 
     def create(self, device_id: str) -> Session:
         now_ms = _now_ms()
@@ -55,6 +50,18 @@ class SessionStore:
             return None
         return session
 
+    def consume_resume(self, resume_token: str) -> Session | None:
+        session = self._by_resume.pop(resume_token, None)
+        if session is None:
+            return None
+        if session.expires_at_ms <= _now_ms():
+            self.invalidate(session)
+            return None
+        session.resume_token = f"rt_{secrets.token_urlsafe(16)}"
+        session.expires_at_ms = _now_ms() + self._ttl_ms
+        self._by_resume[session.resume_token] = session
+        return session
+
     def rotate_resume(self, session: Session) -> Session:
         old_token = session.resume_token
         session.resume_token = f"rt_{secrets.token_urlsafe(16)}"
@@ -69,11 +76,20 @@ class SessionStore:
 
 
 class Runtime:
-    def __init__(self) -> None:
-        self.log = ConversationLog()
-        self.cursors = CursorStore()
-        self.hub = SubscriptionHub()
-        self.sessions = SessionStore()
+    def __init__(
+        self,
+        *,
+        log: ConversationLog,
+        cursors: CursorStore,
+        hub: SubscriptionHub,
+        sessions: SessionStore,
+        backend: SQLiteBackend | None = None,
+    ) -> None:
+        self.log = log
+        self.cursors = cursors
+        self.hub = hub
+        self.sessions = sessions
+        self.backend = backend
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -81,9 +97,31 @@ async def handle_health(_: web.Request) -> web.Response:
 
 
 def create_app(
-    *, ping_interval_s: int = 30, ping_miss_limit: int = 2, max_msg_size: int = 1_048_576
+    *,
+    ping_interval_s: int = 30,
+    ping_miss_limit: int = 2,
+    max_msg_size: int = 1_048_576,
+    db_path: str | None = None,
 ) -> web.Application:
-    runtime = Runtime()
+    backend: SQLiteBackend | None = None
+    if db_path is not None:
+        backend = SQLiteBackend(db_path)
+        log = SQLiteConversationLog(backend)
+        cursors = SQLiteCursorStore(backend)
+        sessions: SessionStore = SQLiteSessionStore(backend)
+    else:
+        log = ConversationLog()
+        cursors = CursorStore()
+        sessions = SessionStore()
+
+    hub = SubscriptionHub()
+    runtime = Runtime(
+        log=log,
+        cursors=cursors,
+        hub=hub,
+        sessions=sessions,
+        backend=backend,
+    )
     app = web.Application()
     app["runtime"] = runtime
     app["ws_config"] = {
@@ -93,11 +131,12 @@ def create_app(
     }
     app.router.add_get("/healthz", handle_health)
     app.router.add_get("/v1/ws", websocket_handler)
+    if backend is not None:
+        async def close_db(_: web.Application) -> None:
+            backend.close()
+
+        app.on_cleanup.append(close_db)
     return app
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _error_frame(code: str, message: str, *, request_id: str | None = None) -> dict[str, Any]:
@@ -215,36 +254,34 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 )
                 await ws.close()
                 return ws
-            session = runtime.sessions.get_by_resume(resume_token)
+            session = runtime.sessions.consume_resume(resume_token)
             if session is None:
                 await ws.send_json(
                     _error_frame("resume_failed", "resume token invalid or expired", request_id=payload.get("id"))
                 )
                 await ws.close()
                 return ws
-            session = runtime.sessions.rotate_resume(session)
         else:
             await ws.send_json(_error_frame("invalid_request", "first frame must start session", request_id=payload.get("id")))
             await ws.close()
             return ws
 
         mark_activity()
-        await ws.send_json(
-            {
-                "v": 1,
-                "t": "session.ready",
-                "id": payload.get("id"),
-                "body": {
-                    "session_token": session.session_token,
-                    "resume_token": session.resume_token,
-                    "expires_at": session.expires_at_ms,
-                    "cursors": [
-                        {"conv_id": conv_id, "next_seq": next_seq}
-                        for conv_id, next_seq in runtime.cursors.list_cursors(session.device_id)
-                    ],
-                },
-            }
-        )
+        device_id = session.device_id
+        cursor_rows = runtime.cursors.list_cursors(device_id)
+        cursors = [{"conv_id": conv_id, "next_seq": next_seq} for conv_id, next_seq in cursor_rows]
+        ready_frame = {
+            "v": 1,
+            "t": "session.ready",
+            "id": payload.get("id"),
+            "body": {
+                "session_token": session.session_token,
+                "resume_token": session.resume_token,
+                "expires_at": session.expires_at_ms,
+                "cursors": cursors,
+            },
+        }
+        await ws.send_json(ready_frame)
 
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:

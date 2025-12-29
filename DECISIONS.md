@@ -36,3 +36,4 @@ Each ADR MUST include the following sections, using the headings exactly:
 ## Index
 - [0001: Record architecture decisions with ADRs](decisions/0001-record-architecture-decisions.md)
 - [0002: Gateway sequencing, idempotency, and echo-before-apply](decisions/0002-gateway-sequencing-and-idempotency.md)
+- [0003: SQLite durability for the gateway](decisions/0003-sqlite-durability-v1.md)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(git rev-parse --show-toplevel)"
+
 PR_NUMBER="${1:-}"
 LOG_PATH="${2:-/tmp/pr-check.log}"
 PROMPT_PATH="${3:-/tmp/pr-fix-prompt.md}"
