@@ -65,6 +65,26 @@ class InMemoryConversationStore:
                 continue
             roster.pop(user_id, None)
 
+    def promote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_owner(conversation, actor_user_id)
+        roster = self._members.setdefault(conv_id, {})
+        for user_id in members:
+            if user_id == conversation.owner_user_id:
+                continue
+            if user_id in roster:
+                roster[user_id] = "admin"
+
+    def demote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_owner(conversation, actor_user_id)
+        roster = self._members.setdefault(conv_id, {})
+        for user_id in members:
+            if user_id == conversation.owner_user_id:
+                continue
+            if roster.get(user_id) == "admin":
+                roster[user_id] = "member"
+
     def is_member(self, conv_id: str, user_id: str) -> bool:
         roster = self._members.get(conv_id)
         if roster is None:
@@ -89,6 +109,10 @@ class InMemoryConversationStore:
     def _require_admin(self, conversation: Conversation, actor_user_id: str) -> None:
         role = self.role(conversation.conv_id, actor_user_id)
         if role not in ("owner", "admin"):
+            raise PermissionError("forbidden")
+
+    def _require_owner(self, conversation: Conversation, actor_user_id: str) -> None:
+        if conversation.owner_user_id != actor_user_id:
             raise PermissionError("forbidden")
 
 
@@ -190,6 +214,50 @@ class SQLiteConversationStore:
             finally:
                 cursor.close()
 
+    def promote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_owner(conversation, actor_user_id)
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    if member == conversation.owner_user_id:
+                        continue
+                    cursor.execute(
+                        "UPDATE conversation_members SET role='admin' WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def demote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_owner(conversation, actor_user_id)
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    if member == conversation.owner_user_id:
+                        continue
+                    cursor.execute(
+                        "UPDATE conversation_members SET role='member' WHERE conv_id=? AND user_id=? AND role='admin'",
+                        (conv_id, member),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
     def is_member(self, conv_id: str, user_id: str) -> bool:
         with self._backend.lock:
             row = self._backend.connection.execute(
@@ -229,4 +297,8 @@ class SQLiteConversationStore:
     def _require_admin(self, conversation: Conversation, actor_user_id: str) -> None:
         role = self.role(conversation.conv_id, actor_user_id)
         if role not in ("owner", "admin"):
+            raise PermissionError("forbidden")
+
+    def _require_owner(self, conversation: Conversation, actor_user_id: str) -> None:
+        if conversation.owner_user_id != actor_user_id:
             raise PermissionError("forbidden")
