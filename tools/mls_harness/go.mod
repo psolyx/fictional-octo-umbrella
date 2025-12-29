@@ -1,6 +1,6 @@
 module github.com/polycentric/fictional-octo-umbrella/tools/mls_harness
 
-go 1.24.3
+go 1.22
 
 require github.com/cisco/go-mls v0.0.0-20210331162924-158a3829b839
 
