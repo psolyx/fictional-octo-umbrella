@@ -324,7 +324,7 @@ Semantics match WS frames.
 - Requests MUST be authenticated for the owning user; rotate only affects the provided `device_id` under that user.
 
 ### 8.4 Rate limits and “last resort”
-- Directory endpoints MUST be rate-limited per device/user to prevent scraping and to conserve pool health.
+- Directory endpoints MUST be rate-limited per device/user to prevent scraping and to conserve pool health. `/v1/keypackages/fetch` MUST enforce a deterministic fixed-window limit (per requesting user across devices) of at least 60 fetches per minute and return `429 rate_limited` when exceeded. Operators MAY apply stricter quotas to publish/rotate as needed.
 - Operators SHOULD maintain a minimum pool size alert and MAY allow a temporary bypass (“last resort”) for emergency replenishment when a device runs out of usable KeyPackages.
 
 ---
@@ -333,6 +333,7 @@ Semantics match WS frames.
 - All presence endpoints MUST include `Cache-Control: no-store` and responses MUST NOT be cached by intermediaries or clients.
 - Presence APIs MUST be rate-limited at the application layer.
 - Presence watchlists are keyed by `user_id`; mutual watch gating is evaluated at the user level.
+- Presence blocklists are user-level and symmetric: if either side blocks the other, presence updates MUST NOT be delivered in either direction.
 - A user is considered online if any of their devices has a non-expired, non-invisible lease; offline only when all visible leases expire or turn invisible. `expires_at` reflects the latest visible lease expiry.
 - Presence updates MUST fan out to all active devices for an eligible watcher user.
 - Lease TTLs MUST be clamped server-side to a minimum of 15 seconds and a maximum of 300 seconds.
@@ -359,8 +360,20 @@ Semantics match WS frames.
   ```
 - The watchlist is contacts-only; server MUST enforce caps per watcher and per target.
 - To remove entries use `POST /v1/presence/unwatch` with the same schema.
+- Attempts to watch a blocked contact MUST be ignored or rejected; blocked pairs MUST NOT receive updates even if mutual watch exists.
 
-### 9.3 Presence updates
+### 9.3 Block / unblock
+- Endpoint: `POST /v1/presence/block`
+- Body:
+  ```json
+  {
+    "contacts": ["u_01B...", "u_02B..."]
+  }
+  ```
+- Endpoint: `POST /v1/presence/unblock` (same schema)
+- Blocking is user-centric and multi-device aware. If either participant blocks the other, presence updates MUST NOT be delivered in either direction, including in mutual-watch cases. Servers MAY silently ignore blocked targets when processing watch requests. Responses SHOULD include the current blocked count for the caller.
+
+### 9.4 Presence updates
 - Presence events are delivered as `presence.update` frames:
   ```json
   {
@@ -378,7 +391,7 @@ Semantics match WS frames.
 - “Invisible mode” hides a user from watchers except whitelisted contacts; server MUST suppress updates accordingly.
 - `last_seen_bucket` is coarse (e.g., `now`, `5m`, `1h`, `1d`, `7d`).
 
-### 9.4 SSE/WS consumption
+### 9.5 SSE/WS consumption
 - Presence updates MAY be delivered on the same WS connection as conversations or via SSE.
 - `presence.watch` and `presence.unwatch` MAY be invoked over WS frames with the same bodies.
 - Presence data MUST NOT be persisted or cached beyond the lease TTL by clients.

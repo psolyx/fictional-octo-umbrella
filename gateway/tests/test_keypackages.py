@@ -19,6 +19,17 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
 from gateway.ws_transport import create_app
 
 
+class FakeClock:
+    def __init__(self, start_ms: int = 0) -> None:
+        self.now_ms = start_ms
+
+    def advance(self, seconds: float) -> None:
+        self.now_ms += int(seconds * 1000)
+
+    def now(self) -> int:
+        return self.now_ms
+
+
 class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.app = create_app(ping_interval_s=3600)
@@ -131,6 +142,66 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         body_again = await fetch_again.json()
         self.assertEqual(body_again["keypackages"], [])
+
+
+class KeyPackageHttpRateLimitTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.clock = FakeClock()
+        self.app = create_app(
+            ping_interval_s=3600,
+            keypackage_fetch_limit_per_min=2,
+            keypackage_now_func=self.clock.now,
+        )
+        self.server = TestServer(self.app)
+        await self.server.start_server()
+        self.client = TestClient(self.server)
+        await self.client.start_server()
+        runtime = self.app["runtime"]
+        self.user_id = "user-rl"
+        self.device_id = "device-rl"
+        session = runtime.sessions.create(self.user_id, self.device_id)
+        self.headers = {"Authorization": f"Bearer {session.session_token}"}
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await self.server.close()
+
+    async def test_fetch_rate_limit_enforced(self):
+        await self.client.post(
+            "/v1/keypackages",
+            json={"device_id": self.device_id, "keypackages": ["kp1", "kp2", "kp3"]},
+            headers=self.headers,
+        )
+
+        first = await self.client.post(
+            "/v1/keypackages/fetch",
+            json={"user_id": self.user_id, "count": 1},
+            headers=self.headers,
+        )
+        self.assertEqual(first.status, 200)
+
+        second = await self.client.post(
+            "/v1/keypackages/fetch",
+            json={"user_id": self.user_id, "count": 1},
+            headers=self.headers,
+        )
+        self.assertEqual(second.status, 200)
+
+        third = await self.client.post(
+            "/v1/keypackages/fetch",
+            json={"user_id": self.user_id, "count": 1},
+            headers=self.headers,
+        )
+        self.assertEqual(third.status, 429)
+
+        self.clock.advance(61)
+
+        fourth = await self.client.post(
+            "/v1/keypackages/fetch",
+            json={"user_id": self.user_id, "count": 1},
+            headers=self.headers,
+        )
+        self.assertEqual(fourth.status, 200)
 
 
 if __name__ == "__main__":

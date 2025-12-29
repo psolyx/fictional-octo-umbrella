@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import secrets
-from typing import Any, List, Union
+from typing import Any, Callable, List, Union
 
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
 if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
@@ -16,11 +16,14 @@ from .hub import Subscription, SubscriptionHub
 # In-memory conversation log implementation used when SQLite durability is disabled.
 from .keypackages import InMemoryKeyPackageStore, SQLiteKeyPackageStore
 from .log import ConversationEvent, ConversationLog
-from .presence import LimitExceeded, Presence, RateLimitExceeded
+from .presence import FixedWindowRateLimiter, LimitExceeded, Presence, RateLimitExceeded
 from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
 from .sqlite_log import SQLiteConversationLog
 from .sqlite_sessions import Session, SQLiteSessionStore, _now_ms
+
+
+_KEYPACKAGE_FETCH_LIMIT_PER_MIN = 60
 
 
 class SessionStore:
@@ -98,6 +101,8 @@ class Runtime:
         keypackages,
         backend: SQLiteBackend | None = None,
         presence: Presence,
+        keypackage_fetch_limiter: FixedWindowRateLimiter,
+        now_func: Callable[[], int] = _now_ms,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -106,6 +111,8 @@ class Runtime:
         self.keypackages = keypackages
         self.backend = backend
         self.presence = presence
+        self.keypackage_fetch_limiter = keypackage_fetch_limiter
+        self.now_func = now_func
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -185,6 +192,10 @@ async def handle_keypackage_fetch(request: web.Request) -> web.Response:
     count = body.get("count")
     if not isinstance(user_id, str) or not isinstance(count, int) or count < 0:
         return _invalid_request("user_id and count required")
+
+    now_ms = runtime.now_func()
+    if not runtime.keypackage_fetch_limiter.allow(session.user_id, now_ms):
+        return _rate_limited("keypackage fetch rate limit exceeded")
 
     keypackages = runtime.keypackages.fetch(user_id, count)
     return web.json_response({"keypackages": keypackages})
@@ -313,6 +324,48 @@ async def handle_presence_unwatch(request: web.Request) -> web.Response:
     return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.user_id)})
 
 
+async def handle_presence_block(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    contacts = body.get("contacts")
+    if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
+        return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
+    try:
+        runtime.presence.block(session.user_id, contacts)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    except LimitExceeded as exc:
+        return _with_no_store(_limit_exceeded(str(exc)))
+    return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
+
+
+async def handle_presence_unblock(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    contacts = body.get("contacts")
+    if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
+        return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
+    try:
+        runtime.presence.unblock(session.user_id, contacts)
+    except RateLimitExceeded as exc:
+        return _with_no_store(_rate_limited(str(exc)))
+    return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
+
+
 def create_app(
     *,
     ping_interval_s: int = 30,
@@ -321,6 +374,8 @@ def create_app(
     db_path: str | None = None,
     presence: Presence | None = None,
     start_presence_sweeper: bool = True,
+    keypackage_fetch_limit_per_min: int = _KEYPACKAGE_FETCH_LIMIT_PER_MIN,
+    keypackage_now_func: Callable[[], int] = _now_ms,
 ) -> web.Application:
     backend: SQLiteBackend | None = None
     if db_path is not None:
@@ -337,6 +392,7 @@ def create_app(
 
     presence = presence or Presence()
     hub = SubscriptionHub()
+    fetch_limiter = FixedWindowRateLimiter(keypackage_fetch_limit_per_min)
     runtime = Runtime(
         log=log,
         cursors=cursors,
@@ -345,6 +401,8 @@ def create_app(
         keypackages=keypackages,
         backend=backend,
         presence=presence,
+        keypackage_fetch_limiter=fetch_limiter,
+        now_func=keypackage_now_func,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -361,6 +419,8 @@ def create_app(
     app.router.add_post("/v1/presence/renew", handle_presence_renew)
     app.router.add_post("/v1/presence/watch", handle_presence_watch)
     app.router.add_post("/v1/presence/unwatch", handle_presence_unwatch)
+    app.router.add_post("/v1/presence/block", handle_presence_block)
+    app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
