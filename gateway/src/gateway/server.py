@@ -128,7 +128,7 @@ def _run_greet(name: str, output: TextIO | None) -> int:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
-    app = create_app(ping_interval_s=args.ping_interval)
+    app = create_app(ping_interval_s=args.ping_interval, db_path=args.db)
     web.run_app(app, host=args.host, port=args.port)
     return 0
 
@@ -167,6 +167,7 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
         default=30,
         help="Seconds between heartbeat pings",
     )
+    serve_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database for durability")
 
     args = parser.parse_args(argv)
 

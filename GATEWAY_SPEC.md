@@ -251,7 +251,8 @@ Semantics match WS frames.
     }
   }
   ```
-- If the send corresponds to a retry with an existing (`conv_id`, `msg_id`), the server MUST return the existing `seq`.
+- If the send corresponds to a retry with an existing (`conv_id`, `msg_id`), the server MUST return the existing `seq` and MUST
+  NOT emit an additional `conv.event`.
 
 ### 7.4 Errors
 - Errors use a standard `error` frame:
