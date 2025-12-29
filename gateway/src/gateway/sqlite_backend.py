@@ -41,12 +41,19 @@ class SQLiteBackend:
             legacy_version = self._read_legacy_schema_version()
             if legacy_version is None:
                 self._create_v1_schema()
-                self._conn.execute("PRAGMA user_version = 1")
+                user_version = 1
             elif legacy_version == 1:
-                self._conn.execute("PRAGMA user_version = 1")
+                user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version != 1:
+        elif user_version not in (1, 2):
+            raise ValueError(f"Unsupported schema version: {user_version}")
+
+        if user_version == 1:
+            self._migrate_v1_to_v2()
+            user_version = 2
+
+        if user_version != 2:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -103,3 +110,24 @@ class SQLiteBackend:
             )
             """
         )
+
+    def _migrate_v1_to_v2(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keypackages (
+                device_id TEXT NOT NULL,
+                kp_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kp_b64 TEXT NOT NULL,
+                created_ms INTEGER NOT NULL,
+                issued_ms INTEGER,
+                revoked_ms INTEGER
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS keypackages_device_idx
+            ON keypackages (device_id, issued_ms, revoked_ms, kp_id)
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 2")
