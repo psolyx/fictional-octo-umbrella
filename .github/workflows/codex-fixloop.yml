@@ -43,6 +43,18 @@ jobs:
               pull_number: prNumber,
             });
 
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            if (files.some((file) => file.filename === '.github/workflows/ci.yml')) {
+              core.setFailed('PR modifies forbidden file: .github/workflows/ci.yml');
+              return;
+            }
+
             if (pr.head.repo.full_name !== pr.base.repo.full_name) {
               core.setFailed('Refusing to run on forks');
               return;
