@@ -11,6 +11,7 @@ if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
 else:  # pragma: no cover - offline fallback
     from gateway.aiohttp_stub import WSMsgType, web
 
+from .conversations import InMemoryConversationStore, SQLiteConversationStore
 from .cursors import CursorStore
 from .hub import Subscription, SubscriptionHub
 # In-memory conversation log implementation used when SQLite durability is disabled.
@@ -103,6 +104,7 @@ class Runtime:
         presence: Presence,
         keypackage_fetch_limiter: FixedWindowRateLimiter,
         now_func: Callable[[], int] = _now_ms,
+        conversations,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -113,6 +115,7 @@ class Runtime:
         self.presence = presence
         self.keypackage_fetch_limiter = keypackage_fetch_limiter
         self.now_func = now_func
+        self.conversations = conversations
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -133,6 +136,10 @@ def _rate_limited(message: str) -> web.Response:
 
 def _limit_exceeded(message: str) -> web.Response:
     return web.json_response({"code": "limit_exceeded", "message": message}, status=429)
+
+
+def _forbidden(message: str) -> web.Response:
+    return web.json_response({"code": "forbidden", "message": message}, status=403)
 
 
 def _with_no_store(response: web.Response) -> web.Response:
@@ -366,6 +373,98 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
 
 
+async def _parse_room_members(body: dict[str, Any]) -> list[str] | None:
+    members = body.get("members", [])
+    if members is None:
+        members = []
+    if not isinstance(members, list) or any(not isinstance(m, str) for m in members):
+        return None
+    return list(members)
+
+
+async def handle_room_create(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.create(conv_id, session.user_id, members)
+    except ValueError:
+        return _invalid_request("conversation already exists")
+    except LimitExceeded as exc:
+        return _limit_exceeded(str(exc))
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_invite(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.invite(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except RateLimitExceeded as exc:
+        return _rate_limited(str(exc))
+    except LimitExceeded as exc:
+        return _limit_exceeded(str(exc))
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_remove(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.remove(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except RateLimitExceeded as exc:
+        return _rate_limited(str(exc))
+    except LimitExceeded as exc:
+        return _limit_exceeded(str(exc))
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
 def create_app(
     *,
     ping_interval_s: int = 30,
@@ -384,11 +483,13 @@ def create_app(
         cursors = SQLiteCursorStore(backend)
         sessions: SessionStore = SQLiteSessionStore(backend)
         keypackages = SQLiteKeyPackageStore(backend)
+        conversations = SQLiteConversationStore(backend)
     else:
         log = ConversationLog()
         cursors = CursorStore()
         sessions = SessionStore()
         keypackages = InMemoryKeyPackageStore()
+        conversations = InMemoryConversationStore()
 
     presence = presence or Presence()
     hub = SubscriptionHub()
@@ -403,6 +504,7 @@ def create_app(
         presence=presence,
         keypackage_fetch_limiter=fetch_limiter,
         now_func=keypackage_now_func,
+        conversations=conversations,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -421,6 +523,9 @@ def create_app(
     app.router.add_post("/v1/presence/unwatch", handle_presence_unwatch)
     app.router.add_post("/v1/presence/block", handle_presence_block)
     app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
+    app.router.add_post("/v1/rooms/create", handle_room_create)
+    app.router.add_post("/v1/rooms/invite", handle_room_invite)
+    app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
@@ -622,6 +727,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     if not conv_id:
                         await ws.send_json(_error_frame("invalid_request", "conv_id required", request_id=frame.get("id")))
                         continue
+                    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(
+                        conv_id, session.user_id
+                    ):
+                        await ws.send_json(
+                            _error_frame("forbidden", "not a member", request_id=frame.get("id"))
+                        )
+                        continue
                     from_seq = body.get("from_seq")
                     if from_seq is None:
                         after_seq = body.get("after_seq")
@@ -657,6 +769,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     if not conv_id or not msg_id or env is None:
                         await ws.send_json(
                             _error_frame("invalid_request", "conv_id, msg_id, env required", request_id=frame.get("id"))
+                        )
+                        continue
+                    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(
+                        conv_id, session.user_id
+                    ):
+                        await ws.send_json(
+                            _error_frame("forbidden", "not a member", request_id=frame.get("id"))
                         )
                         continue
                     seq, event, created = runtime.log.append(

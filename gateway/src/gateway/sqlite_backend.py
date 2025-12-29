@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3):
+        elif user_version not in (1, 2, 3, 4):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -57,7 +57,11 @@ class SQLiteBackend:
             self._migrate_v2_to_v3()
             user_version = 3
 
-        if user_version != 3:
+        if user_version == 3:
+            self._migrate_v3_to_v4()
+            user_version = 4
+
+        if user_version != 4:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -153,3 +157,26 @@ class SQLiteBackend:
 
         self._conn.execute("CREATE INDEX IF NOT EXISTS keypackages_user_idx ON keypackages (user_id, issued_ms, kp_id)")
         self._conn.execute("PRAGMA user_version = 3")
+
+    def _migrate_v3_to_v4(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                conv_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_members (
+                conv_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                PRIMARY KEY (conv_id, user_id),
+                FOREIGN KEY (conv_id) REFERENCES conversations(conv_id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 4")
