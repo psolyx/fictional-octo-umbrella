@@ -13,6 +13,7 @@ def _now_ms() -> int:
 
 @dataclass
 class Session:
+    user_id: str
     device_id: str
     session_token: str
     resume_token: str
@@ -26,8 +27,9 @@ class SQLiteSessionStore:
         self._backend = backend
         self._ttl_ms = ttl_ms
 
-    def create(self, device_id: str) -> Session:
+    def create(self, user_id: str, device_id: str) -> Session:
         session = Session(
+            user_id=user_id,
             device_id=device_id,
             session_token=f"st_{secrets.token_urlsafe(16)}",
             resume_token=f"rt_{secrets.token_urlsafe(16)}",
@@ -36,17 +38,23 @@ class SQLiteSessionStore:
         with self._backend.lock:
             self._backend.connection.execute(
                 """
-                INSERT INTO sessions (session_token, resume_token, device_id, expires_at_ms)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO sessions (session_token, resume_token, device_id, user_id, expires_at_ms)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (session.session_token, session.resume_token, session.device_id, session.expires_at_ms),
+                (
+                    session.session_token,
+                    session.resume_token,
+                    session.device_id,
+                    session.user_id,
+                    session.expires_at_ms,
+                ),
             )
         return session
 
     def get_by_session(self, session_token: str) -> Session | None:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT session_token, resume_token, device_id, expires_at_ms FROM sessions WHERE session_token=?",
+                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE session_token=?",
                 (session_token,),
             ).fetchone()
         if row is None:
@@ -55,7 +63,8 @@ class SQLiteSessionStore:
             session_token=row[0],
             resume_token=row[1],
             device_id=row[2],
-            expires_at_ms=row[3],
+            user_id=row[3],
+            expires_at_ms=row[4],
         )
         if session.expires_at_ms <= _now_ms():
             self.invalidate(session)
@@ -65,7 +74,7 @@ class SQLiteSessionStore:
     def get_by_resume(self, resume_token: str) -> Session | None:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT session_token, resume_token, device_id, expires_at_ms FROM sessions WHERE resume_token=?",
+                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE resume_token=?",
                 (resume_token,),
             ).fetchone()
 
@@ -76,7 +85,8 @@ class SQLiteSessionStore:
             session_token=row[0],
             resume_token=row[1],
             device_id=row[2],
-            expires_at_ms=row[3],
+            user_id=row[3],
+            expires_at_ms=row[4],
         )
         if session.expires_at_ms <= _now_ms():
             self.invalidate(session)
@@ -92,7 +102,7 @@ class SQLiteSessionStore:
             conn = self._backend.connection
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT session_token, resume_token, device_id, expires_at_ms FROM sessions WHERE resume_token=?",
+                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE resume_token=?",
                 (resume_token,),
             ).fetchone()
 
@@ -104,7 +114,8 @@ class SQLiteSessionStore:
                 session_token=row[0],
                 resume_token=row[1],
                 device_id=row[2],
-                expires_at_ms=row[3],
+                user_id=row[3],
+                expires_at_ms=row[4],
             )
             if session.expires_at_ms <= now_ms:
                 conn.execute("DELETE FROM sessions WHERE resume_token=?", (resume_token,))

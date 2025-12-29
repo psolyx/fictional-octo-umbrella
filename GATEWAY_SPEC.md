@@ -71,6 +71,7 @@ Semantics match WS frames.
    }
    ```
 3. Server validates the authentication token and binds it to `device_id` and the presented MLS credential.
+   - `user_id` is derived from `auth_token` (if it starts with `"Bearer "` the prefix is stripped; otherwise the raw token is used).
 4. On success the server replies with `session.ready`:
    ```json
    {
@@ -78,6 +79,7 @@ Semantics match WS frames.
      "t": "session.ready",
      "id": "s_01J...",
      "body": {
+       "user_id": "u_01K...",
        "session_token": "st_01J...",
        "resume_token": "rt_01J...",
        "expires_at": 1766797200123,
@@ -295,6 +297,7 @@ Semantics match WS frames.
   }
   ```
 - Server MUST store one-time-use KeyPackages, enforce device ownership, and MAY cap pool size per device.
+- Requests MUST be authenticated for the publishing user and device; the server associates published material with both `user_id` and `device_id`.
 
 ### 8.2 Fetch
 - Endpoint: `POST /v1/keypackages/fetch`
@@ -305,7 +308,7 @@ Semantics match WS frames.
     "count": 2
   }
   ```
-- Server returns up to `count` available KeyPackages for the requested user and MUST rate limit fetches.
+- Server returns up to `count` available KeyPackages for the requested user across all of their devices and MUST rate limit fetches.
 
 ### 8.3 Rotate / Revoke
 - Endpoint: `POST /v1/keypackages/rotate`
@@ -318,6 +321,7 @@ Semantics match WS frames.
   }
   ```
 - Revocation is best-effort: server SHOULD prevent future fetch of revoked material but previously delivered KeyPackages MAY still be used by peers.
+- Requests MUST be authenticated for the owning user; rotate only affects the provided `device_id` under that user.
 
 ### 8.4 Rate limits and “last resort”
 - Directory endpoints MUST be rate-limited per device/user to prevent scraping and to conserve pool health.
@@ -328,6 +332,9 @@ Semantics match WS frames.
 ## 9. Presence (ephemeral lease model)
 - All presence endpoints MUST include `Cache-Control: no-store` and responses MUST NOT be cached by intermediaries or clients.
 - Presence APIs MUST be rate-limited at the application layer.
+- Presence watchlists are keyed by `user_id`; mutual watch gating is evaluated at the user level.
+- A user is considered online if any of their devices has a non-expired, non-invisible lease; offline only when all visible leases expire or turn invisible. `expires_at` reflects the latest visible lease expiry.
+- Presence updates MUST fan out to all active devices for an eligible watcher user.
 - Lease TTLs MUST be clamped server-side to a minimum of 15 seconds and a maximum of 300 seconds.
 - Until Polycentric contact graphs are available, delivery MUST be gated by mutual watch: a watcher only receives updates if the target's watchlist includes the watcher.
 
