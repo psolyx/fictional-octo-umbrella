@@ -1,0 +1,6 @@
+{
+  "name": "dm_smoke_v1",
+  "cipher_suite": "X25519_AES128GCM_SHA256_Ed25519",
+  "iterations": 20,
+  "digest_sha256_hex": "e201cd619f84382b990cade931b3fb8d76b19a6f40e7df47ecb3f2f2f22dd9fe"
+}
