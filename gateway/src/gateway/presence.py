@@ -20,8 +20,16 @@ class PresenceConfig:
 
 @dataclass
 class Lease:
+    user_id: str
     expires_at_ms: int
     invisible: bool
+    last_seen_ms: int
+
+
+@dataclass
+class UserStatus:
+    status: str
+    expires_at_ms: int
     last_seen_ms: int
 
 
@@ -56,6 +64,9 @@ class Presence:
         self._watchlists: Dict[str, Set[str]] = {}
         self._reverse_watchers: Dict[str, Set[str]] = {}
         self._callbacks: Dict[str, Callable[[dict], None]] = {}
+        self._device_users: Dict[str, str] = {}
+        self._user_devices: Dict[str, Set[str]] = {}
+        self._user_status: Dict[str, UserStatus] = {}
         self._watch_rate = FixedWindowRateLimiter(self.config.watch_mutations_per_min)
         self._renew_rate = FixedWindowRateLimiter(self.config.renews_per_min)
         self._sweeper_task: asyncio.Task | None = None
@@ -85,11 +96,21 @@ class Presence:
     def _clamp_ttl(self, ttl_seconds: int) -> int:
         return max(self.config.min_ttl_seconds, min(self.config.max_ttl_seconds, ttl_seconds))
 
-    def register_callback(self, device_id: str, callback: Callable[[dict], None]) -> None:
+    def register_callback(self, user_id: str, device_id: str, callback: Callable[[dict], None]) -> None:
         self._callbacks[device_id] = callback
+        self._device_users[device_id] = user_id
+        devices = self._user_devices.setdefault(user_id, set())
+        devices.add(device_id)
 
     def unregister_callback(self, device_id: str) -> None:
         self._callbacks.pop(device_id, None)
+        user_id = self._device_users.pop(device_id, None)
+        if user_id is not None:
+            devices = self._user_devices.get(user_id)
+            if devices is not None:
+                devices.discard(device_id)
+                if not devices:
+                    self._user_devices.pop(user_id, None)
 
     def _bucket_last_seen(self, last_seen_ms: int) -> str:
         now_ms = self._now()
@@ -104,58 +125,86 @@ class Presence:
             return "1d"
         return "7d"
 
-    def _eligible_watchers(self, target_device_id: str) -> Iterable[str]:
-        target_watchlist = self._watchlists.get(target_device_id, set())
-        watchers = self._reverse_watchers.get(target_device_id, set())
+    def _eligible_watchers(self, target_user_id: str) -> Iterable[str]:
+        target_watchlist = self._watchlists.get(target_user_id, set())
+        watchers = self._reverse_watchers.get(target_user_id, set())
         for watcher in watchers:
             if watcher in target_watchlist:
                 yield watcher
 
+    def _fanout(self, watcher_user_id: str, frame: dict) -> None:
+        for device_id in self._user_devices.get(watcher_user_id, set()):
+            callback = self._callbacks.get(device_id)
+            if callback is not None:
+                callback(frame)
+
     def _notify(
         self,
-        target_device_id: str,
+        target_user_id: str,
         status: str,
         expires_at_ms: int,
         last_seen_ms: int,
-        invisible: bool,
     ) -> None:
-        if invisible:
-            return
         frame = {
             "v": 1,
             "t": "presence.update",
             "body": {
-                "user_id": target_device_id,
+                "user_id": target_user_id,
                 "status": status,
                 "expires_at": expires_at_ms,
                 "last_seen_bucket": self._bucket_last_seen(last_seen_ms),
             },
         }
-        for watcher in self._eligible_watchers(target_device_id):
-            callback = self._callbacks.get(watcher)
-            if callback is not None:
-                callback(frame)
+        for watcher in self._eligible_watchers(target_user_id):
+            self._fanout(watcher, frame)
 
-    def lease(self, device_id: str, ttl_seconds: int, *, invisible: bool = False) -> int:
+    def _compute_user_status(self, user_id: str, previous: UserStatus | None) -> UserStatus:
+        now_ms = self._now()
+        leases = [lease for lease in self._leases.values() if lease.user_id == user_id]
+        visible = [lease for lease in leases if lease.expires_at_ms > now_ms and not lease.invisible]
+        if visible:
+            expires_at_ms = max(lease.expires_at_ms for lease in visible)
+            last_seen_ms = max(lease.last_seen_ms for lease in visible)
+            return UserStatus("online", expires_at_ms, last_seen_ms)
+
+        expires_at_ms = previous.expires_at_ms if previous and previous.status == "online" else max(
+            (lease.expires_at_ms for lease in leases), default=now_ms
+        )
+        last_seen_ms = previous.last_seen_ms if previous else max((lease.last_seen_ms for lease in leases), default=now_ms)
+        return UserStatus("offline", expires_at_ms, last_seen_ms)
+
+    def _update_user_status(self, user_id: str) -> None:
+        previous = self._user_status.get(user_id)
+        current = self._compute_user_status(user_id, previous)
+        should_notify = False
+        if previous is None:
+            should_notify = current.status == "online"
+        elif current.status != previous.status:
+            should_notify = True
+        elif current.status == "online" and current.expires_at_ms != previous.expires_at_ms:
+            should_notify = True
+        if should_notify:
+            self._notify(user_id, current.status, current.expires_at_ms, current.last_seen_ms)
+        if current.status == "offline" and not any(lease.user_id == user_id for lease in self._leases.values()):
+            self._user_status.pop(user_id, None)
+        else:
+            self._user_status[user_id] = current
+
+    def lease(self, user_id: str, device_id: str, ttl_seconds: int, *, invisible: bool = False) -> int:
         now_ms = self._now()
         if not self._renew_rate.allow(device_id, now_ms):
             raise RateLimitExceeded("presence renewals exceeded")
 
         ttl_ms = self._clamp_ttl(ttl_seconds) * 1000
         expires_at_ms = now_ms + ttl_ms
-        prior = self._leases.get(device_id)
-        was_visible = prior is not None and prior.expires_at_ms > now_ms and not prior.invisible
+        self._leases[device_id] = Lease(
+            user_id=user_id, expires_at_ms=expires_at_ms, invisible=invisible, last_seen_ms=now_ms
+        )
 
-        self._leases[device_id] = Lease(expires_at_ms=expires_at_ms, invisible=invisible, last_seen_ms=now_ms)
-
-        now_visible = expires_at_ms > now_ms and not invisible
-        if now_visible and not was_visible:
-            self._notify(device_id, "online", expires_at_ms, now_ms, invisible)
-        if was_visible and invisible:
-            self._notify(device_id, "offline", expires_at_ms, prior.last_seen_ms, prior.invisible)
+        self._update_user_status(user_id)
         return expires_at_ms
 
-    def renew(self, device_id: str, ttl_seconds: int, *, invisible: bool | None = None) -> int:
+    def renew(self, user_id: str, device_id: str, ttl_seconds: int, *, invisible: bool | None = None) -> int:
         now_ms = self._now()
         if not self._renew_rate.allow(device_id, now_ms):
             raise RateLimitExceeded("presence renewals exceeded")
@@ -166,15 +215,11 @@ class Presence:
 
         ttl_ms = self._clamp_ttl(ttl_seconds) * 1000
         expires_at_ms = now_ms + ttl_ms
-        was_visible = prior is not None and prior.expires_at_ms > now_ms and not prior.invisible
+        self._leases[device_id] = Lease(
+            user_id=user_id, expires_at_ms=expires_at_ms, invisible=new_invisible, last_seen_ms=now_ms
+        )
 
-        self._leases[device_id] = Lease(expires_at_ms=expires_at_ms, invisible=new_invisible, last_seen_ms=now_ms)
-
-        now_visible = expires_at_ms > now_ms and not new_invisible
-        if now_visible and not was_visible:
-            self._notify(device_id, "online", expires_at_ms, now_ms, new_invisible)
-        if was_visible and new_invisible:
-            self._notify(device_id, "offline", expires_at_ms, prior.last_seen_ms, prior.invisible)
+        self._update_user_status(user_id)
         return expires_at_ms
 
     def expire(self) -> None:
@@ -186,14 +231,14 @@ class Presence:
                 self._leases.pop(device_id, None)
 
         for device_id, lease in expired:
-            self._notify(device_id, "offline", lease.expires_at_ms, lease.last_seen_ms, lease.invisible)
+            self._update_user_status(lease.user_id)
 
-    def watch(self, watcher_device_id: str, contacts: Iterable[str]) -> None:
+    def watch(self, watcher_user_id: str, contacts: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._watch_rate.allow(watcher_device_id, now_ms):
+        if not self._watch_rate.allow(watcher_user_id, now_ms):
             raise RateLimitExceeded("watch mutations exceeded")
         contacts_set = {c for c in contacts if isinstance(c, str)}
-        watchlist = self._watchlists.get(watcher_device_id, set())
+        watchlist = self._watchlists.get(watcher_user_id, set())
         new_total = len(watchlist | contacts_set)
         if new_total > self.config.max_watchlist_size:
             raise LimitExceeded("watchlist too large")
@@ -210,28 +255,28 @@ class Presence:
                 continue
             watchlist.add(target)
             watchers = self._reverse_watchers.setdefault(target, set())
-            watchers.add(watcher_device_id)
-        self._watchlists[watcher_device_id] = watchlist
+            watchers.add(watcher_user_id)
+        self._watchlists[watcher_user_id] = watchlist
 
-    def unwatch(self, watcher_device_id: str, contacts: Iterable[str]) -> None:
+    def unwatch(self, watcher_user_id: str, contacts: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._watch_rate.allow(watcher_device_id, now_ms):
+        if not self._watch_rate.allow(watcher_user_id, now_ms):
             raise RateLimitExceeded("watch mutations exceeded")
         contacts_set = {c for c in contacts if isinstance(c, str)}
-        watchlist = self._watchlists.get(watcher_device_id, set())
+        watchlist = self._watchlists.get(watcher_user_id, set())
         for target in contacts_set:
             if target in watchlist:
                 watchlist.remove(target)
                 watchers = self._reverse_watchers.get(target)
                 if watchers:
-                    watchers.discard(watcher_device_id)
+                    watchers.discard(watcher_user_id)
                     if not watchers:
                         self._reverse_watchers.pop(target, None)
         if watchlist:
-            self._watchlists[watcher_device_id] = watchlist
-        elif watcher_device_id in self._watchlists:
-            self._watchlists.pop(watcher_device_id, None)
+            self._watchlists[watcher_user_id] = watchlist
+        elif watcher_user_id in self._watchlists:
+            self._watchlists.pop(watcher_user_id, None)
 
-    def watchlist_size(self, watcher_device_id: str) -> int:
-        return len(self._watchlists.get(watcher_device_id, set()))
+    def watchlist_size(self, watcher_user_id: str) -> int:
+        return len(self._watchlists.get(watcher_user_id, set()))
 

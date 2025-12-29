@@ -31,9 +31,10 @@ class SessionStore:
         self._by_session: dict[str, Session] = {}
         self._by_resume: dict[str, Session] = {}
 
-    def create(self, device_id: str) -> Session:
+    def create(self, user_id: str, device_id: str) -> Session:
         now_ms = _now_ms()
         session = Session(
+            user_id=user_id,
             device_id=device_id,
             session_token=f"st_{secrets.token_urlsafe(16)}",
             resume_token=f"rt_{secrets.token_urlsafe(16)}",
@@ -132,6 +133,12 @@ def _with_no_store(response: web.Response) -> web.Response:
     return response
 
 
+def _derive_user_id(auth_token: str) -> str:
+    if auth_token.startswith("Bearer "):
+        return auth_token[len("Bearer ") :].strip()
+    return auth_token
+
+
 def _authenticate_request(request: web.Request) -> Session | None:
     runtime: Runtime = request.app["runtime"]
     auth_header = request.headers.get("Authorization")
@@ -160,7 +167,7 @@ async def handle_keypackage_publish(request: web.Request) -> web.Response:
     if device_id != session.device_id:
         return _unauthorized()
 
-    runtime.keypackages.publish(device_id, keypackages)
+    runtime.keypackages.publish(session.user_id, device_id, keypackages)
     return web.json_response({"status": "ok"})
 
 
@@ -179,7 +186,6 @@ async def handle_keypackage_fetch(request: web.Request) -> web.Response:
     if not isinstance(user_id, str) or not isinstance(count, int) or count < 0:
         return _invalid_request("user_id and count required")
 
-    # Until Polycentric user identity is integrated, user_id is treated as a device namespace key.
     keypackages = runtime.keypackages.fetch(user_id, count)
     return web.json_response({"keypackages": keypackages})
 
@@ -206,7 +212,7 @@ async def handle_keypackage_rotate(request: web.Request) -> web.Response:
         return _invalid_request("device_id and replacement required")
     if device_id != session.device_id:
         return _unauthorized()
-    runtime.keypackages.rotate(device_id, bool(revoke), replacement)
+    runtime.keypackages.rotate(session.user_id, device_id, bool(revoke), replacement)
     return web.json_response({"status": "ok"})
 
 
@@ -233,7 +239,7 @@ async def handle_presence_lease(request: web.Request) -> web.Response:
     if device_id != session.device_id:
         return _with_no_store(_unauthorized())
     try:
-        expires_at = runtime.presence.lease(device_id, ttl_seconds, invisible=invisible)
+        expires_at = runtime.presence.lease(session.user_id, device_id, ttl_seconds, invisible=invisible)
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
     return _no_store_response({"status": "ok", "expires_at": expires_at})
@@ -259,7 +265,7 @@ async def handle_presence_renew(request: web.Request) -> web.Response:
     if device_id != session.device_id:
         return _with_no_store(_unauthorized())
     try:
-        expires_at = runtime.presence.renew(device_id, ttl_seconds, invisible=invisible)
+        expires_at = runtime.presence.renew(session.user_id, device_id, ttl_seconds, invisible=invisible)
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
     return _no_store_response({"status": "ok", "expires_at": expires_at})
@@ -279,12 +285,12 @@ async def handle_presence_watch(request: web.Request) -> web.Response:
     if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
         return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
     try:
-        runtime.presence.watch(session.device_id, contacts)
+        runtime.presence.watch(session.user_id, contacts)
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
     except LimitExceeded as exc:
         return _with_no_store(_limit_exceeded(str(exc)))
-    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.device_id)})
+    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.user_id)})
 
 
 async def handle_presence_unwatch(request: web.Request) -> web.Response:
@@ -301,10 +307,10 @@ async def handle_presence_unwatch(request: web.Request) -> web.Response:
     if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
         return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
     try:
-        runtime.presence.unwatch(session.device_id, contacts)
+        runtime.presence.unwatch(session.user_id, contacts)
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
-    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.device_id)})
+    return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.user_id)})
 
 
 def create_app(
@@ -483,7 +489,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 )
                 await ws.close()
                 return ws
-            session = runtime.sessions.create(device_id)
+            if not isinstance(auth_token, str):
+                await ws.send_json(
+                    _error_frame("invalid_request", "auth_token must be a string", request_id=payload.get("id"))
+                )
+                await ws.close()
+                return ws
+            user_id = _derive_user_id(auth_token)
+            session = runtime.sessions.create(user_id, device_id)
         elif t == "session.resume":
             resume_token = body.get("resume_token")
             if not resume_token:
@@ -519,9 +532,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 "cursors": cursors,
             },
         }
+        ready_frame["body"]["user_id"] = session.user_id
         await ws.send_json(ready_frame)
 
-        runtime.presence.register_callback(device_id, enqueue_event)
+        runtime.presence.register_callback(session.user_id, device_id, enqueue_event)
 
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:

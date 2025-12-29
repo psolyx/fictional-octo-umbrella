@@ -46,14 +46,18 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2):
+        elif user_version not in (1, 2, 3):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
             self._migrate_v1_to_v2()
             user_version = 2
 
-        if user_version != 2:
+        if user_version == 2:
+            self._migrate_v2_to_v3()
+            user_version = 3
+
+        if user_version != 3:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -106,6 +110,7 @@ class SQLiteBackend:
                 session_token TEXT PRIMARY KEY,
                 resume_token TEXT NOT NULL UNIQUE,
                 device_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
                 expires_at_ms INTEGER NOT NULL
             )
             """
@@ -115,6 +120,7 @@ class SQLiteBackend:
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS keypackages (
+                user_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
                 kp_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kp_b64 TEXT NOT NULL,
@@ -131,3 +137,19 @@ class SQLiteBackend:
             """
         )
         self._conn.execute("PRAGMA user_version = 2")
+
+    def _migrate_v2_to_v3(self) -> None:
+        session_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "user_id" not in session_columns:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+            self._conn.execute("UPDATE sessions SET user_id = device_id WHERE user_id = ''")
+
+        kp_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(keypackages)").fetchall()}
+        if "user_id" not in kp_columns:
+            self._conn.execute("ALTER TABLE keypackages ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+            self._conn.execute("UPDATE keypackages SET user_id = device_id WHERE user_id = ''")
+        else:
+            self._conn.execute("UPDATE keypackages SET user_id = device_id WHERE user_id = ''")
+
+        self._conn.execute("CREATE INDEX IF NOT EXISTS keypackages_user_idx ON keypackages (user_id, issued_ms, kp_id)")
+        self._conn.execute("PRAGMA user_version = 3")

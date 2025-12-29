@@ -1,4 +1,5 @@
 import os
+import os
 import tempfile
 import unittest
 
@@ -41,7 +42,7 @@ class SQLiteBackendTests(unittest.TestCase):
         advanced = cursors.ack("d1", "c1", 5)
         self.assertEqual(advanced, 6)
 
-        created_session = sessions.create("d1")
+        created_session = sessions.create("u1", "d1")
         loaded = sessions.get_by_resume(created_session.resume_token)
         self.assertIsNotNone(loaded)
         rotated = sessions.rotate_resume(loaded)
@@ -50,3 +51,4 @@ class SQLiteBackendTests(unittest.TestCase):
         self.assertIsNotNone(resumed)
         self.assertEqual(resumed.device_id, "d1")
         self.assertEqual(resumed.session_token, created_session.session_token)
+        self.assertEqual(resumed.user_id, "u1")

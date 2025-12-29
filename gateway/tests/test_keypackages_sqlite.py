@@ -46,8 +46,9 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_persistence_across_restart(self):
         app1 = await self._start_server()
         runtime1 = app1["runtime"]
+        user_id = "user-sql"
         device_id = "device-sql"
-        session = runtime1.sessions.create(device_id)
+        session = runtime1.sessions.create(user_id, device_id)
         headers = {"Authorization": f"Bearer {session.session_token}"}
 
         publish = await self.client.post(
@@ -66,7 +67,7 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
         fetch_first = await self.client.post(
             "/v1/keypackages/fetch",
-            json={"user_id": device_id, "count": 1},
+            json={"user_id": user_id, "count": 1},
             headers=headers,
         )
         body_first = await fetch_first.json()
@@ -74,7 +75,7 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
         fetch_second = await self.client.post(
             "/v1/keypackages/fetch",
-            json={"user_id": device_id, "count": 5},
+            json={"user_id": user_id, "count": 5},
             headers=headers,
         )
         body_second = await fetch_second.json()
@@ -82,11 +83,34 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
         fetch_empty = await self.client.post(
             "/v1/keypackages/fetch",
-            json={"user_id": device_id, "count": 5},
+            json={"user_id": user_id, "count": 5},
             headers=headers,
         )
         body_empty = await fetch_empty.json()
         self.assertEqual(body_empty["keypackages"], [])
+
+    async def test_fetch_across_devices_sqlite(self):
+        app = await self._start_server()
+        runtime = app["runtime"]
+        user_id = "user-sql"
+        device_one = runtime.sessions.create(user_id, "device-1")
+        device_two = runtime.sessions.create(user_id, "device-2")
+
+        headers_one = {"Authorization": f"Bearer {device_one.session_token}"}
+        headers_two = {"Authorization": f"Bearer {device_two.session_token}"}
+
+        await self.client.post(
+            "/v1/keypackages", json={"device_id": "device-1", "keypackages": ["a1"]}, headers=headers_one
+        )
+        await self.client.post(
+            "/v1/keypackages", json={"device_id": "device-2", "keypackages": ["b1"]}, headers=headers_two
+        )
+
+        fetched = await self.client.post(
+            "/v1/keypackages/fetch", json={"user_id": user_id, "count": 5}, headers=headers_one
+        )
+        body = await fetched.json()
+        self.assertEqual(body["keypackages"], ["a1", "b1"])
 
 
 if __name__ == "__main__":

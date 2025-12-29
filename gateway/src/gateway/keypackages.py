@@ -16,6 +16,7 @@ def _now_ms() -> int:
 
 @dataclass
 class KeyPackage:
+    user_id: str
     device_id: str
     kp_b64: str
     created_ms: int
@@ -24,13 +25,13 @@ class KeyPackage:
 
 
 class KeyPackageStore:
-    def publish(self, device_id: str, keypackages: List[str]) -> None:
+    def publish(self, user_id: str, device_id: str, keypackages: List[str]) -> None:
         raise NotImplementedError
 
-    def fetch(self, device_id: str, count: int) -> List[str]:
+    def fetch(self, user_id: str, count: int) -> List[str]:
         raise NotImplementedError
 
-    def rotate(self, device_id: str, revoke: bool, replacement: List[str]) -> None:
+    def rotate(self, user_id: str, device_id: str, revoke: bool, replacement: List[str]) -> None:
         raise NotImplementedError
 
 
@@ -39,17 +40,17 @@ class InMemoryKeyPackageStore(KeyPackageStore):
         self._cap = cap
         self._store: dict[str, List[KeyPackage]] = {}
 
-    def publish(self, device_id: str, keypackages: List[str]) -> None:
+    def publish(self, user_id: str, device_id: str, keypackages: List[str]) -> None:
         if not keypackages:
             return
         now_ms = _now_ms()
-        entries = self._store.setdefault(device_id, [])
+        entries = self._store.setdefault(user_id, [])
         for kp in keypackages:
-            entries.append(KeyPackage(device_id, kp, now_ms, None, None))
-        self._enforce_cap(entries)
+            entries.append(KeyPackage(user_id, device_id, kp, now_ms, None, None))
+        self._enforce_cap(entries, device_id)
 
-    def fetch(self, device_id: str, count: int) -> List[str]:
-        entries = self._store.get(device_id, [])
+    def fetch(self, user_id: str, count: int) -> List[str]:
+        entries = self._store.get(user_id, [])
         available = [kp for kp in entries if kp.issued_ms is None and kp.revoked_ms is None]
         to_issue = available[:count]
         issued_at = _now_ms()
@@ -57,31 +58,31 @@ class InMemoryKeyPackageStore(KeyPackageStore):
             kp.issued_ms = issued_at
         return [kp.kp_b64 for kp in to_issue]
 
-    def rotate(self, device_id: str, revoke: bool, replacement: List[str]) -> None:
-        entries = self._store.setdefault(device_id, [])
+    def rotate(self, user_id: str, device_id: str, revoke: bool, replacement: List[str]) -> None:
+        entries = self._store.setdefault(user_id, [])
         if revoke:
             revoked_at = _now_ms()
             for kp in entries:
-                if kp.issued_ms is None and kp.revoked_ms is None:
+                if kp.device_id == device_id and kp.issued_ms is None and kp.revoked_ms is None:
                     kp.revoked_ms = revoked_at
         if replacement:
-            self.publish(device_id, replacement)
+            self.publish(user_id, device_id, replacement)
 
-    def _enforce_cap(self, entries: List[KeyPackage]) -> None:
+    def _enforce_cap(self, entries: List[KeyPackage], device_id: str) -> None:
         if not entries:
             return
-        unissued = [kp for kp in entries if kp.issued_ms is None and kp.revoked_ms is None]
+        unissued = [kp for kp in entries if kp.device_id == device_id and kp.issued_ms is None and kp.revoked_ms is None]
         overflow = len(unissued) - self._cap
         if overflow <= 0:
             return
         remaining: List[KeyPackage] = []
         to_skip = overflow
         for kp in entries:
-            if kp.issued_ms is None and kp.revoked_ms is None and to_skip > 0:
+            if kp.device_id == device_id and kp.issued_ms is None and kp.revoked_ms is None and to_skip > 0:
                 to_skip -= 1
                 continue
             remaining.append(kp)
-        self._store[entries[0].device_id] = remaining if entries else []
+        self._store[entries[0].user_id] = remaining if entries else []
 
 
 class SQLiteKeyPackageStore(KeyPackageStore):
@@ -89,7 +90,7 @@ class SQLiteKeyPackageStore(KeyPackageStore):
         self._backend = backend
         self._cap = cap
 
-    def publish(self, device_id: str, keypackages: List[str]) -> None:
+    def publish(self, user_id: str, device_id: str, keypackages: List[str]) -> None:
         if not keypackages:
             return
         now_ms = _now_ms()
@@ -99,15 +100,15 @@ class SQLiteKeyPackageStore(KeyPackageStore):
             for kp in keypackages:
                 conn.execute(
                     """
-                    INSERT INTO keypackages (device_id, kp_b64, created_ms)
-                    VALUES (?, ?, ?)
+                    INSERT INTO keypackages (user_id, device_id, kp_b64, created_ms)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (device_id, kp, now_ms),
+                    (user_id, device_id, kp, now_ms),
                 )
-            self._enforce_cap(conn, device_id)
+            self._enforce_cap(conn, user_id, device_id)
             conn.commit()
 
-    def fetch(self, device_id: str, count: int) -> List[str]:
+    def fetch(self, user_id: str, count: int) -> List[str]:
         if count <= 0:
             return []
         with self._backend.lock:
@@ -117,11 +118,11 @@ class SQLiteKeyPackageStore(KeyPackageStore):
                 """
                 SELECT kp_id, kp_b64
                 FROM keypackages
-                WHERE device_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
+                WHERE user_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
                 ORDER BY kp_id ASC
                 LIMIT ?
                 """,
-                (device_id, count),
+                (user_id, count),
             ).fetchall()
             kp_ids = [row[0] for row in rows]
             issued_at = _now_ms()
@@ -133,7 +134,7 @@ class SQLiteKeyPackageStore(KeyPackageStore):
             conn.commit()
         return [row[1] for row in rows]
 
-    def rotate(self, device_id: str, revoke: bool, replacement: List[str]) -> None:
+    def rotate(self, user_id: str, device_id: str, revoke: bool, replacement: List[str]) -> None:
         now_ms = _now_ms()
         with self._backend.lock:
             conn = self._backend.connection
@@ -143,30 +144,30 @@ class SQLiteKeyPackageStore(KeyPackageStore):
                     """
                     UPDATE keypackages
                     SET revoked_ms=?
-                    WHERE device_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
+                    WHERE user_id=? AND device_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
                     """,
-                    (now_ms, device_id),
+                    (now_ms, user_id, device_id),
                 )
             if replacement:
                 for kp in replacement:
                     conn.execute(
                         """
-                        INSERT INTO keypackages (device_id, kp_b64, created_ms)
-                        VALUES (?, ?, ?)
+                        INSERT INTO keypackages (user_id, device_id, kp_b64, created_ms)
+                        VALUES (?, ?, ?, ?)
                         """,
-                        (device_id, kp, now_ms),
+                        (user_id, device_id, kp, now_ms),
                     )
-                self._enforce_cap(conn, device_id)
+                self._enforce_cap(conn, user_id, device_id)
             conn.commit()
 
-    def _enforce_cap(self, conn, device_id: str) -> None:
+    def _enforce_cap(self, conn, user_id: str, device_id: str) -> None:
         rows = conn.execute(
             """
             SELECT kp_id FROM keypackages
-            WHERE device_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
+            WHERE user_id=? AND device_id=? AND issued_ms IS NULL AND revoked_ms IS NULL
             ORDER BY kp_id ASC
             """,
-            (device_id,),
+            (user_id, device_id),
         ).fetchall()
         overflow = len(rows) - self._cap
         if overflow <= 0:
