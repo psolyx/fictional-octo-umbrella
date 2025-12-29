@@ -14,6 +14,7 @@ else:  # pragma: no cover - offline fallback
 from .cursors import CursorStore
 from .hub import Subscription, SubscriptionHub
 # In-memory conversation log implementation used when SQLite durability is disabled.
+from .keypackages import InMemoryKeyPackageStore, SQLiteKeyPackageStore
 from .log import ConversationEvent, ConversationLog
 from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
@@ -39,6 +40,15 @@ class SessionStore:
         )
         self._by_session[session.session_token] = session
         self._by_resume[session.resume_token] = session
+        return session
+
+    def get_by_session(self, session_token: str) -> Session | None:
+        session = self._by_session.get(session_token)
+        if session is None:
+            return None
+        if session.expires_at_ms <= _now_ms():
+            self.invalidate(session)
+            return None
         return session
 
     def get_by_resume(self, resume_token: str) -> Session | None:
@@ -83,17 +93,105 @@ class Runtime:
         cursors: CursorStore,
         hub: SubscriptionHub,
         sessions: SessionStore,
+        keypackages,
         backend: SQLiteBackend | None = None,
     ) -> None:
         self.log = log
         self.cursors = cursors
         self.hub = hub
         self.sessions = sessions
+        self.keypackages = keypackages
         self.backend = backend
 
 
 async def handle_health(_: web.Request) -> web.Response:
     return web.Response(text="ok")
+
+
+def _unauthorized() -> web.Response:
+    return web.json_response({"code": "unauthorized", "message": "invalid session_token"}, status=401)
+
+
+def _invalid_request(message: str) -> web.Response:
+    return web.json_response({"code": "invalid_request", "message": message}, status=400)
+
+
+def _authenticate_request(request: web.Request) -> Session | None:
+    runtime: Runtime = request.app["runtime"]
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    session_token = auth_header[len("Bearer ") :].strip()
+    return runtime.sessions.get_by_session(session_token)
+
+
+async def handle_keypackage_publish(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    device_id = body.get("device_id")
+    keypackages = body.get("keypackages")
+    if not isinstance(device_id, str) or not isinstance(keypackages, list) or any(
+        not isinstance(kp, str) for kp in keypackages
+    ):
+        return _invalid_request("device_id and keypackages required")
+    if device_id != session.device_id:
+        return _unauthorized()
+
+    runtime.keypackages.publish(device_id, keypackages)
+    return web.json_response({"status": "ok"})
+
+
+async def handle_keypackage_fetch(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    user_id = body.get("user_id")
+    count = body.get("count")
+    if not isinstance(user_id, str) or not isinstance(count, int) or count < 0:
+        return _invalid_request("user_id and count required")
+
+    # Until Polycentric user identity is integrated, user_id is treated as a device namespace key.
+    keypackages = runtime.keypackages.fetch(user_id, count)
+    return web.json_response({"keypackages": keypackages})
+
+
+async def handle_keypackage_rotate(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    device_id = body.get("device_id")
+    revoke = body.get("revoke", False)
+    replacement = body.get("replacement") or []
+    if (
+        not isinstance(device_id, str)
+        or not isinstance(revoke, bool)
+        or not isinstance(replacement, list)
+        or any(not isinstance(kp, str) for kp in replacement)
+    ):
+        return _invalid_request("device_id and replacement required")
+    if device_id != session.device_id:
+        return _unauthorized()
+    runtime.keypackages.rotate(device_id, bool(revoke), replacement)
+    return web.json_response({"status": "ok"})
 
 
 def create_app(
@@ -109,10 +207,12 @@ def create_app(
         log = SQLiteConversationLog(backend)
         cursors = SQLiteCursorStore(backend)
         sessions: SessionStore = SQLiteSessionStore(backend)
+        keypackages = SQLiteKeyPackageStore(backend)
     else:
         log = ConversationLog()
         cursors = CursorStore()
         sessions = SessionStore()
+        keypackages = InMemoryKeyPackageStore()
 
     hub = SubscriptionHub()
     runtime = Runtime(
@@ -120,6 +220,7 @@ def create_app(
         cursors=cursors,
         hub=hub,
         sessions=sessions,
+        keypackages=keypackages,
         backend=backend,
     )
     app = web.Application()
@@ -130,6 +231,9 @@ def create_app(
         "max_msg_size": max_msg_size,
     }
     app.router.add_get("/healthz", handle_health)
+    app.router.add_post("/v1/keypackages", handle_keypackage_publish)
+    app.router.add_post("/v1/keypackages/fetch", handle_keypackage_fetch)
+    app.router.add_post("/v1/keypackages/rotate", handle_keypackage_rotate)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
