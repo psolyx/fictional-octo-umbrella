@@ -36,13 +36,27 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
     async def _connect(self):
         return await self.client.ws_connect("/v1/ws")
 
-    async def _start_session(self):
+    async def _start_session(self, *, auth_token: str = "t", device_id: str = "d1"):
         ws = await self._connect()
         await ws.send_json(
-            {"v": 1, "t": "session.start", "id": "start1", "body": {"auth_token": "t", "device_id": "d1"}}
+            {
+                "v": 1,
+                "t": "session.start",
+                "id": "start1",
+                "body": {"auth_token": auth_token, "device_id": device_id},
+            }
         )
         ready = await ws.receive_json()
         return ws, ready
+
+    async def _create_room(self, session_token: str, conv_id: str, members: list[str] | None = None):
+        resp = await self.client.post(
+            "/v1/rooms/create",
+            json={"conv_id": conv_id, "members": members or []},
+            headers={"Authorization": f"Bearer {session_token}"},
+        )
+        self.assertEqual(resp.status, 200)
+        await resp.json()
 
     async def test_session_start_returns_ready(self):
         ws, ready = await self._start_session()
@@ -55,7 +69,8 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["cursors"], [])
 
     async def test_subscribe_and_send_echo(self):
-        ws, _ = await self._start_session()
+        ws, ready = await self._start_session()
+        await self._create_room(ready["body"]["session_token"], "c1")
 
         await ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
         await ws.send_json(
@@ -81,7 +96,8 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         await ws.close()
 
     async def test_idempotent_retry_does_not_duplicate_event(self):
-        ws, _ = await self._start_session()
+        ws, ready = await self._start_session()
+        await self._create_room(ready["body"]["session_token"], "c1")
 
         await ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
         send_frame = {
@@ -109,6 +125,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_ack_and_resume_cursor(self):
         ws, ready = await self._start_session()
         resume_token = ready["body"]["resume_token"]
+        await self._create_room(ready["body"]["session_token"], "c1")
 
         await ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
         await ws.send_json(
@@ -148,11 +165,12 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
 
         wst.web.WebSocketResponse.send_json = delayed_send_json
 
-        sub_ws, _ = await self._start_session()
+        sub_ws, sub_ready = await self._start_session(device_id="dsub")
+        await self._create_room(sub_ready["body"]["session_token"], "c1")
         await sub_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
 
-        ws1, _ = await self._start_session()
-        ws2, _ = await self._start_session()
+        ws1, _ = await self._start_session(device_id="d1")
+        ws2, _ = await self._start_session(device_id="d2")
 
         try:
             await asyncio.gather(
@@ -186,7 +204,8 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_replay_events_flush_before_live_events(self):
         runtime = self.app["runtime"]
 
-        ws_sender, _ = await self._start_session()
+        ws_sender, ready = await self._start_session()
+        await self._create_room(ready["body"]["session_token"], "c1")
         await ws_sender.send_json(
             {"v": 1, "t": "conv.send", "id": "send1", "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4=", "ts": 1}}
         )
@@ -203,7 +222,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
 
         runtime.hub.subscribe = wrapped_subscribe
 
-        ws_sub, _ = await self._start_session()
+        ws_sub, _ = await self._start_session(device_id="dsub")
 
         try:
             await ws_sub.send_json({"v": 1, "t": "conv.subscribe", "id": "sub2", "body": {"conv_id": "c1", "from_seq": 1}})
@@ -220,6 +239,50 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
             runtime.hub.subscribe = original_subscribe
             await ws_sender.close()
             await ws_sub.close()
+
+    async def test_forbidden_for_non_member_subscribe(self):
+        owner_ws, ready = await self._start_session(auth_token="owner", device_id="downer")
+        await self._create_room(ready["body"]["session_token"], "c1")
+
+        other_ws, _ = await self._start_session(auth_token="other", device_id="dother")
+        await other_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1"}})
+        error = await other_ws.receive_json()
+        self.assertEqual(error["t"], "error")
+        self.assertEqual(error["body"]["code"], "forbidden")
+
+        await owner_ws.close()
+        await other_ws.close()
+
+    async def test_forbidden_for_non_member_send(self):
+        owner_ws, ready = await self._start_session(auth_token="owner", device_id="downer")
+        await self._create_room(ready["body"]["session_token"], "c1")
+
+        member_ws, _ = await self._start_session(auth_token="member", device_id="dmember")
+        resp = await self.client.post(
+            "/v1/rooms/invite",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {ready['body']['session_token']}"},
+        )
+        self.assertEqual(resp.status, 200)
+        await member_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1"}})
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(member_ws.receive_json(), timeout=0.1)
+
+        outsider_ws, _ = await self._start_session(auth_token="outsider", device_id="doutsider")
+        await outsider_ws.send_json(
+            {"v": 1, "t": "conv.send", "id": "send1", "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4="}}
+        )
+
+        error = await outsider_ws.receive_json()
+        self.assertEqual(error["t"], "error")
+        self.assertEqual(error["body"]["code"], "forbidden")
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(member_ws.receive_json(), timeout=0.2)
+
+        await owner_ws.close()
+        await member_ws.close()
+        await outsider_ws.close()
 
 
 if __name__ == "__main__":

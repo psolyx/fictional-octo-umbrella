@@ -34,16 +34,35 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
         self._servers.append((server, client))
         return client
 
-    async def test_resume_persists_cursors_and_sessions(self):
-        client = await self._start_runtime()
+    async def _start_session(self, client: TestClient, *, auth_token: str = "t", device_id: str = "d1"):
         ws = await client.ws_connect("/v1/ws")
         await ws.send_json(
-            {"v": 1, "t": "session.start", "id": "start1", "body": {"auth_token": "t", "device_id": "d1"}}
+            {
+                "v": 1,
+                "t": "session.start",
+                "id": "start1",
+                "body": {"auth_token": auth_token, "device_id": device_id},
+            }
         )
         ready = await ws.receive_json()
+        return ws, ready
+
+    async def _create_room(self, client: TestClient, session_token: str, conv_id: str, members: list[str] | None = None):
+        resp = await client.post(
+            "/v1/rooms/create",
+            json={"conv_id": conv_id, "members": members or []},
+            headers={"Authorization": f"Bearer {session_token}"},
+        )
+        self.assertEqual(resp.status, 200)
+        await resp.json()
+
+    async def test_resume_persists_cursors_and_sessions(self):
+        client = await self._start_runtime()
+        ws, ready = await self._start_session(client)
         self.assertEqual("session.ready", ready["t"])
         self.assertIn("resume_token", ready["body"])
         resume_token = ready["body"]["resume_token"]
+        await self._create_room(client, ready["body"]["session_token"], "c1")
 
         await ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
         await ws.send_json(
@@ -78,11 +97,8 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_idempotency_persists_across_restart(self):
         client = await self._start_runtime()
-        ws = await client.ws_connect("/v1/ws")
-        await ws.send_json(
-            {"v": 1, "t": "session.start", "id": "start1", "body": {"auth_token": "t", "device_id": "d1"}}
-        )
-        await ws.receive_json()
+        ws, ready = await self._start_session(client)
+        await self._create_room(client, ready["body"]["session_token"], "c1")
 
         await ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
         send_frame = {
@@ -101,21 +117,13 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
         self._servers.clear()
 
         client2 = await self._start_runtime()
-        ws_sub = await client2.ws_connect("/v1/ws")
-        await ws_sub.send_json(
-            {"v": 1, "t": "session.start", "id": "start2", "body": {"auth_token": "t", "device_id": "dsub"}}
-        )
-        await ws_sub.receive_json()
+        ws_sub, _ = await self._start_session(client2, device_id="dsub")
         await ws_sub.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1", "from_seq": 1}})
 
         replay = await ws_sub.receive_json()
         self.assertEqual(replay["body"]["seq"], 1)
 
-        ws_sender = await client2.ws_connect("/v1/ws")
-        await ws_sender.send_json(
-            {"v": 1, "t": "session.start", "id": "start3", "body": {"auth_token": "t", "device_id": "d1"}}
-        )
-        await ws_sender.receive_json()
+        ws_sender, _ = await self._start_session(client2)
         await ws_sender.send_json(send_frame)
         retry_ack = await ws_sender.receive_json()
         self.assertEqual(retry_ack["body"]["seq"], 1)
@@ -126,6 +134,19 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
         await ws_sender.close()
         await ws_sub.close()
+
+    async def test_non_member_cannot_subscribe(self):
+        client = await self._start_runtime()
+        owner_ws, ready = await self._start_session(client, auth_token="owner")
+        await self._create_room(client, ready["body"]["session_token"], "c1")
+
+        outsider_ws, _ = await self._start_session(client, auth_token="outsider", device_id="dother")
+        await outsider_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1"}})
+        error = await outsider_ws.receive_json()
+        self.assertEqual(error["body"]["code"], "forbidden")
+
+        await owner_ws.close()
+        await outsider_ws.close()
 
 
 if __name__ == "__main__":
