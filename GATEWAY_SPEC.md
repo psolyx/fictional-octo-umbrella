@@ -117,6 +117,26 @@ Semantics match WS frames.
 - Clients use the returned `cursors` as the default replay position when later sending `conv.subscribe` without `from_seq`.
 - Deprecated legacy cursor compatibility: servers MAY accept `session.resume.body.cursor` as a best-effort hint shaped like `{ "conv_id": "...", "after_seq": <int> }` (or `seq` defined as `after_seq`). This hint is exclusive and maps to `from_seq = after_seq + 1`, is optional, and MUST NOT regress stored cursors.
 
+### 4.3 HTTP session endpoints (WS-optional)
+- `POST /v1/session/start` mirrors the WS `session.start` body and returns the `session.ready.body` schema:
+  ```http
+  POST /v1/session/start
+  Content-Type: application/json
+
+  { "auth_token": "Bearer ey...", "device_id": "d_01G...", "device_credential": "b64" }
+  ```
+  Response:
+  ```json
+  {
+    "user_id": "u_01K...",
+    "session_token": "st_01J...",
+    "resume_token": "rt_01J...",
+    "expires_at": 1766797200123,
+    "cursors": [ { "conv_id": "c_7N7...", "next_seq": 1025 } ]
+  }
+  ```
+- `POST /v1/session/resume` accepts `{ "resume_token": "rt_..." }` and returns the same body as `session.ready` on success. On failure it returns `{ "code": "resume_failed", "message": "resume token invalid or expired" }`.
+
 ---
 
 ## 5. Framing
@@ -281,6 +301,32 @@ Semantics match WS frames.
   ```
 - Clients MAY proactively send `ping` to measure liveness.
 - Idle timeout guidance: servers SHOULD close connections after 2× missed heartbeats; clients MUST re-resume using the latest `resume_token`.
+
+### 7.6 SSE + HTTP inbox fallback
+- Endpoint: `POST /v1/inbox` (HTTP) authenticated via `Authorization: Bearer {session_token}`.
+  - Body wraps WS-equivalent frames:
+    ```json
+    { "v": 1, "t": "conv.send", "body": { "conv_id": "c_7N7...", "msg_id": "m_01H...", "env": "base64" } }
+    ```
+    ```json
+    { "v": 1, "t": "conv.ack", "body": { "conv_id": "c_7N7...", "seq": 10 } }
+    ```
+  - Responses:
+    - `conv.send` → `{ "status": "ok", "seq": <assigned_seq> }` (idempotent on retries).
+    - `conv.ack` → `{ "status": "ok" }` after advancing the cursor (`next_seq = max(next_seq, seq+1)`).
+  - Membership and idempotency invariants are identical to the WS transport.
+- Endpoint: `GET /v1/sse` (HTTP, streaming) authenticated via `Authorization: Bearer {session_token}`.
+  - Query params: `conv_id` (required), `from_seq` (optional inclusive start), `after_seq` (optional legacy; maps to `from_seq = after_seq + 1` when `from_seq` is omitted).
+  - Membership MUST be enforced on connect and during the stream; revoked members stop receiving events and the stream closes.
+  - Replay + live stream: server delivers `conv.event` starting at `from_seq` inclusive, then streams new events in `seq` order.
+  - SSE wire format:
+    ```
+    event: conv.event
+    data: {"v":1,"t":"conv.event","body":{"conv_id":"c_7N7...","seq":1,"msg_id":"m_01H...","env":"base64","sender_device_id":"d_01G..."}}
+
+    : ping
+    ```
+    - Keepalive comments (`: ping`) SHOULD be sent roughly every 15 seconds during idle periods.
 
 ---
 

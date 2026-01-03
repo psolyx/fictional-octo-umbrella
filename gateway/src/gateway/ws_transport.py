@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import secrets
-from typing import Any, Callable, List, Union
+from typing import Any, Callable, List, Tuple, Union
 
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
 if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
@@ -130,6 +131,10 @@ def _invalid_request(message: str) -> web.Response:
     return web.json_response({"code": "invalid_request", "message": message}, status=400)
 
 
+def _resume_failed() -> web.Response:
+    return web.json_response({"code": "resume_failed", "message": "resume token invalid or expired"}, status=401)
+
+
 def _rate_limited(message: str) -> web.Response:
     return web.json_response({"code": "rate_limited", "message": message}, status=429)
 
@@ -160,6 +165,66 @@ def _authenticate_request(request: web.Request) -> Session | None:
         return None
     session_token = auth_header[len("Bearer ") :].strip()
     return runtime.sessions.get_by_session(session_token)
+
+
+def _session_ready_body(runtime: Runtime, session: Session) -> dict[str, Any]:
+    cursor_rows = runtime.cursors.list_cursors(session.device_id)
+    return {
+        "user_id": session.user_id,
+        "session_token": session.session_token,
+        "resume_token": session.resume_token,
+        "expires_at": session.expires_at_ms,
+        "cursors": [{"conv_id": conv_id, "next_seq": next_seq} for conv_id, next_seq in cursor_rows],
+    }
+
+
+def _validate_session_start_body(body: dict[str, Any]) -> Tuple[tuple[str, str] | None, str | None]:
+    auth_token = body.get("auth_token")
+    device_id = body.get("device_id")
+    device_credential = body.get("device_credential")
+    if not auth_token or not device_id:
+        return None, "auth_token and device_id required"
+    if not isinstance(auth_token, str) or not isinstance(device_id, str):
+        return None, "auth_token and device_id must be strings"
+    if device_credential is not None and not isinstance(device_credential, str):
+        return None, "device_credential must be a string if provided"
+    user_id = _derive_user_id(auth_token)
+    return (user_id, device_id), None
+
+
+def _validate_session_resume_body(body: dict[str, Any]) -> Tuple[str | None, str | None]:
+    resume_token = body.get("resume_token")
+    if not resume_token:
+        return None, "resume_token required"
+    if not isinstance(resume_token, str):
+        return None, "resume_token must be a string"
+    return resume_token, None
+
+
+def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any]) -> tuple[int | None, ConversationEvent | None, tuple[str, str] | None]:
+    conv_id = body.get("conv_id")
+    msg_id = body.get("msg_id")
+    env = body.get("env")
+    ts = body.get("ts") or _now_ms()
+    if not conv_id or not msg_id or env is None:
+        return None, None, ("invalid_request", "conv_id, msg_id, env required")
+    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
+        return None, None, ("forbidden", "not a member")
+    seq, event, created = runtime.log.append(conv_id, msg_id, env, session.device_id, ts)
+    if created:
+        runtime.hub.broadcast(event)
+    return seq, event, None
+
+
+def _process_conv_ack(runtime: Runtime, session: Session, body: dict[str, Any]) -> tuple[str, str] | None:
+    conv_id = body.get("conv_id")
+    seq = body.get("seq")
+    if not conv_id or seq is None:
+        return "invalid_request", "conv_id and seq required"
+    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
+        return "forbidden", "not a member"
+    runtime.cursors.ack(session.device_id, conv_id, int(seq))
+    return None
 
 
 async def handle_keypackage_publish(request: web.Request) -> web.Response:
@@ -237,6 +302,45 @@ async def handle_keypackage_rotate(request: web.Request) -> web.Response:
 def _no_store_response(data: dict[str, Any], status: int = 200) -> web.Response:
     response = web.json_response(data, status=status)
     return _with_no_store(response)
+
+
+async def handle_session_start_http(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    try:
+        body = await request.json()
+    except Exception:
+        return _no_store_response({"code": "invalid_request", "message": "malformed json"}, status=400)
+
+    parsed, error = _validate_session_start_body(body if isinstance(body, dict) else {})
+    if error:
+        return _no_store_response({"code": "invalid_request", "message": error}, status=400)
+
+    assert parsed is not None
+    user_id, device_id = parsed
+    session = runtime.sessions.create(user_id, device_id)
+    ready_body = _session_ready_body(runtime, session)
+    return _no_store_response(ready_body)
+
+
+async def handle_session_resume_http(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    try:
+        body = await request.json()
+    except Exception:
+        return _no_store_response({"code": "invalid_request", "message": "malformed json"}, status=400)
+
+    parsed, error = _validate_session_resume_body(body if isinstance(body, dict) else {})
+    if error:
+        return _no_store_response({"code": "invalid_request", "message": error}, status=400)
+
+    resume_token = parsed
+    assert resume_token is not None
+    session = runtime.sessions.consume_resume(resume_token)
+    if session is None:
+        return _no_store_response({"code": "resume_failed", "message": "resume token invalid or expired"}, status=401)
+
+    ready_body = _session_ready_body(runtime, session)
+    return _no_store_response(ready_body)
 
 
 async def handle_presence_lease(request: web.Request) -> web.Response:
@@ -371,6 +475,193 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
+
+
+async def handle_inbox(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    if not isinstance(body, dict) or body.get("v") != 1:
+        return _invalid_request("invalid frame envelope")
+
+    frame_type = body.get("t")
+    frame_body = body.get("body") or {}
+
+    if frame_type == "conv.send":
+        seq, _, error = _process_conv_send(runtime, session, frame_body)
+        if error:
+            code, message = error
+            if code == "forbidden":
+                return _forbidden(message)
+            return _invalid_request(message)
+        assert seq is not None
+        return web.json_response({"status": "ok", "seq": seq})
+    if frame_type == "conv.ack":
+        error = _process_conv_ack(runtime, session, frame_body)
+        if error:
+            code, message = error
+            if code == "forbidden":
+                return _forbidden(message)
+            return _invalid_request(message)
+        return web.json_response({"status": "ok"})
+
+    return _invalid_request("unsupported frame type")
+
+
+async def handle_sse(request: web.Request) -> web.StreamResponse:
+    runtime: Runtime = request.app["runtime"]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+
+    conv_id = request.query.get("conv_id")
+    if not conv_id:
+        return _invalid_request("conv_id required")
+
+    from_seq_param = request.query.get("from_seq")
+    after_seq_param = request.query.get("after_seq")
+
+    if from_seq_param is not None:
+        try:
+            from_seq = int(from_seq_param)
+        except ValueError:
+            return _invalid_request("from_seq must be an integer")
+    elif after_seq_param is not None:
+        try:
+            from_seq = int(after_seq_param) + 1
+        except ValueError:
+            return _invalid_request("after_seq must be an integer")
+    else:
+        from_seq = runtime.cursors.next_seq(session.device_id, conv_id)
+
+    if from_seq < 1:
+        return _invalid_request("from_seq must be at least 1")
+
+    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
+        return _forbidden("not a member")
+
+    response = web.StreamResponse(
+        status=200,
+        headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store"},
+    )
+    await response.prepare(request)
+
+    outbound: asyncio.Queue[ConversationEvent | None] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    buffering = True
+    buffered_events: list[ConversationEvent] = []
+    revoked = False
+
+    def stop_subscription(subscription: Subscription | None) -> None:
+        nonlocal revoked
+        if revoked:
+            return
+        revoked = True
+        if subscription is not None:
+            runtime.hub.unsubscribe(subscription)
+        stop_event.set()
+
+    def guarded_enqueue(event: ConversationEvent, subscription: Subscription | None) -> None:
+        if revoked:
+            return
+        if not runtime.conversations.is_member(event.conv_id, session.user_id):
+            stop_subscription(subscription)
+            return
+        try:
+            outbound.put_nowait(event)
+        except asyncio.QueueFull:
+            stop_subscription(subscription)
+
+    def buffering_enqueue(event: ConversationEvent, subscription: Subscription | None) -> None:
+        if revoked:
+            return
+        if buffering:
+            buffered_events.append(event)
+            return
+        guarded_enqueue(event, subscription)
+
+    subscription: Subscription | None = None
+
+    def subscription_callback(event: ConversationEvent) -> None:
+        buffering_enqueue(event, subscription)
+
+    subscription = runtime.hub.subscribe(session.device_id, conv_id, subscription_callback)
+
+    events = runtime.log.list_from(conv_id, from_seq)
+    for event in events:
+        guarded_enqueue(event, subscription)
+
+    buffering = False
+    for event in buffered_events:
+        guarded_enqueue(event, subscription)
+
+    async def keepalive() -> None:
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(15)
+                if stop_event.is_set():
+                    break
+                try:
+                    await response.write(b": ping\n\n")
+                    await response.drain()
+                except ConnectionResetError:
+                    stop_subscription(subscription)
+                    break
+        except asyncio.CancelledError:
+            return
+
+    async def stop_watcher() -> None:
+        await stop_event.wait()
+        try:
+            outbound.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    keepalive_task = asyncio.create_task(keepalive())
+    watcher_task = asyncio.create_task(stop_watcher())
+
+    try:
+        while True:
+            event = await outbound.get()
+            if event is None:
+                break
+            payload = {
+                "v": 1,
+                "t": "conv.event",
+                "body": {
+                    "conv_id": event.conv_id,
+                    "seq": event.seq,
+                    "msg_id": event.msg_id,
+                    "env": event.envelope_b64,
+                    "sender_device_id": event.sender_device_id,
+                },
+            }
+            data = json.dumps(payload)
+            try:
+                await response.write(b"event: conv.event\n")
+                await response.write(f"data: {data}\n\n".encode("utf-8"))
+                await response.drain()
+            except ConnectionResetError:
+                stop_subscription(subscription)
+                break
+    finally:
+        stop_event.set()
+        runtime.hub.unsubscribe(subscription)
+        keepalive_task.cancel()
+        watcher_task.cancel()
+        await asyncio.gather(keepalive_task, watcher_task, return_exceptions=True)
+        try:
+            await response.write_eof()
+        except Exception:
+            pass
+
+    return response
 
 
 async def _parse_room_members(body: dict[str, Any]) -> list[str] | None:
@@ -567,6 +858,10 @@ def create_app(
     app.router.add_post("/v1/keypackages", handle_keypackage_publish)
     app.router.add_post("/v1/keypackages/fetch", handle_keypackage_fetch)
     app.router.add_post("/v1/keypackages/rotate", handle_keypackage_rotate)
+    app.router.add_post("/v1/session/start", handle_session_start_http)
+    app.router.add_post("/v1/session/resume", handle_session_resume_http)
+    app.router.add_post("/v1/inbox", handle_inbox)
+    app.router.add_get("/v1/sse", handle_sse)
     app.router.add_post("/v1/presence/lease", handle_presence_lease)
     app.router.add_post("/v1/presence/renew", handle_presence_renew)
     app.router.add_post("/v1/presence/watch", handle_presence_watch)
@@ -698,30 +993,25 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         body = payload.get("body") or {}
 
         if t == "session.start":
-            auth_token = body.get("auth_token")
-            device_id = body.get("device_id")
-            if not auth_token or not device_id:
+            parsed, error = _validate_session_start_body(body)
+            if error:
                 await ws.send_json(
-                    _error_frame("invalid_request", "auth_token and device_id required", request_id=payload.get("id"))
+                    _error_frame("invalid_request", error, request_id=payload.get("id"))
                 )
                 await ws.close()
                 return ws
-            if not isinstance(auth_token, str):
-                await ws.send_json(
-                    _error_frame("invalid_request", "auth_token must be a string", request_id=payload.get("id"))
-                )
-                await ws.close()
-                return ws
-            user_id = _derive_user_id(auth_token)
+            assert parsed is not None
+            user_id, device_id = parsed
             session = runtime.sessions.create(user_id, device_id)
         elif t == "session.resume":
-            resume_token = body.get("resume_token")
-            if not resume_token:
+            resume_token, error = _validate_session_resume_body(body)
+            if error:
                 await ws.send_json(
-                    _error_frame("invalid_request", "resume_token required", request_id=payload.get("id"))
+                    _error_frame("invalid_request", error, request_id=payload.get("id"))
                 )
                 await ws.close()
                 return ws
+            assert resume_token is not None
             session = runtime.sessions.consume_resume(resume_token)
             if session is None:
                 await ws.send_json(
@@ -736,20 +1026,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
         mark_activity()
         device_id = session.device_id
-        cursor_rows = runtime.cursors.list_cursors(device_id)
-        cursors = [{"conv_id": conv_id, "next_seq": next_seq} for conv_id, next_seq in cursor_rows]
         ready_frame = {
             "v": 1,
             "t": "session.ready",
             "id": payload.get("id"),
-            "body": {
-                "session_token": session.session_token,
-                "resume_token": session.resume_token,
-                "expires_at": session.expires_at_ms,
-                "cursors": cursors,
-            },
+            "body": _session_ready_body(runtime, session),
         }
-        ready_frame["body"]["user_id"] = session.user_id
         await ws.send_json(ready_frame)
 
         runtime.presence.register_callback(session.user_id, device_id, enqueue_event)
@@ -846,43 +1128,26 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     for event in buffered_events:
                         guarded_enqueue(event)
                 elif frame_type == "conv.send":
-                    conv_id = body.get("conv_id")
-                    msg_id = body.get("msg_id")
-                    env = body.get("env")
-                    if not conv_id or not msg_id or env is None:
-                        await ws.send_json(
-                            _error_frame("invalid_request", "conv_id, msg_id, env required", request_id=frame.get("id"))
-                        )
+                    seq, _, error = _process_conv_send(runtime, session, body)
+                    if error:
+                        await ws.send_json(_error_frame(error[0], error[1], request_id=frame.get("id")))
                         continue
-                    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(
-                        conv_id, session.user_id
-                    ):
-                        await ws.send_json(
-                            _error_frame("forbidden", "not a member", request_id=frame.get("id"))
-                        )
-                        continue
-                    seq, event, created = runtime.log.append(
-                        conv_id, msg_id, env, session.device_id, body.get("ts") or _now_ms()
-                    )
-                    if created:
-                        runtime.hub.broadcast(event)
+                    assert seq is not None
                     await ws.send_json(
                         {
                             "v": 1,
                             "t": "conv.acked",
                             "id": frame.get("id"),
-                            "body": {"conv_id": conv_id, "msg_id": msg_id, "seq": seq},
+                            "body": {"conv_id": body.get("conv_id"), "msg_id": body.get("msg_id"), "seq": seq},
                         }
                     )
                 elif frame_type == "conv.ack":
-                    conv_id = body.get("conv_id")
-                    seq = body.get("seq")
-                    if not conv_id or seq is None:
+                    error = _process_conv_ack(runtime, session, body)
+                    if error:
                         await ws.send_json(
-                            _error_frame("invalid_request", "conv_id and seq required", request_id=frame.get("id"))
+                            _error_frame(error[0], error[1], request_id=frame.get("id"))
                         )
                         continue
-                    runtime.cursors.ack(session.device_id, conv_id, int(seq))
                 else:
                     await ws.send_json(
                         _error_frame("invalid_request", "unknown frame type", request_id=frame.get("id"))
