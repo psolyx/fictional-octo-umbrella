@@ -45,6 +45,8 @@ class TestMLSHarnessSmoke(unittest.TestCase):
         env: Dict[str, str] = dict(os.environ)
         env.setdefault("GOTOOLCHAIN", "local")
         env.setdefault("GOFLAGS", "-mod=vendor")
+        env.setdefault("GOMAXPROCS", "1")
+        env.setdefault("GOMEMLIMIT", "700MiB")
 
         repo_root = Path(__file__).resolve().parents[2]
         harness_dir = repo_root / "tools" / "mls_harness"
@@ -53,6 +55,8 @@ class TestMLSHarnessSmoke(unittest.TestCase):
             cmd = [
                 go_bin,
                 "run",
+                "-p",
+                "1",
                 "./cmd/mls-harness",
                 "smoke",
                 "--iterations",
