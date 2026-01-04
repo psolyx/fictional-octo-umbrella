@@ -19,7 +19,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
         f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway WS tests, found {_installed_aiohttp}"
     )
 
-from gateway.ws_transport import SessionStore, create_app
+from gateway.ws_transport import SessionStore, _process_conv_send, create_app
 
 
 class ResumeTokenRotationTests(unittest.TestCase):
@@ -163,6 +163,72 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg_ids, [msg for msg, _ in sent_messages])
         self.assertEqual(seqs, list(range(1, expected_events + 1)))
         self.assertEqual(len(set(msg_ids)), expected_events)
+
+
+class ResumeStormInvariantTests(unittest.TestCase):
+    def test_resume_storm_preserves_order_and_idempotency(self):
+        app = create_app(ping_interval_s=3600, start_presence_sweeper=False)
+        runtime = app["runtime"]
+
+        user_id = "user"
+        device_id = "device"
+        conv_id = "resume-storm"
+
+        runtime.conversations.create(conv_id, user_id, members=[])
+        session = runtime.sessions.create(user_id, device_id)
+        resume_token = session.resume_token
+
+        events: list = []
+
+        def on_event(event):
+            events.append(event)
+
+        subscription = runtime.hub.subscribe(device_id, conv_id, on_event)
+
+        send_every = 100
+        expected_next_seq = 1
+        last_seq = 0
+        msg_count = 0
+
+        try:
+            for i in range(10_000):
+                resumed = runtime.sessions.consume_resume(resume_token)
+                self.assertIsNotNone(resumed)
+                session = resumed
+                resume_token = resumed.resume_token
+
+                if (i + 1) % send_every == 0:
+                    msg_count += 1
+                    msg_id = f"m{msg_count}"
+                    body = {"conv_id": conv_id, "msg_id": msg_id, "env": "ZW4=", "ts": i}
+
+                    seq, event, error = _process_conv_send(runtime, session, body)
+                    self.assertIsNone(error)
+                    self.assertIsNotNone(seq)
+                    self.assertIsNotNone(event)
+                    self.assertEqual(len(events), msg_count)
+                    self.assertGreater(seq, last_seq)
+
+                    seq_retry, event_retry, retry_error = _process_conv_send(runtime, session, body)
+                    self.assertIsNone(retry_error)
+                    self.assertEqual(seq_retry, seq)
+                    self.assertIs(event_retry, event)
+                    self.assertEqual(len(events), msg_count)
+
+                    last_seq = seq
+                    next_seq = runtime.cursors.ack(session.device_id, conv_id, seq)
+                    expected_next_seq = max(expected_next_seq, seq + 1)
+                    self.assertEqual(next_seq, expected_next_seq)
+                    self.assertEqual(runtime.cursors.next_seq(session.device_id, conv_id), expected_next_seq)
+        finally:
+            runtime.hub.unsubscribe(subscription)
+
+        self.assertEqual(msg_count, len(events))
+        seqs = [event.seq for event in events]
+        msg_ids = [event.msg_id for event in events]
+        self.assertEqual(seqs, list(range(1, msg_count + 1)))
+        self.assertEqual(msg_ids, [f"m{i}" for i in range(1, msg_count + 1)])
+        self.assertEqual(runtime.cursors.next_seq(device_id, conv_id), last_seq + 1)
 
 
 if __name__ == "__main__":
