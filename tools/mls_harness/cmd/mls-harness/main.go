@@ -158,6 +158,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "vector verification failed: %v\n", err)
 			os.Exit(1)
 		}
+	case "wg-vectors":
+		wgVectors := flag.NewFlagSet("wg-vectors", flag.ExitOnError)
+		dir := wgVectors.String("vectors-dir", defaultWGVectorsDir, "directory containing MLSWG JSON vectors")
+		maxBytes := wgVectors.Int64("max-bytes", defaultWGMaxBytes, "maximum size per vector file in bytes")
+		if err := wgVectors.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to parse wg-vectors flags: %v\n", err)
+			os.Exit(2)
+		}
+
+		if err := runWGVectors(*dir, *maxBytes); err != nil {
+			fmt.Fprintf(os.Stderr, "wg-vectors failed: %v\n", err)
+			os.Exit(1)
+		}
 	case "soak":
 		soak := flag.NewFlagSet("soak", flag.ExitOnError)
 		iterations := soak.Int("iterations", 1000, "number of message iterations per participant")
@@ -178,7 +191,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: mls-harness <smoke|vectors|soak|dm-*> [flags]\n")
+	fmt.Fprintf(os.Stderr, "usage: mls-harness <smoke|vectors|wg-vectors|soak|dm-*> [flags]\n")
 	os.Exit(2)
 }
 
