@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -213,15 +214,20 @@ class ProcMetricsCollector:
 
 
 def spawn_server(base_url: str) -> subprocess.Popen[bytes]:
+    repo_root = Path(__file__).resolve().parent.parent
+    gateway_root = repo_root / 'gateway'
     parsed = urlparse(base_url)
     host = parsed.hostname or '127.0.0.1'
     port = parsed.port or 8080
-    python_path = os.path.join('gateway', '.venv', 'bin', 'python')
-    if not os.path.exists(python_path):
+    python_path = gateway_root / '.venv' / 'bin' / 'python'
+    if not python_path.exists():
         sys.exit("gateway/.venv missing. Run 'ALLOW_AIOHTTP_STUB=0 make -C gateway setup' first.")
 
-    cmd = [python_path, '-m', 'gateway.server', 'serve', '--host', host, '--port', str(port)]
-    return subprocess.Popen(cmd, cwd='gateway')
+    env = os.environ.copy()
+    env.setdefault('PYTHONPATH', str(gateway_root / 'src'))
+
+    cmd = [str(python_path), '-m', 'gateway.server', 'serve', '--host', host, '--port', str(port)]
+    return subprocess.Popen(cmd, cwd=gateway_root, env=env)
 
 
 async def wait_for_ready(session: aiohttp.ClientSession, attempts: int = 10) -> None:
@@ -302,12 +308,12 @@ async def main() -> None:
                 state = await start_device(session, args.conv_id, args.auth_token, f'device-{i}')
                 sessions.append(state)
 
-        senders = []
-        if args.messages > 0:
-            for state in sessions:
-                senders.append(asyncio.create_task(send_messages(state, args.messages, args.message_interval)))
+            senders: list[asyncio.Task] = []
+            if args.messages > 0:
+                for state in sessions:
+                    senders.append(asyncio.create_task(send_messages(state, args.messages, args.message_interval)))
 
-            resume_tasks = []
+            resume_tasks: list[asyncio.Task] = []
             if args.resume_cycles > 0:
                 interval = max(args.duration_seconds / max(args.resume_cycles, 1), 0.1)
                 for state in sessions:
@@ -317,15 +323,23 @@ async def main() -> None:
                         )
                     )
 
-            await asyncio.gather(*senders)
+            if senders:
+                await asyncio.gather(*senders)
+
             await asyncio.sleep(args.duration_seconds)
-            await asyncio.gather(*resume_tasks)
+
+            if resume_tasks:
+                await asyncio.gather(*resume_tasks)
+
             await asyncio.sleep(args.drain_seconds)
 
+            close_tasks = []
             for state in sessions:
                 async with state.lock:
                     await state.ws.close()
-                await asyncio.gather(state.reader_task, return_exceptions=True)
+                close_tasks.append(state.reader_task)
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
     finally:
         if metrics_collector and metrics_task:
             metrics_collector.stop()
