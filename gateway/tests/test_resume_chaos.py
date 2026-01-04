@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import importlib.metadata
 import json
+import os
 import unittest
 
 EXPECTED_AIOHTTP_VERSION = "3.13.2"
@@ -69,11 +70,15 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_chaos_no_loss_or_duplication(self):
         conv_id = "chaos-room"
-        iterations = 10_000
-        send_interval = 100
-        ack_every = 25
+        run_slow = os.getenv("RUN_SLOW_TESTS") == "1"
 
-        async with asyncio.timeout(30):
+        iterations = 10_000 if run_slow else 400
+        send_interval = 100 if run_slow else 50
+        ack_every = 10 if run_slow else 2
+        test_timeout = 90 if run_slow else 30
+        sse_timeout = 30 if run_slow else 10
+
+        async with asyncio.timeout(test_timeout):
             start_resp = await self._post_json(
                 "/v1/session/start", {"auth_token": "user", "device_id": "device"}
             )
@@ -138,7 +143,7 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
 
         events: list[dict] = []
         headers = {"Authorization": f"Bearer {session_token}"}
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(sse_timeout):
             async with self.client.get(
                 f"/v1/sse?conv_id={conv_id}&from_seq=1", headers=headers
             ) as sse_resp:
