@@ -60,90 +60,91 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
 
     async def _post_json(self, path: str, payload: dict, *, headers: dict | None = None):
         resp = await asyncio.wait_for(
-            self.client.post(path, json=payload, headers=headers), timeout=1.0
+            self.client.post(path, json=payload, headers=headers), timeout=3.0
         )
         return resp
 
     async def _fetch_json(self, resp):
-        return await asyncio.wait_for(resp.json(), timeout=1.0)
+        return await asyncio.wait_for(resp.json(), timeout=3.0)
 
     async def test_resume_chaos_no_loss_or_duplication(self):
         conv_id = "chaos-room"
-        iterations = 200
-        send_interval = 10
-        ack_every = 50
+        iterations = 10_000
+        send_interval = 100
+        ack_every = 25
 
-        start_resp = await self._post_json(
-            "/v1/session/start", {"auth_token": "user", "device_id": "device"}
-        )
-        self.assertEqual(start_resp.status, 200)
-        ready = await self._fetch_json(start_resp)
-        session_token = ready["session_token"]
-        resume_token = ready["resume_token"]
-
-        create_resp = await self._post_json(
-            "/v1/rooms/create",
-            {"conv_id": conv_id, "members": []},
-            headers={"Authorization": f"Bearer {session_token}"},
-        )
-        self.assertEqual(create_resp.status, 200)
-        await self._fetch_json(create_resp)
-
-        sent_messages: list[tuple[str, int]] = []
-        last_seq = 0
-
-        for i in range(iterations):
-            resume_resp = await self._post_json(
-                "/v1/session/resume", {"resume_token": resume_token}
+        async with asyncio.timeout(30):
+            start_resp = await self._post_json(
+                "/v1/session/start", {"auth_token": "user", "device_id": "device"}
             )
-            self.assertEqual(resume_resp.status, 200)
-            ready = await self._fetch_json(resume_resp)
+            self.assertEqual(start_resp.status, 200)
+            ready = await self._fetch_json(start_resp)
             session_token = ready["session_token"]
-            new_resume_token = ready["resume_token"]
-            self.assertNotEqual(new_resume_token, resume_token)
-            resume_token = new_resume_token
+            resume_token = ready["resume_token"]
 
-            if (i + 1) % send_interval == 0:
-                msg_id = f"m{len(sent_messages) + 1}"
-                send_resp = await self._post_json(
-                    "/v1/inbox",
-                    {
-                        "v": 1,
-                        "t": "conv.send",
-                        "body": {"conv_id": conv_id, "msg_id": msg_id, "env": "ZW4=", "ts": i},
-                    },
-                    headers={"Authorization": f"Bearer {session_token}"},
+            create_resp = await self._post_json(
+                "/v1/rooms/create",
+                {"conv_id": conv_id, "members": []},
+                headers={"Authorization": f"Bearer {session_token}"},
+            )
+            self.assertEqual(create_resp.status, 200)
+            await self._fetch_json(create_resp)
+
+            sent_messages: list[tuple[str, int]] = []
+            last_seq = 0
+
+            for i in range(iterations):
+                resume_resp = await self._post_json(
+                    "/v1/session/resume", {"resume_token": resume_token}
                 )
-                self.assertEqual(send_resp.status, 200)
-                send_body = await self._fetch_json(send_resp)
-                last_seq = send_body["seq"]
-                sent_messages.append((msg_id, last_seq))
+                self.assertEqual(resume_resp.status, 200)
+                ready = await self._fetch_json(resume_resp)
+                session_token = ready["session_token"]
+                new_resume_token = ready["resume_token"]
+                self.assertNotEqual(new_resume_token, resume_token)
+                resume_token = new_resume_token
 
-                if len(sent_messages) % ack_every == 0:
-                    ack_resp = await self._post_json(
+                if (i + 1) % send_interval == 0:
+                    msg_id = f"m{len(sent_messages) + 1}"
+                    send_resp = await self._post_json(
                         "/v1/inbox",
                         {
                             "v": 1,
-                            "t": "conv.ack",
-                            "body": {"conv_id": conv_id, "seq": last_seq},
+                            "t": "conv.send",
+                            "body": {"conv_id": conv_id, "msg_id": msg_id, "env": "ZW4=", "ts": i},
                         },
                         headers={"Authorization": f"Bearer {session_token}"},
                     )
-                    self.assertEqual(ack_resp.status, 200)
-                    await self._fetch_json(ack_resp)
+                    self.assertEqual(send_resp.status, 200)
+                    send_body = await self._fetch_json(send_resp)
+                    last_seq = send_body["seq"]
+                    sent_messages.append((msg_id, last_seq))
+
+                    if len(sent_messages) % ack_every == 0:
+                        ack_resp = await self._post_json(
+                            "/v1/inbox",
+                            {
+                                "v": 1,
+                                "t": "conv.ack",
+                                "body": {"conv_id": conv_id, "seq": last_seq},
+                            },
+                            headers={"Authorization": f"Bearer {session_token}"},
+                        )
+                        self.assertEqual(ack_resp.status, 200)
+                        await self._fetch_json(ack_resp)
 
         expected_events = len(sent_messages)
         self.assertGreater(expected_events, 0)
 
         events: list[dict] = []
         headers = {"Authorization": f"Bearer {session_token}"}
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(10):
             async with self.client.get(
                 f"/v1/sse?conv_id={conv_id}&from_seq=1", headers=headers
             ) as sse_resp:
                 self.assertEqual(sse_resp.status, 200)
                 while len(events) < expected_events:
-                    line = await asyncio.wait_for(sse_resp.content.readline(), timeout=1.0)
+                    line = await asyncio.wait_for(sse_resp.content.readline(), timeout=2.0)
                     if not line:
                         continue
                     if line.startswith(b"data: "):
