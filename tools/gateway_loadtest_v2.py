@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import tempfile
+from typing import IO, Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -213,12 +215,15 @@ class ProcMetricsCollector:
         return sum(cpu_values) / len(cpu_values), max(cpu_values)
 
 
-def spawn_server(base_url: str) -> subprocess.Popen[bytes]:
+def pick_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+
+
+def spawn_server(host: str, port: int) -> tuple[subprocess.Popen[bytes], IO[str], Path]:
     repo_root = Path(__file__).resolve().parent.parent
     gateway_root = repo_root / 'gateway'
-    parsed = urlparse(base_url)
-    host = parsed.hostname or '127.0.0.1'
-    port = parsed.port or 8080
     python_path = gateway_root / '.venv' / 'bin' / 'python'
     if not python_path.exists():
         sys.exit("gateway/.venv missing. Run 'ALLOW_AIOHTTP_STUB=0 make -C gateway setup' first.")
@@ -226,22 +231,51 @@ def spawn_server(base_url: str) -> subprocess.Popen[bytes]:
     env = os.environ.copy()
     env.setdefault('PYTHONPATH', str(gateway_root / 'src'))
 
+    log_file = tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', delete=False)
     cmd = [str(python_path), '-m', 'gateway.server', 'serve', '--host', host, '--port', str(port)]
-    return subprocess.Popen(cmd, cwd=gateway_root, env=env)
+    process = subprocess.Popen(cmd, cwd=gateway_root, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+    return process, log_file, Path(log_file.name)
 
 
-async def wait_for_ready(session: aiohttp.ClientSession, attempts: int = 10) -> None:
+def _read_log_excerpt(log_file: IO[str], max_bytes: int = 4000) -> str:
+    log_file.flush()
+    log_file.seek(0, os.SEEK_END)
+    end = log_file.tell()
+    if end == 0:
+        return ''
+    to_read = min(max_bytes, end)
+    log_file.seek(-to_read, os.SEEK_END)
+    return log_file.read()
+
+
+async def wait_for_ready(
+    session: aiohttp.ClientSession,
+    attempts: int = 10,
+    *,
+    process: Optional[subprocess.Popen[bytes]] = None,
+    log_file: Optional[IO[str]] = None,
+) -> None:
     for _ in range(attempts):
+        if process and process.poll() is not None:
+            details = _read_log_excerpt(log_file) if log_file else ''
+            message = f'Gateway server exited early with code {process.returncode}.'
+            if details:
+                message += f"\nServer output:\n{details}"
+            raise RuntimeError(message)
         try:
             async with session.get('/healthz') as resp:
-                if resp.status < 500:
-                    await resp.text()
+                body = await resp.text()
+                if resp.status == 200 and body.strip() == 'ok':
                     return
         except Exception:
             await asyncio.sleep(0.5)
             continue
         await asyncio.sleep(0.2)
-    await asyncio.sleep(1.0)
+    details = _read_log_excerpt(log_file) if log_file else ''
+    message = 'Gateway did not become ready after health checks.'
+    if details:
+        message += f"\nServer output:\n{details}"
+    raise RuntimeError(message)
 
 
 def format_bytes(num_bytes: Optional[int]) -> str:
@@ -266,6 +300,7 @@ async def main() -> None:
     parser.add_argument('--drain-seconds', type=float, default=5.0, help='Time to wait for events before closing')
     parser.add_argument('--resume-cycles', type=int, default=0, help='Resume storms per session')
     parser.add_argument('--spawn-server', action='store_true', help='Spawn a local gateway server from gateway/.venv')
+    parser.add_argument('--spawn-port', type=int, default=0, help='Port for spawned server (0 = auto-pick)')
     parser.add_argument('--json-out', type=str, default=None, help='Write metrics to a JSON file')
     args = parser.parse_args()
 
@@ -274,14 +309,31 @@ async def main() -> None:
     server_process: Optional[subprocess.Popen[bytes]] = None
     sessions: List[SessionState] = []
 
+    server_log: Optional[IO[str]] = None
+    server_log_path: Optional[Path] = None
+    base_url = args.base_url
+    spawn_host: Optional[str] = None
+    spawn_port: Optional[int] = None
+
+    if args.spawn_server:
+        parsed = urlparse(args.base_url)
+        spawn_host = parsed.hostname or '127.0.0.1'
+        spawn_port = args.spawn_port if args.spawn_port is not None else 0
+        if spawn_port == 0:
+            spawn_port = pick_free_port(spawn_host)
+        scheme = parsed.scheme or 'http'
+        base_url = f'{scheme}://{spawn_host}:{spawn_port}'
+
     timeout = aiohttp.ClientTimeout(total=None)
     try:
-        async with aiohttp.ClientSession(base_url=args.base_url, timeout=timeout) as session:
+        async with aiohttp.ClientSession(base_url=base_url, timeout=timeout) as session:
             if args.spawn_server:
-                server_process = spawn_server(args.base_url)
+                if spawn_host is None or spawn_port is None:
+                    raise RuntimeError('spawn_host and spawn_port must be set when spawning server')
+                server_process, server_log, server_log_path = spawn_server(spawn_host, spawn_port)
                 metrics_collector = ProcMetricsCollector(server_process.pid)
                 metrics_task = asyncio.create_task(metrics_collector.run())
-                await wait_for_ready(session)
+                await wait_for_ready(session, process=server_process, log_file=server_log)
 
             first_resp = await session.post(
                 '/v1/session/start', json={'auth_token': args.auth_token, 'device_id': 'device-0'}
@@ -351,6 +403,11 @@ async def main() -> None:
                 server_process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 server_process.kill()
+
+        if server_log:
+            server_log.close()
+        if server_log_path and server_log_path.exists():
+            server_log_path.unlink()
 
     summary = {
         'connections': 0,
