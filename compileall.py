@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import re
 import sys
 import sysconfig
 from types import ModuleType
 from typing import Sequence
 
-_SKIP_REGEX = r"(^|/)\.git(/|$)|(^|/)\.venv(/|$)"
+_SKIP_REGEX = r"(?:^|[/\\])(?:\.git|\.venv)(?:$|[/\\])"
 
 
 def _load_stdlib_compileall() -> ModuleType:
@@ -28,11 +29,17 @@ compile_path = _stdlib_compileall.compile_path
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    argv = list(sys.argv if argv is None else argv)
-    injection = ["-x", _SKIP_REGEX]
-    argv[1:1] = injection
-    sys.argv = argv
-    return _stdlib_compileall.main()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    paths = argv or ["."]
+    rx = re.compile(_SKIP_REGEX)
+    status = 0
+    for path in paths:
+        if rx.search(path):
+            continue
+        ok = _stdlib_compileall.compile_dir(path, rx=rx)
+        if not ok:
+            status = 1
+    return status
 
 
 if __name__ == "__main__":  # pragma: no cover
