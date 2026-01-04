@@ -1,72 +1,28 @@
-import os
-import re
-import shutil
-import subprocess
+import sys
 import unittest
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from mls_harness_util import HARNESS_DIR, ensure_harness_binary, make_harness_env, run_harness
 
 
 class TestMLSHarnessVectors(unittest.TestCase):
-    def _parse_go_version(self, raw: str) -> Optional[Tuple[int, int, int]]:
-        match = re.search(r"go(\d+)\.(\d+)(?:\.(\d+))?", raw)
-        if not match:
-            return None
-
-        major, minor, patch = match.groups()
-        return int(major), int(minor), int(patch or 0)
-
-    def _get_go_version(self, go_bin: str) -> Optional[Tuple[int, int, int]]:
-        for args in ([go_bin, "env", "GOVERSION"], [go_bin, "version"]):
-            try:
-                output = subprocess.check_output(args, text=True).strip()
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                continue
-
-            parsed = self._parse_go_version(output)
-            if parsed:
-                return parsed
-
-        return None
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._harness_bin = ensure_harness_binary(timeout_s=180.0)
 
     def test_vectors_digest_matches(self) -> None:
-        go_bin = shutil.which("go")
-        if not go_bin:
-            self.skipTest("Go toolchain not available")
+        env = make_harness_env()
 
-        go_version = self._get_go_version(go_bin)
-        if not go_version:
-            self.skipTest("Unable to determine Go version")
-
-        if go_version < (1, 22, 0):
-            self.skipTest("Go >= 1.22 required for MLS harness vectors test")
-
-        env: Dict[str, str] = dict(os.environ)
-        env.setdefault("GOTOOLCHAIN", "local")
-        env.setdefault("GOFLAGS", "-mod=vendor")
-        env.setdefault("GOMAXPROCS", "1")
-        env.setdefault("GOMEMLIMIT", "700MiB")
-
-        repo_root = Path(__file__).resolve().parents[2]
-        harness_dir = repo_root / "tools" / "mls_harness"
-
-        cmd = [
-            go_bin,
-            "run",
-            "-p",
-            "1",
-            "./cmd/mls-harness",
-            "vectors",
-            "--vector-file",
-            "./vectors/dm_smoke_v1.json",
-        ]
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            cwd=harness_dir,
+        proc = run_harness(
+            ["vectors", "--vector-file", "./vectors/dm_smoke_v1.json"],
+            harness_bin=self._harness_bin,
+            cwd=HARNESS_DIR,
             env=env,
+            timeout_s=120.0,
         )
 
         if proc.returncode != 0:
