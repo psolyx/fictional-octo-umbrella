@@ -136,18 +136,20 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
 
     async def _run_harness(self, env: Dict[str, str], *args: str) -> str:
         proc = await asyncio.create_subprocess_exec(
-            env["GO_BIN"],
-            "run",
-            "-p",
-            "1",
-            "./cmd/mls-harness",
+            str(self.harness_bin),
             *args,
             cwd=self.harness_dir,
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.harness_timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            self.fail(f"mls-harness {' '.join(args)} timed out after {self.harness_timeout} seconds")
+
         if proc.returncode != 0:
             self.fail(
                 f"mls-harness {' '.join(args)} failed with code {proc.returncode}\n"
@@ -172,196 +174,223 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
         env.setdefault("GOFLAGS", "-mod=vendor")
         env.setdefault("GOMAXPROCS", "1")
         env.setdefault("GOMEMLIMIT", "700MiB")
-        env["GO_BIN"] = go_bin
 
         self.harness_dir = Path(__file__).resolve().parents[2] / "tools" / "mls_harness"
-
-        initiator_auth = "Bearer initiator"
-        joiner_auth = "Bearer joiner"
-        conv_id = "dm-conv-1"
-
-        ready_initiator = await self._start_session_http(auth_token=initiator_auth, device_id="dev-init")
-        ready_joiner = await self._start_session_http(auth_token=joiner_auth, device_id="dev-join")
-
-        await self._create_room(ready_initiator["session_token"], conv_id)
-        await self._invite_member(ready_initiator["session_token"], conv_id, ready_joiner["user_id"])
-
-        with tempfile.TemporaryDirectory() as init_dir, tempfile.TemporaryDirectory() as join_dir:
-            initiator_kp = await self._run_harness(env, "dm-keypackage", "--state-dir", init_dir, "--name", "initiator", "--seed", "9001")
-            joiner_kp = await self._run_harness(env, "dm-keypackage", "--state-dir", join_dir, "--name", "joiner", "--seed", "9002")
-
-            await self._publish_keypackages(ready_initiator["session_token"], "dev-init", [initiator_kp])
-            await self._publish_keypackages(ready_joiner["session_token"], "dev-join", [joiner_kp])
-
-            fetched = await self._fetch_keypackages(ready_initiator["session_token"], ready_joiner["user_id"], 1)
-            self.assertEqual(len(fetched), 1)
-
-            init_output = await self._run_harness(
-                env,
-                "dm-init",
-                "--state-dir",
-                init_dir,
-                "--peer-keypackage",
-                fetched[0],
-                "--group-id",
-                "ZG0tZ3JvdXA=",
-                "--seed",
-                "4242",
+        with tempfile.TemporaryDirectory() as harness_tmpdir:
+            self.harness_bin = Path(harness_tmpdir) / "mls-harness"
+            build = subprocess.run(
+                [
+                    go_bin,
+                    "build",
+                    "-mod=vendor",
+                    "-p",
+                    "1",
+                    "-o",
+                    str(self.harness_bin),
+                    "./cmd/mls-harness",
+                ],
+                cwd=self.harness_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=180,
             )
-            init_payload = json.loads(init_output)
+            if build.returncode != 0:
+                self.fail(
+                    "mls-harness build failed\n"
+                    f"stdout:\n{build.stdout}\n"
+                    f"stderr:\n{build.stderr}\n"
+                )
 
-            initiator_sse = await self.client.get(
-                "/v1/sse",
-                params={"conv_id": conv_id, "from_seq": "1"},
-                headers={"Authorization": f"Bearer {ready_initiator['session_token']}"},
-            )
-            self.assertEqual(initiator_sse.status, 200)
+            self.harness_timeout = 10
 
-            joiner_sse = await self.client.get(
-                "/v1/sse",
-                params={"conv_id": conv_id, "from_seq": "1"},
-                headers={"Authorization": f"Bearer {ready_joiner['session_token']}"},
-            )
-            self.assertEqual(joiner_sse.status, 200)
+            initiator_auth = "Bearer initiator"
+            joiner_auth = "Bearer joiner"
+            conv_id = "dm-conv-1"
 
-            expected_seq = 1
-            welcome_frame = {
-                "v": 1,
-                "t": "conv.send",
-                "id": "welcome1",
-                "body": {"conv_id": conv_id, "msg_id": "welcome", "env": init_payload["welcome"]},
-            }
-            welcome_resp = await self._post_inbox(ready_initiator["session_token"], welcome_frame)
-            self.assertEqual(welcome_resp.status, 200)
-            welcome_ack = await welcome_resp.json()
-            self.assertEqual(welcome_ack["seq"], expected_seq)
+            ready_initiator = await self._start_session_http(auth_token=initiator_auth, device_id="dev-init")
+            ready_joiner = await self._start_session_http(auth_token=joiner_auth, device_id="dev-join")
 
-            evt_type_init, welcome_evt_init = await read_sse_event(initiator_sse)
-            evt_type_join, welcome_evt_join = await read_sse_event(joiner_sse)
-            self.assertEqual(evt_type_init, "conv.event")
-            self.assertEqual(evt_type_join, "conv.event")
-            self.assertEqual(welcome_evt_init["body"]["seq"], expected_seq)
-            self.assertEqual(welcome_evt_join["body"]["seq"], expected_seq)
-            await self._run_harness(env, "dm-join", "--state-dir", join_dir, "--welcome", welcome_evt_join["body"]["env"])
+            await self._create_room(ready_initiator["session_token"], conv_id)
+            await self._invite_member(ready_initiator["session_token"], conv_id, ready_joiner["user_id"])
 
-            expected_seq += 1
-            commit_frame = {
-                "v": 1,
-                "t": "conv.send",
-                "id": "commit1",
-                "body": {"conv_id": conv_id, "msg_id": "commit", "env": init_payload["commit"]},
-            }
-            commit_resp = await self._post_inbox(ready_initiator["session_token"], commit_frame)
-            self.assertEqual(commit_resp.status, 200)
-            commit_ack = await commit_resp.json()
-            self.assertEqual(commit_ack["seq"], expected_seq)
+            with tempfile.TemporaryDirectory() as init_dir, tempfile.TemporaryDirectory() as join_dir:
+                initiator_kp = await self._run_harness(env, "dm-keypackage", "--state-dir", init_dir, "--name", "initiator", "--seed", "9001")
+                joiner_kp = await self._run_harness(env, "dm-keypackage", "--state-dir", join_dir, "--name", "joiner", "--seed", "9002")
 
-            retry_resp = await self._post_inbox(ready_initiator["session_token"], commit_frame)
-            self.assertEqual(retry_resp.status, 200)
-            retry_ack = await retry_resp.json()
-            self.assertEqual(retry_ack["seq"], expected_seq)
+                await self._publish_keypackages(ready_initiator["session_token"], "dev-init", [initiator_kp])
+                await self._publish_keypackages(ready_joiner["session_token"], "dev-join", [joiner_kp])
 
-            evt_type_init_commit, commit_evt_init = await read_sse_event(initiator_sse)
-            evt_type_join_commit, commit_evt_join = await read_sse_event(joiner_sse)
-            self.assertEqual(evt_type_init_commit, "conv.event")
-            self.assertEqual(evt_type_join_commit, "conv.event")
-            self.assertEqual(commit_evt_init["body"]["seq"], expected_seq)
-            self.assertEqual(commit_evt_join["body"]["seq"], expected_seq)
-            await self._run_harness(env, "dm-commit-apply", "--state-dir", join_dir, "--commit", commit_evt_join["body"]["env"])
-            await self._run_harness(env, "dm-commit-apply", "--state-dir", init_dir, "--commit", commit_evt_init["body"]["env"])
+                fetched = await self._fetch_keypackages(ready_initiator["session_token"], ready_joiner["user_id"], 1)
+                self.assertEqual(len(fetched), 1)
 
-            with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(read_sse_event(joiner_sse), timeout=0.25)
+                init_output = await self._run_harness(
+                    env,
+                    "dm-init",
+                    "--state-dir",
+                    init_dir,
+                    "--peer-keypackage",
+                    fetched[0],
+                    "--group-id",
+                    "ZG0tZ3JvdXA=",
+                    "--seed",
+                    "4242",
+                )
+                init_payload = json.loads(init_output)
 
-            expected_seq += 1
-            retry_plaintext = "hello-once"
-            retry_cipher = await self._run_harness(env, "dm-encrypt", "--state-dir", init_dir, "--plaintext", retry_plaintext)
-            retry_frame = {
-                "v": 1,
-                "t": "conv.send",
-                "id": "app-retry",
-                "body": {"conv_id": conv_id, "msg_id": "app-retry", "env": retry_cipher},
-            }
-            retry_resp1 = await self._post_inbox(ready_initiator["session_token"], retry_frame)
-            self.assertEqual(retry_resp1.status, 200)
-            retry_ack1 = await retry_resp1.json()
-            self.assertEqual(retry_ack1["seq"], expected_seq)
-            retry_resp2 = await self._post_inbox(ready_initiator["session_token"], retry_frame)
-            self.assertEqual(retry_resp2.status, 200)
-            retry_ack2 = await retry_resp2.json()
-            self.assertEqual(retry_ack2["seq"], expected_seq)
+                initiator_sse = await self.client.get(
+                    "/v1/sse",
+                    params={"conv_id": conv_id, "from_seq": "1"},
+                    headers={"Authorization": f"Bearer {ready_initiator['session_token']}"},
+                )
+                self.assertEqual(initiator_sse.status, 200)
 
-            evt_type_init_retry, retry_evt_init = await read_sse_event(initiator_sse)
-            evt_type_join_retry, retry_evt_join = await read_sse_event(joiner_sse)
-            self.assertEqual(evt_type_init_retry, "conv.event")
-            self.assertEqual(evt_type_join_retry, "conv.event")
-            self.assertEqual(retry_evt_init["body"]["seq"], expected_seq)
-            self.assertEqual(retry_evt_join["body"]["seq"], expected_seq)
-            self.assertEqual(retry_evt_init["body"]["msg_id"], "app-retry")
-            self.assertEqual(retry_evt_join["body"]["msg_id"], "app-retry")
-            decrypted_retry = await self._run_harness(
-                env,
-                "dm-decrypt",
-                "--state-dir",
-                join_dir,
-                "--ciphertext",
-                retry_evt_join["body"]["env"],
-            )
-            self.assertEqual(decrypted_retry, retry_plaintext)
+                joiner_sse = await self.client.get(
+                    "/v1/sse",
+                    params={"conv_id": conv_id, "from_seq": "1"},
+                    headers={"Authorization": f"Bearer {ready_joiner['session_token']}"},
+                )
+                self.assertEqual(joiner_sse.status, 200)
 
-            with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(read_sse_event(joiner_sse), timeout=0.25)
-
-            expected_seq += 1
-
-            async def send_and_confirm(
-                sender_env: dict,
-                sender_dir: str,
-                sender_sse,
-                receiver_sse,
-                receiver_dir: str,
-                msg_id: str,
-                plaintext: str,
-            ):
-                nonlocal expected_seq
-                ct = await self._run_harness(env, "dm-encrypt", "--state-dir", sender_dir, "--plaintext", plaintext)
-                frame = {
+                expected_seq = 1
+                welcome_frame = {
                     "v": 1,
                     "t": "conv.send",
-                    "id": msg_id,
-                    "body": {"conv_id": conv_id, "msg_id": msg_id, "env": ct},
+                    "id": "welcome1",
+                    "body": {"conv_id": conv_id, "msg_id": "welcome", "env": init_payload["welcome"]},
                 }
-                resp = await self._post_inbox(sender_env["session_token"], frame)
-                self.assertEqual(resp.status, 200)
-                ack = await resp.json()
-                self.assertEqual(ack["seq"], expected_seq)
+                welcome_resp = await self._post_inbox(ready_initiator["session_token"], welcome_frame)
+                self.assertEqual(welcome_resp.status, 200)
+                welcome_ack = await welcome_resp.json()
+                self.assertEqual(welcome_ack["seq"], expected_seq)
 
-                evt_type_sender, sender_evt = await read_sse_event(sender_sse)
-                evt_type_receiver, receiver_evt = await read_sse_event(receiver_sse)
-                self.assertEqual(evt_type_sender, "conv.event")
-                self.assertEqual(evt_type_receiver, "conv.event")
-                self.assertEqual(sender_evt["body"]["seq"], expected_seq)
-                self.assertEqual(receiver_evt["body"]["seq"], expected_seq)
-                self.assertEqual(receiver_evt["body"]["msg_id"], msg_id)
+                evt_type_init, welcome_evt_init = await read_sse_event(initiator_sse)
+                evt_type_join, welcome_evt_join = await read_sse_event(joiner_sse)
+                self.assertEqual(evt_type_init, "conv.event")
+                self.assertEqual(evt_type_join, "conv.event")
+                self.assertEqual(welcome_evt_init["body"]["seq"], expected_seq)
+                self.assertEqual(welcome_evt_join["body"]["seq"], expected_seq)
+                await self._run_harness(env, "dm-join", "--state-dir", join_dir, "--welcome", welcome_evt_join["body"]["env"])
 
-                decrypted = await self._run_harness(
+                expected_seq += 1
+                commit_frame = {
+                    "v": 1,
+                    "t": "conv.send",
+                    "id": "commit1",
+                    "body": {"conv_id": conv_id, "msg_id": "commit", "env": init_payload["commit"]},
+                }
+                commit_resp = await self._post_inbox(ready_initiator["session_token"], commit_frame)
+                self.assertEqual(commit_resp.status, 200)
+                commit_ack = await commit_resp.json()
+                self.assertEqual(commit_ack["seq"], expected_seq)
+
+                retry_resp = await self._post_inbox(ready_initiator["session_token"], commit_frame)
+                self.assertEqual(retry_resp.status, 200)
+                retry_ack = await retry_resp.json()
+                self.assertEqual(retry_ack["seq"], expected_seq)
+
+                evt_type_init_commit, commit_evt_init = await read_sse_event(initiator_sse)
+                evt_type_join_commit, commit_evt_join = await read_sse_event(joiner_sse)
+                self.assertEqual(evt_type_init_commit, "conv.event")
+                self.assertEqual(evt_type_join_commit, "conv.event")
+                self.assertEqual(commit_evt_init["body"]["seq"], expected_seq)
+                self.assertEqual(commit_evt_join["body"]["seq"], expected_seq)
+                await self._run_harness(env, "dm-commit-apply", "--state-dir", join_dir, "--commit", commit_evt_join["body"]["env"])
+                await self._run_harness(env, "dm-commit-apply", "--state-dir", init_dir, "--commit", commit_evt_init["body"]["env"])
+
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(read_sse_event(joiner_sse), timeout=0.25)
+
+                expected_seq += 1
+                retry_plaintext = "hello-once"
+                retry_cipher = await self._run_harness(env, "dm-encrypt", "--state-dir", init_dir, "--plaintext", retry_plaintext)
+                retry_frame = {
+                    "v": 1,
+                    "t": "conv.send",
+                    "id": "app-retry",
+                    "body": {"conv_id": conv_id, "msg_id": "app-retry", "env": retry_cipher},
+                }
+                retry_resp1 = await self._post_inbox(ready_initiator["session_token"], retry_frame)
+                self.assertEqual(retry_resp1.status, 200)
+                retry_ack1 = await retry_resp1.json()
+                self.assertEqual(retry_ack1["seq"], expected_seq)
+                retry_resp2 = await self._post_inbox(ready_initiator["session_token"], retry_frame)
+                self.assertEqual(retry_resp2.status, 200)
+                retry_ack2 = await retry_resp2.json()
+                self.assertEqual(retry_ack2["seq"], expected_seq)
+
+                evt_type_init_retry, retry_evt_init = await read_sse_event(initiator_sse)
+                evt_type_join_retry, retry_evt_join = await read_sse_event(joiner_sse)
+                self.assertEqual(evt_type_init_retry, "conv.event")
+                self.assertEqual(evt_type_join_retry, "conv.event")
+                self.assertEqual(retry_evt_init["body"]["seq"], expected_seq)
+                self.assertEqual(retry_evt_join["body"]["seq"], expected_seq)
+                self.assertEqual(retry_evt_init["body"]["msg_id"], "app-retry")
+                self.assertEqual(retry_evt_join["body"]["msg_id"], "app-retry")
+                decrypted_retry = await self._run_harness(
                     env,
                     "dm-decrypt",
                     "--state-dir",
-                    receiver_dir,
+                    join_dir,
                     "--ciphertext",
-                    receiver_evt["body"]["env"],
+                    retry_evt_join["body"]["env"],
                 )
-                self.assertEqual(decrypted, plaintext)
+                self.assertEqual(decrypted_retry, retry_plaintext)
+
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(read_sse_event(joiner_sse), timeout=0.25)
+
                 expected_seq += 1
 
-            initiator_env = {"session_token": ready_initiator["session_token"], "state_dir": init_dir}
-            joiner_env = {"session_token": ready_joiner["session_token"], "state_dir": join_dir}
+                async def send_and_confirm(
+                    sender_env: dict,
+                    sender_dir: str,
+                    sender_sse,
+                    receiver_sse,
+                    receiver_dir: str,
+                    msg_id: str,
+                    plaintext: str,
+                ):
+                    nonlocal expected_seq
+                    ct = await self._run_harness(env, "dm-encrypt", "--state-dir", sender_dir, "--plaintext", plaintext)
+                    frame = {
+                        "v": 1,
+                        "t": "conv.send",
+                        "id": msg_id,
+                        "body": {"conv_id": conv_id, "msg_id": msg_id, "env": ct},
+                    }
+                    resp = await self._post_inbox(sender_env["session_token"], frame)
+                    self.assertEqual(resp.status, 200)
+                    ack = await resp.json()
+                    self.assertEqual(ack["seq"], expected_seq)
 
-            await send_and_confirm(initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-1", "hi-joiner")
-            await send_and_confirm(joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-2", "hi-initiator")
-            await send_and_confirm(initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-3", "follow-up")
-            await send_and_confirm(joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-4", "ack")
+                    evt_type_sender, sender_evt = await read_sse_event(sender_sse)
+                    evt_type_receiver, receiver_evt = await read_sse_event(receiver_sse)
+                    self.assertEqual(evt_type_sender, "conv.event")
+                    self.assertEqual(evt_type_receiver, "conv.event")
+                    self.assertEqual(sender_evt["body"]["seq"], expected_seq)
+                    self.assertEqual(receiver_evt["body"]["seq"], expected_seq)
+                    self.assertEqual(receiver_evt["body"]["msg_id"], msg_id)
 
-            await initiator_sse.release()
-            await joiner_sse.release()
+                    decrypted = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        receiver_dir,
+                        "--ciphertext",
+                        receiver_evt["body"]["env"],
+                    )
+                    self.assertEqual(decrypted, plaintext)
+                    expected_seq += 1
+
+                initiator_env = {"session_token": ready_initiator["session_token"], "state_dir": init_dir}
+                joiner_env = {"session_token": ready_joiner["session_token"], "state_dir": join_dir}
+
+                await send_and_confirm(initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-1", "hi-joiner")
+                await send_and_confirm(joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-2", "hi-initiator")
+                await send_and_confirm(initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-3", "follow-up")
+                await send_and_confirm(joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-4", "ack")
+
+                await initiator_sse.release()
+                await joiner_sse.release()
