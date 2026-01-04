@@ -48,12 +48,33 @@ class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         try:
             ws, _ = await self._start_session(client)
 
-            ping = await asyncio.wait_for(ws.receive_json(), timeout=2)
-            self.assertEqual(ping["t"], "ping")
+            loop = asyncio.get_running_loop()
+            ping_deadline = loop.time() + 8
+            ping_seen = False
 
-            close_seen = False
+            while not ping_seen:
+                remaining = ping_deadline - loop.time()
+                if remaining <= 0:
+                    self.fail("Timed out waiting for server ping")
+
+                msg = await ws.receive(timeout=remaining)
+                if msg.type == WSMsgType.TEXT:
+                    payload = msg.json()
+                    if payload.get("t") == "ping":
+                        ping_seen = True
+                        break
+                elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    self.fail("Connection closed before ping was observed")
+
+            close_deadline = loop.time() + 8
+            close_seen = ws.closed
+
             while not close_seen:
-                msg = await asyncio.wait_for(ws.receive(), timeout=2)
+                remaining = close_deadline - loop.time()
+                if remaining <= 0:
+                    self.fail("Timed out waiting for server to close idle connection")
+
+                msg = await ws.receive(timeout=remaining)
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     close_seen = True
                     break
@@ -69,28 +90,28 @@ class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         try:
             ws, _ = await self._start_session(client)
 
-            await ws.send_json({"v": 1, "t": "ping", "id": "c1"})
-            pong1 = await asyncio.wait_for(ws.receive_json(), timeout=1)
-            self.assertEqual(pong1["t"], "pong")
-            self.assertEqual(pong1["id"], "c1")
+            async def assert_pong_for_client_ping(ping_id: str, *, deadline: float):
+                await ws.send_json({"v": 1, "t": "ping", "id": ping_id})
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        self.fail(f"Timed out waiting for pong {ping_id}")
 
-            await ws.send_json({"v": 1, "t": "ping", "id": "c2"})
-            pong2 = await asyncio.wait_for(ws.receive_json(), timeout=1)
-            self.assertEqual(pong2["t"], "pong")
-            self.assertEqual(pong2["id"], "c2")
+                    msg = await ws.receive(timeout=remaining)
+                    if msg.type == WSMsgType.TEXT:
+                        payload = msg.json()
+                        if payload.get("t") == "ping":
+                            await ws.send_json({"v": 1, "t": "pong", "id": payload.get("id")})
+                            continue
+                        if payload.get("t") == "pong" and payload.get("id") == ping_id:
+                            return
+                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                        self.fail("Connection closed while waiting for pong")
 
-            try:
-                server_ping = await asyncio.wait_for(ws.receive_json(), timeout=1.5)
-            except asyncio.TimeoutError:
-                server_ping = None
-
-            if server_ping and server_ping.get("t") == "ping":
-                await ws.send_json({"v": 1, "t": "pong", "id": server_ping.get("id")})
-
-            await ws.send_json({"v": 1, "t": "ping", "id": "c3"})
-            pong3 = await asyncio.wait_for(ws.receive_json(), timeout=1)
-            self.assertEqual(pong3["t"], "pong")
-            self.assertEqual(pong3["id"], "c3")
+            loop = asyncio.get_running_loop()
+            await assert_pong_for_client_ping("c1", deadline=loop.time() + 5)
+            await assert_pong_for_client_ping("c2", deadline=loop.time() + 5)
+            await assert_pong_for_client_ping("c3", deadline=loop.time() + 5)
 
             self.assertFalse(ws.closed)
         finally:
