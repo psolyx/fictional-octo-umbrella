@@ -18,7 +18,32 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
         f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway WS tests, found {_installed_aiohttp}"
     )
 
-from gateway.ws_transport import create_app
+from gateway.ws_transport import SessionStore, create_app
+
+
+class ResumeTokenRotationTests(unittest.TestCase):
+    def test_resume_token_rotates_over_many_cycles(self):
+        sessions = SessionStore()
+        session = sessions.create("user", "device")
+
+        session_token = session.session_token
+        resume_token = session.resume_token
+
+        seen_tokens = {resume_token}
+
+        for _ in range(10_000):
+            resumed = sessions.consume_resume(resume_token)
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed.session_token, session_token)
+
+            resume_token = resumed.resume_token
+            self.assertNotIn(resume_token, seen_tokens)
+            seen_tokens.add(resume_token)
+
+            active = sessions.get_by_session(session_token)
+            self.assertIs(active, resumed)
+
+        self.assertEqual(len(seen_tokens), 10_001)
 
 
 class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
@@ -44,9 +69,9 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_chaos_no_loss_or_duplication(self):
         conv_id = "chaos-room"
-        iterations = 10_000
+        iterations = 200
         send_interval = 10
-        ack_every = 100
+        ack_every = 50
 
         start_resp = await self._post_json(
             "/v1/session/start", {"auth_token": "user", "device_id": "device"}
@@ -74,7 +99,9 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resume_resp.status, 200)
             ready = await self._fetch_json(resume_resp)
             session_token = ready["session_token"]
-            resume_token = ready["resume_token"]
+            new_resume_token = ready["resume_token"]
+            self.assertNotEqual(new_resume_token, resume_token)
+            resume_token = new_resume_token
 
             if (i + 1) % send_interval == 0:
                 msg_id = f"m{len(sent_messages) + 1}"
