@@ -61,3 +61,11 @@ If no harness exists yet, create:
 If you change any wire behavior:
 - Update GATEWAY_SPEC.md (normative)
 - Update ARCHITECTURE.md if responsibilities move
+
+## Load test runbook (Phase 1)
+- Prep: `ALLOW_AIOHTTP_STUB=0 make -C gateway setup` to ensure `gateway/.venv` exists, then from repo root run the tool.
+- Baseline (server spawned automatically): `python tools/gateway_loadtest_v2.py --spawn-server --sessions 200 --duration-seconds 60 --messages 0 --drain-seconds 5`.
+- Resume storm check: add `--resume-cycles 3` to the baseline command to verify reconnect resilience.
+- Message load: approximate 1 msg/sec per socket with `--messages 60 --message-interval 1 --duration-seconds 60` (adjust sessions as needed) and combine with `--resume-cycles` if desired.
+- Record for each run: max RSS, average/peak CPU%, total events, reconnect count, and confirm duplicate msg_ids reported as `0`.
+- Optional: `--json-out report.json` captures a machine-readable summary for sharing.
