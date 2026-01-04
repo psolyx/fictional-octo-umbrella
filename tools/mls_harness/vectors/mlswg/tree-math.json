@@ -1,0 +1,27 @@
+{
+  "description": "Tree math conformance coverage for MLSWG vectors (trimmed)",
+  "vectors": [
+    {
+      "leaf_count": 7,
+      "root": 7,
+      "cases": [
+        {
+          "node": 2,
+          "parent": 1,
+          "sibling": 0,
+          "dirpath": [1, 3, 7],
+          "copath": [0, 5, 11]
+        }
+      ],
+      "full_ancestor": {
+        "left": 2,
+        "right": 9,
+        "expected": 15
+      },
+      "in_path": [
+        {"x": 2, "y": 9, "expected": false},
+        {"x": 9, "y": 2, "expected": false}
+      ]
+    }
+  ]
+}

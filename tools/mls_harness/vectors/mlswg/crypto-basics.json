@@ -1,0 +1,42 @@
+{
+  "description": "Trimmed MLSWG crypto-basics vectors exercised by the offline harness",
+  "vectors": [
+    {
+      "name": "mlswg-crypto-basics-x25519-aes128gcm-sha256",
+      "cipher_suite": "X25519_AES128GCM_SHA256_Ed25519",
+      "hkdf_extract": [
+        {
+          "salt_hex": "000102030405060708090a0b0c0d0e0f",
+          "ikm_hex": "0f0e0d0c0b0a09080706050403020100",
+          "expected_hex": "004880bea9da4ae11208fcae99a9617ed4dfb21608e3744049e02aa433b7b4dd"
+        }
+      ],
+      "hkdf_expand_label": [
+        {
+          "secret_hex": "004880bea9da4ae11208fcae99a9617ed4dfb21608e3744049e02aa433b7b4dd",
+          "label": "mlswg-expand",
+          "context_hex": "4d4c535f61656164",
+          "length": 32,
+          "expected_hex": "ca90dcda1390b1568376731f610995a33db32826e68e76c171565266659460f4"
+        }
+      ],
+      "derive_secret": [
+        {
+          "secret_hex": "004880bea9da4ae11208fcae99a9617ed4dfb21608e3744049e02aa433b7b4dd",
+          "label": "mlswg-derive",
+          "context_hex": "4d4c532d646572697665",
+          "expected_hex": "4150e6dd3e5b72abbd334b3249f67a72162ac69ee78d0a305cd8004508dad69a"
+        }
+      ],
+      "aead": [
+        {
+          "key_hex": "000102030405060708090a0b0c0d0e0f",
+          "nonce_hex": "0f0e0d0c0b0a090807060504",
+          "aad_hex": "416461436f6e74657874",
+          "plaintext_hex": "506c61696e4d4c5354657374",
+          "ciphertext_hex": "7208b437a27370303142b5ccef04809a2b65ae8cc70c7926018d8f98"
+        }
+      ]
+    }
+  ]
+}
