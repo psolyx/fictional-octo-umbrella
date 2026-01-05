@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gateway WebSocket demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.4; }
+    fieldset { margin-bottom: 16px; }
+    label { display: block; margin-top: 8px; }
+    textarea { width: 100%; height: 140px; }
+    pre { background: #f5f5f5; padding: 8px; overflow: auto; }
+    #event_log { max-height: 320px; overflow-y: auto; border: 1px solid #ccc; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Gateway v1 WebSocket demo</h1>
+  <p>This static page exercises gateway session lifecycle, conversation subscription, replay, ack, and ciphertext send flows.</p>
+
+  <fieldset>
+    <legend>Connection</legend>
+    <label>
+      Gateway WS URL
+      <input type="text" id="gateway_url" size="64" placeholder="ws://localhost:8787/gateway/v1" />
+    </label>
+    <label>
+      Bootstrap token (for session.start)
+      <input type="text" id="bootstrap_token" size="48" />
+    </label>
+    <label>
+      Resume token (for session.resume)
+      <input type="text" id="resume_token" size="48" />
+    </label>
+    <div style="margin-top:8px;">
+      <button id="connect_start">Start session</button>
+      <button id="connect_resume">Resume session</button>
+      <span id="connection_status">disconnected</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Conversation controls</legend>
+    <label>
+      Conversation ID
+      <input type="text" id="conv_id" size="32" />
+    </label>
+    <label>
+      from_seq (for replay)
+      <input type="number" id="from_seq" min="0" />
+    </label>
+    <label>
+      ack_seq
+      <input type="number" id="ack_seq" min="0" />
+    </label>
+    <label>
+      msg_id
+      <input type="text" id="msg_id" size="24" />
+    </label>
+    <label>
+      Ciphertext payload
+      <input type="text" id="ciphertext_input" size="64" />
+    </label>
+    <div style="margin-top:8px;">
+      <button id="subscribe_btn">Subscribe</button>
+      <button id="replay_btn">Replay</button>
+      <button id="ack_btn">Ack</button>
+      <button id="send_btn">Send ciphertext</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Received events</legend>
+    <div id="event_log"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Debug log</legend>
+    <textarea id="debug_log" readonly></textarea>
+    <button id="clear_log">Clear log</button>
+  </fieldset>
+
+  <script src="gateway_ws_client.js"></script>
+</body>
+</html>

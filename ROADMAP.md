@@ -163,7 +163,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Exit criteria**
 - Web and CLI can co-exist in the same DM/room with no decryption failures.
-- “Device bootstrap” threat model documented and reviewed.
+- “Device bootstrap” threat model documented and reviewed (see `clients/web/THREAT_MODEL.md`).
 
 **Risk retired**
 - Browser MLS and cross-client interop is real.
