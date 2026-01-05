@@ -6,20 +6,25 @@
 
   const gateway_url_input = document.getElementById('gateway_url');
   const bootstrap_token_input = document.getElementById('bootstrap_token');
+  const device_id_input = document.getElementById('device_id');
+  const device_credential_input = document.getElementById('device_credential');
   const resume_token_input = document.getElementById('resume_token');
   const conv_id_input = document.getElementById('conv_id');
   const from_seq_input = document.getElementById('from_seq');
-  const ack_seq_input = document.getElementById('ack_seq');
+  const seq_input = document.getElementById('seq');
   const msg_id_input = document.getElementById('msg_id');
   const ciphertext_input = document.getElementById('ciphertext_input');
 
   const connect_start_btn = document.getElementById('connect_start');
   const connect_resume_btn = document.getElementById('connect_resume');
   const subscribe_btn = document.getElementById('subscribe_btn');
-  const replay_btn = document.getElementById('replay_btn');
   const ack_btn = document.getElementById('ack_btn');
   const send_btn = document.getElementById('send_btn');
   const clear_log_btn = document.getElementById('clear_log');
+
+  const db_name = 'gateway_web_demo';
+  const store_name = 'settings';
+  const next_id = () => `msg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
   const append_log = (line) => {
     const now = new Date().toISOString();
@@ -27,40 +32,81 @@
     debug_log.scrollTop = debug_log.scrollHeight;
   };
 
-  const render_event = (message) => {
+  const render_event = (body) => {
     const entry = document.createElement('div');
     const parts = [];
-    if (message.conv_id) {
-      parts.push(`conv_id=${message.conv_id}`);
+    if (body.conv_id) {
+      parts.push(`conv_id=${body.conv_id}`);
     }
-    if (typeof message.seq !== 'undefined') {
-      parts.push(`seq=${message.seq}`);
+    if (typeof body.seq !== 'undefined') {
+      parts.push(`seq=${body.seq}`);
     }
-    if (message.msg_id) {
-      parts.push(`msg_id=${message.msg_id}`);
+    if (body.msg_id) {
+      parts.push(`msg_id=${body.msg_id}`);
     }
-    if (message.conv_home) {
-      parts.push(`conv_home=${message.conv_home}`);
+    if (body.conv_home) {
+      parts.push(`conv_home=${body.conv_home}`);
     }
-    if (message.origin_gateway) {
-      parts.push(`origin_gateway=${message.origin_gateway}`);
+    if (body.origin_gateway) {
+      parts.push(`origin_gateway=${body.origin_gateway}`);
     }
-    const body_display = typeof message.body !== 'undefined' ? JSON.stringify(message.body) : '';
-    entry.textContent = `${parts.join(' ')} body=${body_display}`;
+    const env_display = typeof body.env !== 'undefined' ? JSON.stringify(body.env) : '';
+    entry.textContent = `${parts.join(' ')} env=${env_display}`;
     event_log.prepend(entry);
+  };
+
+  const open_db = () =>
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(db_name, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(store_name)) {
+          db.createObjectStore(store_name, { keyPath: 'key' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('indexeddb open failed'));
+    });
+
+  const read_setting = async (key) => {
+    const db = await open_db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store_name, 'readonly');
+      const store = tx.objectStore(store_name);
+      const get_request = store.get(key);
+      get_request.onsuccess = () => {
+        resolve(get_request.result ? get_request.result.value : null);
+      };
+      get_request.onerror = () => reject(get_request.error || new Error('indexeddb read failed'));
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    });
+  };
+
+  const write_setting = async (key, value) => {
+    const db = await open_db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store_name, 'readwrite');
+      const store = tx.objectStore(store_name);
+      const put_request = store.put({ key, value });
+      put_request.onsuccess = () => resolve();
+      put_request.onerror = () => reject(put_request.error || new Error('indexeddb write failed'));
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    });
   };
 
   class GatewayWsClient {
     constructor() {
       this.ws = null;
-      this.pending_envelopes = [];
+      this.pending_frames = [];
     }
 
     connect(url) {
       if (this.ws) {
         this.ws.close();
       }
-      this.pending_envelopes = [];
+      this.pending_frames = [];
       append_log(`connecting to ${url}`);
       this.ws = new WebSocket(url);
       this.ws.addEventListener('open', () => {
@@ -91,15 +137,15 @@
       return this.ws && this.ws.readyState === WebSocket.OPEN;
     }
 
-    send_envelope(type, body) {
-      const envelope = Object.assign({ v: 1, t: type }, body || {});
+    send_frame(type, body) {
+      const envelope = { v: 1, t: type, id: next_id(), ts: Date.now(), body: body || {} };
       if (this.ensure_connected()) {
         this.ws.send(JSON.stringify(envelope));
         append_log(`sent ${type}`);
         return;
       }
       if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-        this.pending_envelopes.push(envelope);
+        this.pending_frames.push(envelope);
         append_log(`queued ${type} until open`);
         return;
       }
@@ -110,19 +156,26 @@
       if (!this.ensure_connected()) {
         return;
       }
-      while (this.pending_envelopes.length > 0) {
-        const envelope = this.pending_envelopes.shift();
+      while (this.pending_frames.length > 0) {
+        const envelope = this.pending_frames.shift();
         this.ws.send(JSON.stringify(envelope));
         append_log(`sent queued ${envelope.t}`);
       }
     }
 
-    start_session(token) {
-      if (!token) {
-        append_log('missing bootstrap token');
+    start_session(auth_token, device_id, device_credential) {
+      if (!auth_token) {
+        append_log('missing auth_token');
         return;
       }
-      this.send_envelope('session.start', { token });
+      const body = { auth_token };
+      if (device_id) {
+        body.device_id = device_id;
+      }
+      if (device_credential) {
+        body.device_credential = device_credential;
+      }
+      this.send_frame('session.start', body);
     }
 
     resume_session(resume_token) {
@@ -130,18 +183,10 @@
         append_log('missing resume_token');
         return;
       }
-      this.send_envelope('session.resume', { resume_token });
+      this.send_frame('session.resume', { resume_token });
     }
 
-    subscribe(conv_id) {
-      if (!conv_id) {
-        append_log('missing conv_id');
-        return;
-      }
-      this.send_envelope('conv.subscribe', { conv_id });
-    }
-
-    replay(conv_id, from_seq) {
+    subscribe(conv_id, from_seq) {
       if (!conv_id) {
         append_log('missing conv_id');
         return;
@@ -150,19 +195,19 @@
       if (typeof from_seq === 'number' && !Number.isNaN(from_seq)) {
         body.from_seq = from_seq;
       }
-      this.send_envelope('conv.replay', body);
+      this.send_frame('conv.subscribe', body);
     }
 
-    ack(conv_id, ack_seq) {
+    ack(conv_id, seq) {
       if (!conv_id) {
         append_log('missing conv_id');
         return;
       }
-      if (typeof ack_seq !== 'number' || Number.isNaN(ack_seq)) {
-        append_log('missing ack_seq');
+      if (typeof seq !== 'number' || Number.isNaN(seq)) {
+        append_log('missing seq');
         return;
       }
-      this.send_envelope('conv.ack', { conv_id, ack_seq });
+      this.send_frame('conv.ack', { conv_id, seq });
     }
 
     send_ciphertext(conv_id, msg_id, ciphertext) {
@@ -178,7 +223,7 @@
         append_log('missing ciphertext');
         return;
       }
-      this.send_envelope('conv.send', { conv_id, msg_id, body: ciphertext });
+      this.send_frame('conv.send', { conv_id, msg_id, env: ciphertext });
     }
 
     handle_message(message) {
@@ -186,24 +231,54 @@
         append_log('ignored non-object message');
         return;
       }
+      const body = message.body || {};
       if (message.t === 'ping') {
-        const pong_id = typeof message.id !== 'undefined' ? message.id : `pong-${Date.now()}`;
-        this.send_envelope('pong', { id: pong_id });
+        this.send_frame('pong', {});
         append_log('responded to ping');
         return;
       }
-      if (message.t === 'conv.event') {
-        render_event(message);
+      if (message.t === 'session.ready') {
+        append_log(`session ready: ${JSON.stringify(body)}`);
+        if (body.resume_token) {
+          resume_token_input.value = body.resume_token;
+          write_setting('resume_token', body.resume_token).catch((err) =>
+            append_log(`failed to persist resume_token: ${err.message}`)
+          );
+        }
         return;
       }
-      if (message.t === 'session.resume' && message.resume_token) {
-        resume_token_input.value = message.resume_token;
+      if (message.t === 'conv.event') {
+        render_event(body);
+        return;
       }
-      append_log(`received ${message.t || 'unknown'}: ${JSON.stringify(message)}`);
+      if (message.t === 'conv.acked') {
+        append_log(`conv.acked ${JSON.stringify(body)}`);
+        return;
+      }
+      if (message.t === 'error') {
+        append_log(`error ${JSON.stringify(body)}`);
+        return;
+      }
+      append_log(`received ${message.t || 'unknown'}: ${JSON.stringify(body)}`);
     }
   }
 
   const client = new GatewayWsClient();
+
+  const hydrate_inputs = async () => {
+    try {
+      const saved_url = await read_setting('gateway_url');
+      if (saved_url) {
+        gateway_url_input.value = saved_url;
+      }
+      const saved_resume_token = await read_setting('resume_token');
+      if (saved_resume_token) {
+        resume_token_input.value = saved_resume_token;
+      }
+    } catch (err) {
+      append_log(`failed to hydrate inputs: ${err.message}`);
+    }
+  };
 
   connect_start_btn.addEventListener('click', () => {
     const url = gateway_url_input.value.trim();
@@ -211,9 +286,12 @@
       append_log('gateway url required');
       return;
     }
+    write_setting('gateway_url', url).catch((err) => append_log(`failed to persist gateway_url: ${err.message}`));
     client.connect(url);
-    const token = bootstrap_token_input.value.trim();
-    client.start_session(token);
+    const auth_token = bootstrap_token_input.value.trim();
+    const device_id = device_id_input.value.trim();
+    const device_credential = device_credential_input.value.trim();
+    client.start_session(auth_token, device_id || undefined, device_credential || undefined);
   });
 
   connect_resume_btn.addEventListener('click', () => {
@@ -222,23 +300,20 @@
       append_log('gateway url required');
       return;
     }
+    write_setting('gateway_url', url).catch((err) => append_log(`failed to persist gateway_url: ${err.message}`));
     client.connect(url);
     const resume_token = resume_token_input.value.trim();
     client.resume_session(resume_token);
   });
 
   subscribe_btn.addEventListener('click', () => {
-    client.subscribe(conv_id_input.value.trim());
-  });
-
-  replay_btn.addEventListener('click', () => {
-    const from_seq = Number(from_seq_input.value);
-    client.replay(conv_id_input.value.trim(), from_seq);
+    const from_seq_value = from_seq_input.value === '' ? undefined : Number(from_seq_input.value);
+    client.subscribe(conv_id_input.value.trim(), from_seq_value);
   });
 
   ack_btn.addEventListener('click', () => {
-    const ack_seq = Number(ack_seq_input.value);
-    client.ack(conv_id_input.value.trim(), ack_seq);
+    const seq_value = Number(seq_input.value);
+    client.ack(conv_id_input.value.trim(), seq_value);
   });
 
   send_btn.addEventListener('click', () => {
@@ -253,4 +328,6 @@
     debug_log.value = '';
     event_log.innerHTML = '';
   });
+
+  hydrate_inputs();
 })();

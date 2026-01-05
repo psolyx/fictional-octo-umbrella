@@ -4,18 +4,23 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
 
 ## Usage
 1. Open `clients/web/index.html` in a modern browser. No npm/yarn/pnpm setup is required.
-2. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/gateway/v1`).
-3. Use **Start session** with a bootstrap token to begin a session, or **Resume session** with a stored `resume_token`.
-4. Subscribe to a conversation with **Subscribe**, catch up with **Replay**, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
+2. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
+3. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
+4. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
 5. Incoming `conv.event` entries are rendered with their ciphertext payload and any routing metadata (`conv_home`, `origin_gateway`). Heartbeat `ping` frames are answered automatically with `pong`.
 
 ## Supported gateway operations
 - `session.start`
 - `session.resume`
-- `conv.subscribe`
-- `conv.replay`
+- `conv.subscribe` (supports `from_seq` for replay)
 - `conv.ack`
 - `conv.send`
+
+## Frame envelope (gateway v1)
+- Every WebSocket frame uses `{ v: 1, t, id, ts, body: { ... } }` with protocol fields in `body`.
+- `session.start` expects `body.auth_token`, `body.device_id`, and `body.device_credential`.
+- `session.resume` expects `body.resume_token` (returned by `session.ready`).
+- `conv.subscribe` may include `body.from_seq` to replay from an earlier sequence (inclusive); omit to start at the live cursor.
 
 ## Notes
 - All protocol keys and variables use snake_case to match gateway expectations.

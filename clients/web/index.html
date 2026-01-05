@@ -8,17 +8,25 @@
 </head>
 <body>
   <h1>Gateway v1 WebSocket demo</h1>
-  <p>This static page exercises gateway session lifecycle, conversation subscription, replay, ack, and ciphertext send flows.</p>
+  <p>This static page exercises gateway session lifecycle, conversation subscription with optional replay, ack, and ciphertext send flows.</p>
 
   <fieldset>
     <legend>Connection</legend>
     <label>
       Gateway WS URL
-      <input type="text" id="gateway_url" size="64" placeholder="ws://localhost:8787/gateway/v1" />
+      <input type="text" id="gateway_url" size="64" placeholder="ws://localhost:8787/v1/ws" />
     </label>
     <label>
-      Bootstrap token (for session.start)
+      auth_token (for session.start)
       <input type="text" id="bootstrap_token" size="48" />
+    </label>
+    <label>
+      device_id
+      <input type="text" id="device_id" size="32" />
+    </label>
+    <label>
+      device_credential
+      <input type="text" id="device_credential" size="48" />
     </label>
     <label>
       Resume token (for session.resume)
@@ -38,12 +46,12 @@
       <input type="text" id="conv_id" size="32" />
     </label>
     <label>
-      from_seq (for replay)
+      from_seq (optional subscribe replay)
       <input type="number" id="from_seq" min="0" />
     </label>
     <label>
-      ack_seq
-      <input type="number" id="ack_seq" min="0" />
+      seq
+      <input type="number" id="seq" min="0" />
     </label>
     <label>
       msg_id
@@ -55,7 +63,6 @@
     </label>
     <div class="button-row">
       <button id="subscribe_btn">Subscribe</button>
-      <button id="replay_btn">Replay</button>
       <button id="ack_btn">Ack</button>
       <button id="send_btn">Send ciphertext</button>
     </div>
