@@ -99,9 +99,9 @@ Rationale: MLS architecture guidance explicitly describes a strongly-consistent 
   - `env`: opaque envelope containing MLS wire message bytes
 
 ### 5.4 Gateway identity and routing metadata
-- Each deployment advertises a stable `gateway_id` (default `gw_local` in dev/test; overridable via `GATEWAY_ID`).
-- Every conversation is bound to a `conv_home` gateway that assigns `seq`; in v1 this is always the connected gateway.
-- Requests surface the accepting `origin_gateway` (equals `conv_home` in v1) and reserve `destination_gateway` as a future hint for relay-to-home federation.
+- Each deployment advertises a stable `gateway_id` (default `gw_local` in dev/test; overridable via `GATEWAY_ID`). In federated deployments `gateway_id` **MUST** be globally unique and stable over time; rotations are operationally breaking.
+- Every conversation is bound to a `conv_home` gateway that assigns `seq`; `conv_home` **MUST** be assigned when the conversation is created and **MUST NOT** change for the lifetime of the conversation.
+- Requests surface the accepting `origin_gateway` and reserve `destination_gateway` as a future hint for relay-to-home federation. Clients **MUST NOT** assume `origin_gateway == conv_home`; `conv_home` is the authoritative ordering identity even when connected to another gateway. In the current v1 deployment model they will typically be equal.
 - Responses for conversation events and KeyPackage APIs include `conv_home`/`origin_gateway` or `served_by`/`user_home_gateway` to avoid ossifying single-gateway assumptions.
 
 ### 5.5 Presence

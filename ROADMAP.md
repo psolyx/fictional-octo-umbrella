@@ -105,6 +105,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - `conv_home` semantics recorded per conversation; routing metadata emitted on WS/SSE/HTTP inbox responses.
 - KeyPackage responses include `served_by` and `user_home_gateway` to stay proxy-compatible.
 - ADR 0006 accepted describing the relay-to-home federation posture.
+- Spec reserves discovery hints for mapping `gateway_id`/`conv_home` to a reachable destination to keep federation rollout additive.
 
 **Exit criteria**
 - Backwards compatibility preserved for v1 clients while tests assert routing metadata is present.
