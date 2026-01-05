@@ -18,6 +18,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
     )
 
 from gateway import ws_transport as wst
+from ws_receive_util import assert_no_app_messages
 from gateway.ws_transport import create_app
 
 
@@ -117,8 +118,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         retry_ack = await ws.receive_json()
         self.assertEqual(retry_ack["body"]["seq"], 1)
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws.receive_json(), timeout=0.2)
+        await assert_no_app_messages(ws, timeout=0.2)
 
         await ws.close()
 
@@ -150,8 +150,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"conv_id": "c1", "next_seq": 2}, body["cursors"])
 
         await ws2.send_json({"v": 1, "t": "conv.subscribe", "id": "sub2", "body": {"conv_id": "c1"}})
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws2.receive_json(), timeout=0.2)
+        await assert_no_app_messages(ws2, timeout=0.2)
 
         await ws2.close()
 
@@ -265,8 +264,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 200)
         await member_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub", "body": {"conv_id": "c1"}})
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(member_ws.receive_json(), timeout=0.1)
+        await assert_no_app_messages(member_ws, timeout=0.1)
 
         outsider_ws, _ = await self._start_session(auth_token="outsider", device_id="doutsider")
         await outsider_ws.send_json(
@@ -277,8 +275,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["t"], "error")
         self.assertEqual(error["body"]["code"], "forbidden")
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(member_ws.receive_json(), timeout=0.2)
+        await assert_no_app_messages(member_ws, timeout=0.2)
 
         await owner_ws.close()
         await member_ws.close()
@@ -313,8 +310,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["t"], "error")
         self.assertEqual(error["body"], {"code": "forbidden", "message": "membership revoked"})
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(member_ws.receive_json(), timeout=0.2)
+        await assert_no_app_messages(member_ws, timeout=0.2)
 
         await owner_ws.close()
         await member_ws.close()

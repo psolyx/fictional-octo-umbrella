@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import importlib
 import importlib.metadata
 import unittest
@@ -19,6 +18,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
     )
 
 from gateway.presence import Presence, PresenceConfig
+from ws_receive_util import assert_no_app_messages, recv_json_until
 from gateway.ws_transport import create_app
 
 
@@ -105,7 +105,8 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        online_first = await asyncio.wait_for(watcher_ws.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        online_first = await recv_json_until(watcher_ws, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(online_first["body"]["status"], "online")
 
         await self.client.post(
@@ -114,20 +115,21 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session_two.session_token}"},
         )
 
-        online_second = await asyncio.wait_for(watcher_ws.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        online_second = await recv_json_until(watcher_ws, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(online_second["body"]["status"], "online")
         self.assertGreater(online_second["body"]["expires_at"], online_first["body"]["expires_at"])
 
         clock.advance(3)
         presence.expire()
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(watcher_ws.receive_json(), timeout=0.5)
+        await assert_no_app_messages(watcher_ws, timeout=0.5)
 
         clock.advance(2)
         presence.expire()
 
-        offline = await asyncio.wait_for(watcher_ws.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        offline = await recv_json_until(watcher_ws, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(offline["body"]["status"], "offline")
         await watcher_ws.close()
 
@@ -160,8 +162,9 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        update1 = await asyncio.wait_for(ws1.receive_json(), timeout=1)
-        update2 = await asyncio.wait_for(ws2.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        update1 = await recv_json_until(ws1, deadline=deadline, predicate=lambda _: True)
+        update2 = await recv_json_until(ws2, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(update1["body"]["status"], "online")
         self.assertEqual(update2["body"]["status"], "online")
         await ws1.close()
@@ -204,10 +207,8 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws1.receive_json(), timeout=0.5)
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws2.receive_json(), timeout=0.5)
+        await assert_no_app_messages(ws1, timeout=0.5)
+        await assert_no_app_messages(ws2, timeout=0.5)
 
         unblock_resp = await self.client.post(
             "/v1/presence/unblock",
@@ -223,8 +224,9 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        update1 = await asyncio.wait_for(ws1.receive_json(), timeout=1)
-        update2 = await asyncio.wait_for(ws2.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        update1 = await recv_json_until(ws1, deadline=deadline, predicate=lambda _: True)
+        update2 = await recv_json_until(ws2, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(update1["body"]["status"], "online")
         self.assertEqual(update2["body"]["status"], "online")
 
@@ -252,8 +254,7 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(watcher_ws.receive_json(), timeout=0.5)
+        await assert_no_app_messages(watcher_ws, timeout=0.5)
 
         await watcher_ws.close()
 
@@ -284,8 +285,7 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session.session_token}"},
         )
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(watcher_ws.receive_json(), timeout=0.5)
+        await assert_no_app_messages(watcher_ws, timeout=0.5)
 
         await self.client.post(
             "/v1/presence/lease",
@@ -293,13 +293,15 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {target_session_two.session_token}"},
         )
 
-        online = await asyncio.wait_for(watcher_ws.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        online = await recv_json_until(watcher_ws, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(online["body"]["status"], "online")
 
         clock.advance(3)
         presence.expire()
 
-        offline = await asyncio.wait_for(watcher_ws.receive_json(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        offline = await recv_json_until(watcher_ws, deadline=deadline, predicate=lambda _: True)
         self.assertEqual(offline["body"]["status"], "offline")
         await watcher_ws.close()
 

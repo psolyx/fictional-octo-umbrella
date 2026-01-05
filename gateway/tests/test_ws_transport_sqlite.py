@@ -10,6 +10,7 @@ if _aiohttp_spec is None:
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from ws_receive_util import assert_no_app_messages
 from gateway.ws_transport import create_app
 
 
@@ -89,9 +90,7 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([{"conv_id": "c1", "next_seq": 2}], ready2["body"]["cursors"])
 
         await ws2.send_json({"v": 1, "t": "conv.subscribe", "id": "sub2", "body": {"conv_id": "c1"}})
-        timeout = 0.2
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws2.receive_json(), timeout=timeout)
+        await assert_no_app_messages(ws2, timeout=0.2)
 
         await ws2.close()
 
@@ -128,9 +127,7 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
         retry_ack = await ws_sender.receive_json()
         self.assertEqual(retry_ack["body"]["seq"], 1)
 
-        timeout = 0.2
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws_sub.receive_json(), timeout=timeout)
+        await assert_no_app_messages(ws_sub, timeout=0.2)
 
         await ws_sender.close()
         await ws_sub.close()
@@ -178,8 +175,7 @@ class WsTransportSQLiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["t"], "error")
         self.assertEqual(error["body"], {"code": "forbidden", "message": "membership revoked"})
 
-        with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(member_ws.receive_json(), timeout=0.2)
+        await assert_no_app_messages(member_ws, timeout=0.2)
 
         await owner_ws.close()
         await member_ws.close()
