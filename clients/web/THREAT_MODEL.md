@@ -46,7 +46,8 @@ This document focuses on device bootstrap for the static web client. The client 
 - Consider binding bootstrap secrets to expected origin metadata so stolen codes cannot be redeemed on other origins.
 
 ## XSS and content security policy
-- Enforce a strict Content Security Policy when the app is hosted: disallow inline scripts/styles, restrict script sources to the first-party origin, and disable `eval`/`wasm-unsafe-eval`.
+- Enforce a strict Content Security Policy when the app is hosted: disallow inline scripts/styles, restrict script sources to the first-party origin, and set `connect-src` to `self` plus explicit `ws:`/`wss:` endpoints used for the gateway.
+- Keep `eval` disabled; when the MLS WebAssembly binding arrives, prefer adding `'wasm-unsafe-eval'` to `script-src` instead of loosening to `unsafe-eval`.
 - Escape all rendered text from gateway events; do not inject HTML from ciphertext or metadata.
 - Avoid third-party analytics/ads that widen the attack surface.
 
