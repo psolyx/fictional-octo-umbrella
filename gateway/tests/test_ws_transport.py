@@ -18,7 +18,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
     )
 
 from gateway import ws_transport as wst
-from ws_receive_util import assert_no_app_messages
+from ws_receive_util import assert_no_app_messages, recv_json_until
 from gateway.ws_transport import create_app
 
 
@@ -361,6 +361,108 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         await forbidden_resp.json()
 
         await admin_ws.close()
+        await owner_ws.close()
+
+    async def test_room_offline_join_leave_churn_replay_enforced(self):
+        owner_ws, owner_ready = await self._start_session(auth_token="owner", device_id="downer")
+        await self._create_room(owner_ready["body"]["session_token"], "c1", members=["member"])
+
+        member_ws, _ = await self._start_session(auth_token="member", device_id="dmember")
+        await member_ws.send_json({"v": 1, "t": "conv.subscribe", "id": "sub1", "body": {"conv_id": "c1", "from_seq": 1}})
+        await member_ws.close()
+
+        await owner_ws.send_json(
+            {"v": 1, "t": "conv.send", "id": "send1", "body": {"conv_id": "c1", "msg_id": "m1", "env": "ZW4=", "ts": 1}}
+        )
+        ack1 = await owner_ws.receive_json()
+        self.assertEqual(ack1["t"], "conv.acked")
+        self.assertEqual(ack1["body"]["seq"], 1)
+
+        await owner_ws.send_json(
+            {"v": 1, "t": "conv.send", "id": "send2", "body": {"conv_id": "c1", "msg_id": "m2", "env": "ZW4=", "ts": 2}}
+        )
+        ack2 = await owner_ws.receive_json()
+        self.assertEqual(ack2["t"], "conv.acked")
+        self.assertEqual(ack2["body"]["seq"], 2)
+
+        member_ws_replay, _ = await self._start_session(auth_token="member", device_id="dmember")
+        await member_ws_replay.send_json(
+            {"v": 1, "t": "conv.subscribe", "id": "replay1", "body": {"conv_id": "c1", "from_seq": 1}}
+        )
+
+        loop = asyncio.get_running_loop()
+        event1 = await recv_json_until(
+            member_ws_replay, deadline=loop.time() + 1.0, predicate=lambda payload: payload.get("t") == "conv.event"
+        )
+        event2 = await recv_json_until(
+            member_ws_replay, deadline=loop.time() + 1.0, predicate=lambda payload: payload.get("t") == "conv.event"
+        )
+
+        self.assertEqual(event1["body"]["seq"], 1)
+        self.assertEqual(event1["body"]["msg_id"], "m1")
+        self.assertEqual(event2["body"]["seq"], 2)
+        self.assertEqual(event2["body"]["msg_id"], "m2")
+
+        await member_ws_replay.send_json({"v": 1, "t": "conv.ack", "body": {"conv_id": "c1", "seq": 2}})
+        await member_ws_replay.close()
+
+        remove_resp = await self.client.post(
+            "/v1/rooms/remove",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {owner_ready['body']['session_token']}"},
+        )
+        self.assertEqual(remove_resp.status, 200)
+        await remove_resp.json()
+
+        await owner_ws.send_json(
+            {"v": 1, "t": "conv.send", "id": "send3", "body": {"conv_id": "c1", "msg_id": "m3", "env": "ZW4=", "ts": 3}}
+        )
+        ack3 = await owner_ws.receive_json()
+        self.assertEqual(ack3["t"], "conv.acked")
+        self.assertEqual(ack3["body"]["seq"], 3)
+
+        member_ws_forbidden, _ = await self._start_session(auth_token="member", device_id="dmember")
+        await member_ws_forbidden.send_json(
+            {"v": 1, "t": "conv.subscribe", "id": "replay2", "body": {"conv_id": "c1", "from_seq": 3}}
+        )
+
+        error = await recv_json_until(member_ws_forbidden, deadline=loop.time() + 1.0, predicate=lambda payload: True)
+        self.assertEqual(error["t"], "error")
+        self.assertEqual(error["body"]["code"], "forbidden")
+        self.assertIn(error["body"].get("message"), ("membership revoked", "not a member"))
+        await assert_no_app_messages(member_ws_forbidden, timeout=0.2)
+        await member_ws_forbidden.close()
+
+        invite_resp = await self.client.post(
+            "/v1/rooms/invite",
+            json={"conv_id": "c1", "members": ["member"]},
+            headers={"Authorization": f"Bearer {owner_ready['body']['session_token']}"},
+        )
+        self.assertEqual(invite_resp.status, 200)
+        await invite_resp.json()
+
+        await owner_ws.send_json(
+            {"v": 1, "t": "conv.send", "id": "send4", "body": {"conv_id": "c1", "msg_id": "m4", "env": "ZW4=", "ts": 4}}
+        )
+        ack4 = await owner_ws.receive_json()
+        self.assertEqual(ack4["t"], "conv.acked")
+        self.assertEqual(ack4["body"]["seq"], 4)
+
+        member_ws_final, _ = await self._start_session(auth_token="member", device_id="dmember")
+        await member_ws_final.send_json(
+            {"v": 1, "t": "conv.subscribe", "id": "replay3", "body": {"conv_id": "c1", "from_seq": 4}}
+        )
+
+        final_event = await recv_json_until(
+            member_ws_final, deadline=loop.time() + 1.0, predicate=lambda payload: payload.get("t") == "conv.event"
+        )
+
+        self.assertEqual(final_event["body"]["seq"], 4)
+        self.assertEqual(final_event["body"]["msg_id"], "m4")
+
+        await assert_no_app_messages(member_ws_final, timeout=0.2)
+
+        await member_ws_final.close()
         await owner_ws.close()
 
 
