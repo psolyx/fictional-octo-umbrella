@@ -30,7 +30,7 @@ This document focuses on device bootstrap for the static web client. The client 
 - Display the list of active devices with last-seen metadata so users can revoke old resume tokens.
 
 ## Storage model (IndexedDB)
-- Store resume tokens, pending ciphertext queue, and MLS state (when available) in IndexedDB with origin isolation.
+- Store resume tokens, last-used gateway URL, pending ciphertext queue, and MLS state (when available) in IndexedDB with origin isolation.
 - Avoid localStorage/sessionStorage for secrets to reduce accidental leakage.
 - Protect against partial writes: write to a new object store entry and swap only after fsync-equivalent completion.
 - Provide a "clear local state" control to delete IndexedDB records and force re-bootstrap.
