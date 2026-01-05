@@ -4,6 +4,7 @@ This document focuses on device bootstrap for the static web client. The client 
 
 ## Scope and assumptions
 - Web client runs in modern browsers without additional packages; only WebSocket connectivity to the gateway is required.
+- The UI stays frameworkless/static (plain JS/HTML/CSS) with no Node/npm toolchain in the critical path.
 - User obtains a bootstrap secret through an out-of-band channel (QR code or one-time alphanumeric code) and uses it to start a session.
 - Browser storage uses IndexedDB for long-lived secrets and session state.
 - Gateway stores/forwards ciphertext only; MLS enrollment and signature verification will be added later.

@@ -1,6 +1,6 @@
 # Web client skeleton
 
-This static demo exercises the gateway v1 WebSocket protocol without any build tooling or package manager dependencies. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations.
+This static demo exercises the gateway v1 WebSocket protocol without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations.
 
 ## Usage
 1. Open `clients/web/index.html` in a modern browser. No npm/yarn/pnpm setup is required.
@@ -25,7 +25,7 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
 ## Notes
 - All protocol keys and variables use snake_case to match gateway expectations.
 - Payloads are treated as opaque ciphertext; MLS binding will be added in a later phase.
-- Keep this demo self-contained and offline-friendly for CI and manual testing.
+- Keep this demo self-contained and offline-friendly for CI and manual testing; no React/Vue or other frameworks are used or required.
 
 ## Recommended CSP
 - Baseline (no WASM yet):
