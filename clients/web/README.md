@@ -21,3 +21,9 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
 - All protocol keys and variables use snake_case to match gateway expectations.
 - Payloads are treated as opaque ciphertext; MLS binding will be added in a later phase.
 - Keep this demo self-contained and offline-friendly for CI and manual testing.
+
+## Recommended CSP
+- Baseline (no WASM yet):
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; base-uri 'self'; form-action 'self'`
+  - The static files load without inline scripts or styles, and WebSocket connectivity is limited to the current origin plus explicit `ws:`/`wss:` endpoints.
+- When adding the MLS WASM binding later, prefer extending `script-src` with `'wasm-unsafe-eval'` instead of enabling `unsafe-eval`.
