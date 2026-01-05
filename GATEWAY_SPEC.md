@@ -137,6 +137,12 @@ Semantics match WS frames.
   ```
 - `POST /v1/session/resume` accepts `{ "resume_token": "rt_..." }` and returns the same body as `session.ready` on success. On failure it returns `{ "code": "resume_failed", "message": "resume token invalid or expired" }`.
 
+### 4.3 Gateway identity
+- `gateway_id` names the gateway namespace used across routing metadata fields: `conv_home`, `origin_gateway`, `destination_gateway` (reserved hint), `served_by`, and `user_home_gateway`.
+- `gateway_id` **MUST** be globally unique in federated deployments and **MUST** remain stable over time; rotating an identifier is considered an operationally breaking change.
+- Every conversation is bound to a `conv_home` gateway when created; `conv_home` **MUST NOT** change for the lifetime of the conversation.
+- Clients **MUST NOT** assume `origin_gateway == conv_home`. `conv_home` is the authoritative ordering identity even when the client is connected to another gateway; in current v1 single-gateway deployments these values will typically be equal.
+
 ---
 
 ## 5. Framing
@@ -171,8 +177,8 @@ Semantics match WS frames.
 - `conv_id` MUST be the MLS `group_id` (32 random bytes, base64/URL-safe encoded).
 - Room membership is invite-only for v1. The DS MUST enforce membership on every send and replay; non-members receive `error`=`forbidden`.
 - DMs are represented as 2-person MLS groups with the same `conv_id` rules.
-- Each `conv_id` has a home gateway (`conv_home`) responsible for sequencing. In v1, `conv_home` is always the connected gateway and is surfaced in response metadata to reserve the invariant for v2 federation.
-- The accepting gateway is identified as `origin_gateway`; it is equal to `conv_home` in v1. `destination_gateway` is a reserved client hint for future relay-to-home routing and is ignored in v1.
+- Each `conv_id` has a home gateway (`conv_home`) responsible for sequencing. `conv_home` **MUST** be assigned when the conversation is created and **MUST NOT** change for the lifetime of the conversation. In current v1 non-federated deployments, `conv_home` and `origin_gateway` will typically equal the connected gateway, but clients **MUST NOT** rely on this.
+- The accepting gateway is identified as `origin_gateway`; clients **MUST NOT** assume `origin_gateway == conv_home`. `destination_gateway` is a reserved client hint for future relay-to-home routing and is ignored in v1.
 - The gateway stores an append-only log per `conv_id` containing:
   - `seq` (u64) assigned by the home gateway; values MUST be monotonically increasing by 1 per conversation.
   - `msg_id` (string) provided by the client; combined with `conv_id` it is the idempotency key.
@@ -180,6 +186,7 @@ Semantics match WS frames.
 - (conv_id, msg_id) MUST be idempotent: retries with the same pair MUST return the same `seq` and MUST NOT create duplicates.
 - Delivery Service ordering: broadcasts MUST be emitted in `seq` order to all members, including the sender.
 - Echo-before-apply (see ADR 0002): clients MUST NOT apply their own MLS Commit until the DS echoes it back with an assigned `seq`. The DS MUST echo to the sender as well as to other members.
+- Discovery (reserved in v1): servers MAY include optional hints such as `gateway_url` or `conv_home_url` alongside routing metadata in responses; clients MUST treat them as hints and ignore them if absent. A future discovery endpoint MAY follow the reserved shape `GET /v1/gateways/resolve?gateway_id=...` returning `{ "gateway_id": "...", "gateway_url": "..." }` to map routing metadata to a network destination.
 
 ---
 
@@ -421,6 +428,7 @@ Semantics match WS frames.
 
 ## 9. KeyPackage directory APIs (gateway-hosted v1)
 - Base path: `/v1/keypackages` (HTTP, authenticated via `session_token` or equivalent bearer).
+- MLS-aligned deployments MAY reserve an application-specific KeyPackage extension to advertise `user_home_gateway` or other gateway discovery hints; v1 clients/servers MUST ignore the extension if present and the field MUST remain optional.
 
 ### 9.1 Publish
 - Endpoint: `POST /v1/keypackages`
