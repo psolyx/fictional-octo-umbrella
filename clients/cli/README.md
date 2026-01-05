@@ -28,6 +28,15 @@ PYTHONPATH=clients/cli/src python -m cli_app.tui_app  # curses TUI shell
 - The TUI provides keyboard-only navigation (Tab/Shift-Tab to change panes, arrows to move, Enter to run) and persists the
   last used parameters to `~/.mls_tui_state.json` for offline reuse.
 
+### Identity and device provisioning
+- The CLI and TUI create an offline Polycentric scaffold at `~/.polycentric_demo/identity.json` consisting of:
+  - `auth_token` representing the Polycentric system public key (user identity).
+  - `user_id` derived from the auth token (used by gateway session flows).
+  - `device_id` and `device_credential` placeholders compatible with gateway `session.start` expectations.
+- `python -m cli_app.mls_poc whoami` prints the current user/device identifiers; the TUI header shows the same info.
+- The TUI menu includes `rotate_device` to rotate only the device fields without changing the user identity.
+
 ## Persistence warning
 `--state-dir` will contain serialized MLS state and secrets. Keep it local and **never** commit it to version control.
 The TUI exposes the same flag: choose a private `state_dir` path before running smoke/soak.
+`~/.polycentric_demo/identity.json` and any TUI state files also contain secrets; do not commit or share them.

@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Tuple
 
+from cli_app import identity_store
+
 MIN_GO_VERSION: Tuple[int, int] = (1, 22)
 
 
@@ -125,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     soak.add_argument("--iterations", type=int, default=1000, help="Message iterations per participant (default: 1000)")
     soak.add_argument("--save-every", type=int, default=50, help="Checkpoint interval (default: 50)")
 
+    whoami = subparsers.add_parser("whoami", help="Show local Polycentric identity and device")
+    whoami.add_argument(
+        "--identity-file",
+        default=str(identity_store.DEFAULT_IDENTITY_PATH),
+        help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
+    )
+
     return parser
 
 
@@ -160,6 +169,21 @@ def handle_soak(args: argparse.Namespace) -> int:
     )
 
 
+def handle_whoami(args: argparse.Namespace) -> int:
+    path = Path(args.identity_file)
+    identity = identity_store.load_or_create_identity(path)
+    auth_body = identity.auth_token
+    if identity.auth_token.startswith("Bearer "):
+        suffix = identity.auth_token[len("Bearer ") :]
+        auth_body = f"Bearer {suffix[:8]}..." if len(suffix) > 8 else identity.auth_token
+
+    sys.stdout.write(f"user_id: {identity.user_id}\n")
+    sys.stdout.write(f"auth_token: {auth_body}\n")
+    sys.stdout.write(f"device_id: {identity.device_id}\n")
+    sys.stdout.write(f"identity_file: {path.expanduser()}\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -171,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             return handle_smoke(args)
         if args.command == "soak":
             return handle_soak(args)
+        if args.command == "whoami":
+            return handle_whoami(args)
     except RuntimeError as exc:  # user-facing errors
         sys.stderr.write(f"Error: {exc}\n")
         return 1

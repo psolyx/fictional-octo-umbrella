@@ -3,12 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cli_app import identity_store
 from cli_app.tui_model import TuiModel, load_settings
 
 
 class TuiModelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpfile = tempfile.NamedTemporaryFile(delete=False)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.identity_path = Path(self.tmpdir.name) / "identity.json"
+        self.identity = identity_store.load_or_create_identity(self.identity_path)
         self.addCleanup(self._cleanup_file)
 
     def _cleanup_file(self) -> None:
@@ -19,9 +23,10 @@ class TuiModelTests(unittest.TestCase):
                 Path(self.tmpfile.name).unlink()
             except FileNotFoundError:
                 pass
+            self.tmpdir.cleanup()
 
     def test_focus_cycles_with_tab(self):
-        model = TuiModel({}, settings_path=self.tmpfile.name)
+        model = self._model()
         self.assertEqual(model.render().focus_area, "menu")
 
         model.handle_key("TAB")
@@ -34,7 +39,7 @@ class TuiModelTests(unittest.TestCase):
         self.assertEqual(model.render().focus_area, "fields")
 
     def test_menu_selection_and_activation(self):
-        model = TuiModel({}, settings_path=self.tmpfile.name)
+        model = self._model()
         model.handle_key("DOWN")
         self.assertEqual(model.render().selected_menu, 1)
         self.assertEqual(model.current_action(), "smoke")
@@ -48,7 +53,7 @@ class TuiModelTests(unittest.TestCase):
         self.assertEqual(model.handle_key("ENTER"), "quit")
 
     def test_field_editing_persists(self):
-        model = TuiModel({"state_dir": ""}, settings_path=self.tmpfile.name)
+        model = self._model()
         model.handle_key("TAB")
 
         model.handle_key("CHAR", "a")
@@ -62,7 +67,7 @@ class TuiModelTests(unittest.TestCase):
         self.assertEqual(persisted["state_dir"], "a")
 
     def test_log_scroll_moves_selection(self):
-        model = TuiModel({}, settings_path=self.tmpfile.name)
+        model = self._model()
         model.append_log([f"line {i}" for i in range(10)])
         model.handle_key("TAB")
         model.handle_key("TAB")
@@ -73,6 +78,14 @@ class TuiModelTests(unittest.TestCase):
         self.assertEqual(model.render().log_scroll, 1)
         model.handle_key("DOWN")
         self.assertEqual(model.render().log_scroll, 0)
+
+    def _model(self) -> TuiModel:
+        return TuiModel(
+            {},
+            settings_path=self.tmpfile.name,
+            identity=self.identity,
+            identity_path=self.identity_path,
+        )
 
 
 if __name__ == "__main__":
