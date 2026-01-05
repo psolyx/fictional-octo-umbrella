@@ -19,11 +19,15 @@ All commands are run from the repo root via the Python module entrypoint:
 python -m cli_app.mls_poc vectors
 python -m cli_app.mls_poc smoke --state-dir /tmp/mls-cli-poc --iterations 50 --save-every 10
 python -m cli_app.mls_poc soak  --state-dir /tmp/mls-cli-poc --iterations 1000 --save-every 50
+PYTHONPATH=clients/cli/src python -m cli_app.tui_app  # curses TUI shell
 ```
 
 - `vectors` uses the default vector file at `tools/mls_harness/vectors/dm_smoke_v1.json` unless overridden.
 - `smoke` defaults to 50 iterations and saves every 10 messages.
 - `soak` defaults to 1000 iterations and saves every 50 messages (manual proof run).
+- The TUI provides keyboard-only navigation (Tab/Shift-Tab to change panes, arrows to move, Enter to run) and persists the
+  last used parameters to `~/.mls_tui_state.json` for offline reuse.
 
 ## Persistence warning
 `--state-dir` will contain serialized MLS state and secrets. Keep it local and **never** commit it to version control.
+The TUI exposes the same flag: choose a private `state_dir` path before running smoke/soak.
