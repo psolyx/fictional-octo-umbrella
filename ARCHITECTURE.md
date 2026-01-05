@@ -47,7 +47,7 @@ This repo implements a Polycentric-based social platform with a separate realtim
 
 3) **Clients**
    - **CLI/TUI** (primary MVP): Polycentric social + chat + presence.
-   - **Web UI** (later): reuse polycentric-web where possible; bolt on chat via same gateway.
+   - **Web UI** (later): frameworkless (plain JS + optional Web Components), static artifact-first (HTML/CSS/JS committed), no Node/npm required; keep strict CSP with explicit `connect-src` for WS/SSE and add `'wasm-unsafe-eval'` only if MLS WASM requires it (without enabling `unsafe-eval`).
 
 ### 3.2 Trust boundaries
 - Polycentric servers store and serve signed social events. They can be untrusted for confidentiality; signatures provide integrity and origin authentication.

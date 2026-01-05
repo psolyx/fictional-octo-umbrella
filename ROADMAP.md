@@ -27,7 +27,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Abuse controls: rate limits, watchlist caps, blocklists
 
 ### MVP-3
-- Web UI integration (browser MLS via WASM)
+- Frameworkless Web UI integration (browser MLS via WASM) with no React/Vue or similar frameworks and no Node/npm required.
 - Interop: CLI + Web in same DM/room
 
 ---
@@ -198,7 +198,8 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 ### Phase 5 — Web integration (retire: browser crypto + UX parity)
 **Deliverables**
 - Web MLS binding (WASM) and storage (secure key management story).
-- Web chat UI integrated with Polycentric social UI.
+- Web chat UI integrated with Polycentric social UI using a frameworkless/static stack; no Node/npm in the critical path.
+- Web MLS binding remains via the Go-to-WASM harness (ADR 0005). UI stack stays minimal even as interop expands.
 - Interop test suite: web + CLI in same conversations.
 
 **Exit criteria**
@@ -207,6 +208,16 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Risk retired**
 - Browser MLS and cross-client interop is real.
+
+### Phase 5.1 — Web UI posture hardening (retire: dependency/supply-chain creep)
+**Deliverables**
+- Dependency minimization policy for the web client (frameworkless/static, no Node/npm in critical path).
+- CSP baseline documented for WS/SSE with wasm-friendly extensions only as required.
+- Offline-friendly development workflow for committed web assets.
+
+**Exit criteria**
+- Documentation confirms the “no-npm-required” web dev path and dependency policy.
+- CSP guidance published and validated against the static artifacts.
 
 ---
 
