@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 
+from gateway.conversations import SQLiteConversationStore
 from gateway.sqlite_backend import SQLiteBackend
 from gateway.sqlite_cursors import SQLiteCursorStore
 from gateway.sqlite_log import SQLiteConversationLog
@@ -52,3 +53,24 @@ class SQLiteBackendTests(unittest.TestCase):
         self.assertEqual(resumed.device_id, "d1")
         self.assertEqual(resumed.session_token, created_session.session_token)
         self.assertEqual(resumed.user_id, "u1")
+
+    def test_schema_version_and_home_gateway_defaulting(self):
+        user_version = self.backend.connection.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(user_version, 5)
+
+        columns = {
+            row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        self.assertIn("home_gateway", columns)
+
+        self.backend.connection.execute(
+            "INSERT INTO conversations (conv_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)",
+            ("c1", "owner", 1),
+        )
+        store = SQLiteConversationStore(self.backend)
+        home_gateway = store.home_gateway("c1", "gw_default")
+        self.assertEqual(home_gateway, "gw_default")
+        stored_value = self.backend.connection.execute(
+            "SELECT home_gateway FROM conversations WHERE conv_id=?", ("c1",)
+        ).fetchone()[0]
+        self.assertEqual(stored_value, "gw_default")

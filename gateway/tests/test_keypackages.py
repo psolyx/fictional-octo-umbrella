@@ -54,6 +54,9 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
             headers=self.headers,
         )
         self.assertEqual(publish.status, 200)
+        publish_body = await publish.json()
+        self.assertEqual(publish_body["served_by"], "gw_local")
+        self.assertEqual(publish_body["user_home_gateway"], "gw_local")
 
         fetch_one = await self.client.post(
             "/v1/keypackages/fetch",
@@ -62,6 +65,8 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         body_one = await fetch_one.json()
         self.assertEqual(body_one["keypackages"], ["kp1"])
+        self.assertEqual(body_one["served_by"], "gw_local")
+        self.assertEqual(body_one["user_home_gateway"], "gw_local")
 
         fetch_two = await self.client.post(
             "/v1/keypackages/fetch",
@@ -70,6 +75,8 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         body_two = await fetch_two.json()
         self.assertEqual(body_two["keypackages"], ["kp2"])
+        self.assertEqual(body_two["served_by"], "gw_local")
+        self.assertEqual(body_two["user_home_gateway"], "gw_local")
 
         fetch_empty = await self.client.post(
             "/v1/keypackages/fetch",
@@ -78,6 +85,8 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         body_empty = await fetch_empty.json()
         self.assertEqual(body_empty["keypackages"], [])
+        self.assertEqual(body_empty["served_by"], "gw_local")
+        self.assertEqual(body_empty["user_home_gateway"], "gw_local")
 
     async def test_fetch_across_devices_for_user(self):
         runtime = self.app["runtime"]
@@ -125,6 +134,9 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
             headers=self.headers,
         )
         self.assertEqual(rotate.status, 200)
+        rotate_body = await rotate.json()
+        self.assertEqual(rotate_body["served_by"], "gw_local")
+        self.assertEqual(rotate_body["user_home_gateway"], "gw_local")
 
         fetch = await self.client.post(
             "/v1/keypackages/fetch",

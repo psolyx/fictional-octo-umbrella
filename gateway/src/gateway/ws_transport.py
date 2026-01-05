@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import secrets
 from typing import Any, Callable, List, Tuple, Union
 
@@ -106,6 +107,7 @@ class Runtime:
         keypackage_fetch_limiter: FixedWindowRateLimiter,
         now_func: Callable[[], int] = _now_ms,
         conversations,
+        gateway_id: str,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -117,6 +119,7 @@ class Runtime:
         self.keypackage_fetch_limiter = keypackage_fetch_limiter
         self.now_func = now_func
         self.conversations = conversations
+        self.gateway_id = gateway_id
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -145,6 +148,11 @@ def _limit_exceeded(message: str) -> web.Response:
 
 def _forbidden(message: str) -> web.Response:
     return web.json_response({"code": "forbidden", "message": message}, status=403)
+
+
+def _routing_metadata(runtime: Runtime, conv_id: str) -> dict[str, str]:
+    conv_home = runtime.conversations.home_gateway(conv_id, runtime.gateway_id)
+    return {"conv_home": conv_home, "origin_gateway": runtime.gateway_id}
 
 
 def _with_no_store(response: web.Response) -> web.Response:
@@ -247,7 +255,12 @@ async def handle_keypackage_publish(request: web.Request) -> web.Response:
         return _unauthorized()
 
     runtime.keypackages.publish(session.user_id, device_id, keypackages)
-    return web.json_response({"status": "ok"})
+    response_body = {
+        "status": "ok",
+        "served_by": runtime.gateway_id,
+        "user_home_gateway": runtime.gateway_id,
+    }
+    return web.json_response(response_body)
 
 
 async def handle_keypackage_fetch(request: web.Request) -> web.Response:
@@ -270,7 +283,12 @@ async def handle_keypackage_fetch(request: web.Request) -> web.Response:
         return _rate_limited("keypackage fetch rate limit exceeded")
 
     keypackages = runtime.keypackages.fetch(user_id, count)
-    return web.json_response({"keypackages": keypackages})
+    response_body = {
+        "keypackages": keypackages,
+        "served_by": runtime.gateway_id,
+        "user_home_gateway": runtime.gateway_id,
+    }
+    return web.json_response(response_body)
 
 
 async def handle_keypackage_rotate(request: web.Request) -> web.Response:
@@ -296,7 +314,12 @@ async def handle_keypackage_rotate(request: web.Request) -> web.Response:
     if device_id != session.device_id:
         return _unauthorized()
     runtime.keypackages.rotate(session.user_id, device_id, bool(revoke), replacement)
-    return web.json_response({"status": "ok"})
+    response_body = {
+        "status": "ok",
+        "served_by": runtime.gateway_id,
+        "user_home_gateway": runtime.gateway_id,
+    }
+    return web.json_response(response_body)
 
 
 def _no_store_response(data: dict[str, Any], status: int = 200) -> web.Response:
@@ -501,7 +524,7 @@ async def handle_inbox(request: web.Request) -> web.Response:
                 return _forbidden(message)
             return _invalid_request(message)
         assert seq is not None
-        return web.json_response({"status": "ok", "seq": seq})
+        return web.json_response({"status": "ok", "seq": seq, **_routing_metadata(runtime, frame_body.get("conv_id"))})
     if frame_type == "conv.ack":
         error = _process_conv_ack(runtime, session, frame_body)
         if error:
@@ -640,6 +663,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
                     "msg_id": event.msg_id,
                     "env": event.envelope_b64,
                     "sender_device_id": event.sender_device_id,
+                    **_routing_metadata(runtime, event.conv_id),
                 },
             }
             data = json.dumps(payload)
@@ -690,7 +714,9 @@ async def handle_room_create(request: web.Request) -> web.Response:
     if members is None:
         return _invalid_request("members must be a list of user_ids")
     try:
-        runtime.conversations.create(conv_id, session.user_id, members)
+        runtime.conversations.create(
+            conv_id, session.user_id, members, home_gateway=runtime.gateway_id
+        )
     except ValueError:
         return _invalid_request("conversation already exists")
     except LimitExceeded as exc:
@@ -816,6 +842,7 @@ def create_app(
     start_presence_sweeper: bool = True,
     keypackage_fetch_limit_per_min: int = _KEYPACKAGE_FETCH_LIMIT_PER_MIN,
     keypackage_now_func: Callable[[], int] = _now_ms,
+    gateway_id: str | None = None,
 ) -> web.Application:
     backend: SQLiteBackend | None = None
     if db_path is not None:
@@ -835,6 +862,7 @@ def create_app(
     presence = presence or Presence()
     hub = SubscriptionHub()
     fetch_limiter = FixedWindowRateLimiter(keypackage_fetch_limit_per_min)
+    resolved_gateway_id = gateway_id or os.environ.get("GATEWAY_ID") or "gw_local"
     runtime = Runtime(
         log=log,
         cursors=cursors,
@@ -846,6 +874,7 @@ def create_app(
         keypackage_fetch_limiter=fetch_limiter,
         now_func=keypackage_now_func,
         conversations=conversations,
+        gateway_id=resolved_gateway_id,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -945,6 +974,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                                 "msg_id": event.msg_id,
                                 "env": event.envelope_b64,
                                 "sender_device_id": event.sender_device_id,
+                                **_routing_metadata(runtime, event.conv_id),
                             },
                         }
                     )
@@ -1138,7 +1168,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             "v": 1,
                             "t": "conv.acked",
                             "id": frame.get("id"),
-                            "body": {"conv_id": body.get("conv_id"), "msg_id": body.get("msg_id"), "seq": seq},
+                            "body": {
+                                "conv_id": body.get("conv_id"),
+                                "msg_id": body.get("msg_id"),
+                                "seq": seq,
+                                **_routing_metadata(runtime, body.get("conv_id")),
+                            },
                         }
                     )
                 elif frame_type == "conv.ack":

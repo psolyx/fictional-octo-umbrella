@@ -18,6 +18,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Offline delivery (close client, reopen, catch up)
 - Presence: online/offline + coarse last-seen for contacts-only watchlist
 - Operator: single-node gateway behind CDN
+- Protocol: v1 runs without federation but reserves home-gateway routing metadata to keep v2 cheap
 
 ### MVP-2
 - Invite-only rooms (MLS groups)
@@ -70,6 +71,22 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Risk retired**
 - CDN-proxied realtime reliability (assume disconnections; deterministic catch-up is correct).
+
+---
+
+### Phase 1.5 — Federation-ready v1 protocol reservations (retire: protocol ossification / costly v2 risk)
+**Deliverables**
+- Gateway identity surfaced as `gateway_id` with default `gw_local`.
+- `conv_home` semantics recorded per conversation; routing metadata emitted on WS/SSE/HTTP inbox responses.
+- KeyPackage responses include `served_by` and `user_home_gateway` to stay proxy-compatible.
+- ADR 0006 accepted describing the relay-to-home federation posture.
+
+**Exit criteria**
+- Backwards compatibility preserved for v1 clients while tests assert routing metadata is present.
+- Deterministic checks green (lint/test/check) with metadata fields covered by automation.
+
+**Risk retired**
+- Protocol ossification that would make gateway federation a breaking change.
 
 ---
 
@@ -153,6 +170,21 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 ---
 
+### Phase 6 — Gateway federation v2 (relay-to-home) (retire: multi-gateway ops / routing risk)
+**Deliverables**
+- Inter-gateway transport and authentication to forward MLS traffic to `conv_home`.
+- Routing to `conv_home` for sends/replay with proxying of KeyPackage operations to the home gateway.
+- Operational docs for multi-gateway deployments without introducing multi-writer semantics.
+
+**Exit criteria**
+- Federation interop between gateways with preserved ordering/idempotency and no regressions for single-gateway sites.
+- Operators can deploy and observe relay-to-home behavior with documented rollouts/rollbacks.
+
+**Risk retired**
+- Multi-gateway operational risk and routing ambiguity.
+
+---
+
 ## 2. Cross-cutting deliverables (done continuously)
 - Observability:
   - structured logs (no plaintext)
@@ -171,6 +203,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Presence scraping: contacts-only + caps + rate limits + invisible mode.
 - CDN disconnects: heartbeats + resume + deterministic replay.
 - Abuse/spam/moderation: invite controls + resource quotas; add governance primitives before “public rooms”.
+- Federation ossification: reserve routing metadata in v1 (conv_home/origin_gateway, KeyPackage served_by/user_home_gateway) and codify relay-to-home posture (ADR 0006).
 
 ---
 

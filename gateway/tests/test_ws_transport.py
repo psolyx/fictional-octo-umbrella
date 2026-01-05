@@ -89,10 +89,14 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["t"], "conv.acked")
         self.assertEqual(ack["id"], "send1")
         self.assertEqual(ack["body"]["seq"], 1)
+        self.assertEqual(ack["body"]["conv_home"], "gw_local")
+        self.assertEqual(ack["body"]["origin_gateway"], "gw_local")
 
         self.assertEqual(event["t"], "conv.event")
         self.assertEqual(event["body"]["seq"], 1)
         self.assertEqual(event["body"]["msg_id"], "m1")
+        self.assertEqual(event["body"]["conv_home"], "gw_local")
+        self.assertEqual(event["body"]["origin_gateway"], "gw_local")
 
         await ws.close()
 

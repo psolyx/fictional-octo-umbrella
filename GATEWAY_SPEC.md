@@ -171,8 +171,10 @@ Semantics match WS frames.
 - `conv_id` MUST be the MLS `group_id` (32 random bytes, base64/URL-safe encoded).
 - Room membership is invite-only for v1. The DS MUST enforce membership on every send and replay; non-members receive `error`=`forbidden`.
 - DMs are represented as 2-person MLS groups with the same `conv_id` rules.
+- Each `conv_id` has a home gateway (`conv_home`) responsible for sequencing. In v1, `conv_home` is always the connected gateway and is surfaced in response metadata to reserve the invariant for v2 federation.
+- The accepting gateway is identified as `origin_gateway`; it is equal to `conv_home` in v1. `destination_gateway` is a reserved client hint for future relay-to-home routing and is ignored in v1.
 - The gateway stores an append-only log per `conv_id` containing:
-  - `seq` (u64) assigned by the gateway; values MUST be monotonically increasing by 1 per conversation.
+  - `seq` (u64) assigned by the home gateway; values MUST be monotonically increasing by 1 per conversation.
   - `msg_id` (string) provided by the client; combined with `conv_id` it is the idempotency key.
   - `env` (opaque ciphertext envelope) containing the MLS wire message bytes.
 - (conv_id, msg_id) MUST be idempotent: retries with the same pair MUST return the same `seq` and MUST NOT create duplicates.
@@ -223,10 +225,13 @@ Semantics match WS frames.
         "conv_id": "c_7N7...",
         "seq": 513,
         "msg_id": "m_01H...",
-        "env": "base64-mls-ciphertext"
+        "env": "base64-mls-ciphertext",
+        "conv_home": "gw_01H...",
+        "origin_gateway": "gw_01H..."
       }
     }
     ```
+  - `conv_home` identifies the ordering authority for the conversation; `origin_gateway` is the gateway that accepted the send. In v1 they are identical. Clients MUST ignore unknown fields.
 
 ### 7.2 Ack / cursor advance
 - Clients acknowledge progress with `conv.ack` (per device cursor):
@@ -255,12 +260,14 @@ Semantics match WS frames.
     "body": {
       "conv_id": "c_7N7...",
       "msg_id": "m_01H...",
-      "env": "base64-mls-ciphertext"
+      "env": "base64-mls-ciphertext",
+      "destination_gateway": "gw_optional_hint"
     }
   }
   ```
 - The server MUST NOT inspect plaintext; `env` is opaque.
-- On success the server replies with `conv.acked` including the assigned `seq`:
+- Clients MAY include `destination_gateway` as a routing hint for future relay-to-home federation; it is ignored in v1.
+- On success the server replies with `conv.acked` including the assigned `seq` and routing metadata:
   ```json
   {
     "v": 1,
@@ -269,7 +276,9 @@ Semantics match WS frames.
     "body": {
       "conv_id": "c_7N7...",
       "msg_id": "m_01H...",
-      "seq": 514
+      "seq": 514,
+      "conv_home": "gw_01H...",
+      "origin_gateway": "gw_01H..."
     }
   }
   ```
@@ -311,21 +320,21 @@ Semantics match WS frames.
     ```json
     { "v": 1, "t": "conv.ack", "body": { "conv_id": "c_7N7...", "seq": 10 } }
     ```
-  - Responses:
-    - `conv.send` → `{ "status": "ok", "seq": <assigned_seq> }` (idempotent on retries).
-    - `conv.ack` → `{ "status": "ok" }` after advancing the cursor (`next_seq = max(next_seq, seq+1)`).
+    - Responses:
+      - `conv.send` → `{ "status": "ok", "seq": <assigned_seq>, "conv_home": "gw_...", "origin_gateway": "gw_..." }` (idempotent on retries).
+      - `conv.ack` → `{ "status": "ok" }` after advancing the cursor (`next_seq = max(next_seq, seq+1)`).
   - Membership and idempotency invariants are identical to the WS transport.
 - Endpoint: `GET /v1/sse` (HTTP, streaming) authenticated via `Authorization: Bearer {session_token}`.
   - Query params: `conv_id` (required), `from_seq` (optional inclusive start), `after_seq` (optional legacy; maps to `from_seq = after_seq + 1` when `from_seq` is omitted).
   - Membership MUST be enforced on connect and during the stream; revoked members stop receiving events and the stream closes.
   - Replay + live stream: server delivers `conv.event` starting at `from_seq` inclusive, then streams new events in `seq` order.
-  - SSE wire format:
-    ```
-    event: conv.event
-    data: {"v":1,"t":"conv.event","body":{"conv_id":"c_7N7...","seq":1,"msg_id":"m_01H...","env":"base64","sender_device_id":"d_01G..."}}
+    - SSE wire format:
+      ```
+      event: conv.event
+      data: {"v":1,"t":"conv.event","body":{"conv_id":"c_7N7...","seq":1,"msg_id":"m_01H...","env":"base64","sender_device_id":"d_01G...","conv_home":"gw_01H...","origin_gateway":"gw_01H..."}}
 
-    : ping
-    ```
+      : ping
+      ```
     - Keepalive comments (`: ping`) SHOULD be sent roughly every 15 seconds during idle periods.
 
 ---
@@ -424,6 +433,8 @@ Semantics match WS frames.
   ```
 - Server MUST store one-time-use KeyPackages, enforce device ownership, and MAY cap pool size per device.
 - Requests MUST be authenticated for the publishing user and device; the server associates published material with both `user_id` and `device_id`.
+- Requests MAY include routing hints such as `destination_gateway` or `user_home_gateway` for future proxying; they are ignored in v1.
+- Response: `{ "status": "ok", "served_by": "gw_...", "user_home_gateway": "gw_..." }`.
 
 ### 9.2 Fetch
 - Endpoint: `POST /v1/keypackages/fetch`
@@ -435,6 +446,8 @@ Semantics match WS frames.
   }
   ```
 - Server returns up to `count` available KeyPackages for the requested user across all of their devices and MUST rate limit fetches.
+- Requests MAY include routing hints such as `destination_gateway` or `user_home_gateway` for future proxying; they are ignored in v1.
+- Response: `{ "keypackages": [ ... ], "served_by": "gw_...", "user_home_gateway": "gw_..." }`.
 
 ### 9.3 Rotate / Revoke
 - Endpoint: `POST /v1/keypackages/rotate`
@@ -448,6 +461,8 @@ Semantics match WS frames.
   ```
 - Revocation is best-effort: server SHOULD prevent future fetch of revoked material but previously delivered KeyPackages MAY still be used by peers.
 - Requests MUST be authenticated for the owning user; rotate only affects the provided `device_id` under that user.
+- Requests MAY include routing hints such as `destination_gateway` or `user_home_gateway` for future proxying; they are ignored in v1.
+- Response mirrors publish: `{ "status": "ok", "served_by": "gw_...", "user_home_gateway": "gw_..." }`.
 
 ### 9.4 Rate limits and “last resort”
 - Directory endpoints MUST be rate-limited per device/user to prevent scraping and to conserve pool health. `/v1/keypackages/fetch` MUST enforce a deterministic fixed-window limit (per requesting user across devices) of at least 60 fetches per minute and return `429 rate_limited` when exceeded. Operators MAY apply stricter quotas to publish/rotate as needed.

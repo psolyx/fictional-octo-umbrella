@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4):
+        elif user_version not in (1, 2, 3, 4, 5):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -61,7 +61,11 @@ class SQLiteBackend:
             self._migrate_v3_to_v4()
             user_version = 4
 
-        if user_version != 4:
+        if user_version == 4:
+            self._migrate_v4_to_v5()
+            user_version = 5
+
+        if user_version != 5:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -180,3 +184,9 @@ class SQLiteBackend:
             """
         )
         self._conn.execute("PRAGMA user_version = 4")
+
+    def _migrate_v4_to_v5(self) -> None:
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "home_gateway" not in columns:
+            self._conn.execute("ALTER TABLE conversations ADD COLUMN home_gateway TEXT NOT NULL DEFAULT ''")
+        self._conn.execute("PRAGMA user_version = 5")
