@@ -134,7 +134,7 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
         body = await resp.json()
         return body["keypackages"]
 
-    async def _run_harness(self, env: Dict[str, str], *args: str) -> str:
+    async def _run_harness_raw(self, env: Dict[str, str], *args: str) -> Tuple[Optional[int], str, str]:
         proc = await asyncio.create_subprocess_exec(
             str(self.harness_bin),
             *args,
@@ -147,16 +147,22 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.harness_timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
-            self.fail(f"mls-harness {' '.join(args)} timed out after {self.harness_timeout} seconds")
+            stdout, stderr = await proc.communicate()
+            return None, stdout.decode().strip(), stderr.decode().strip()
 
-        if proc.returncode != 0:
+        return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
+
+    async def _run_harness(self, env: Dict[str, str], *args: str) -> str:
+        rc, stdout, stderr = await self._run_harness_raw(env, *args)
+        if rc is None:
+            self.fail(f"mls-harness {' '.join(args)} timed out after {self.harness_timeout} seconds")
+        if rc != 0:
             self.fail(
-                f"mls-harness {' '.join(args)} failed with code {proc.returncode}\n"
-                f"stdout:\n{stdout.decode()}\n"
-                f"stderr:\n{stderr.decode()}\n"
+                f"mls-harness {' '.join(args)} failed with code {rc}\n"
+                f"stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}\n"
             )
-        return stdout.decode().strip()
+        return stdout
 
     async def test_dm_roundtrip_over_ds(self):
         go_bin = shutil.which("go")
@@ -541,7 +547,12 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
 
                 expected_seq += 1
 
-                async def send_and_clone(
+                def _clone_state(src: str, dest: Path):
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(src, dest)
+
+                async def send_and_receive(
                     sender_env: dict,
                     sender_dir: str,
                     sender_sse,
@@ -549,7 +560,7 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
                     receiver_dir: str,
                     msg_id: str,
                     plaintext: str,
-                ):
+                ) -> str:
                     nonlocal expected_seq
                     ct = await self._run_harness(env, "dm-encrypt", "--state-dir", sender_dir, "--plaintext", plaintext)
                     frame = {
@@ -571,35 +582,94 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(receiver_evt["body"]["seq"], expected_seq)
                     self.assertEqual(receiver_evt["body"]["msg_id"], msg_id)
 
-                    with tempfile.TemporaryDirectory() as clone_tmp:
-                        clone_dir = Path(clone_tmp) / "state"
-                        shutil.copytree(receiver_dir, clone_dir)
-                        decrypted = await self._run_harness(
-                            env,
-                            "dm-decrypt",
-                            "--state-dir",
-                            receiver_dir,
-                            "--ciphertext",
-                            receiver_evt["body"]["env"],
-                        )
-                        self.assertEqual(decrypted, plaintext)
-                        cloned_plaintext = await self._run_harness(
-                            env,
-                            "dm-decrypt",
-                            "--state-dir",
-                            str(clone_dir),
-                            "--ciphertext",
-                            receiver_evt["body"]["env"],
-                        )
-                        self.assertEqual(cloned_plaintext, plaintext)
-
+                    decrypted = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        receiver_dir,
+                        "--ciphertext",
+                        receiver_evt["body"]["env"],
+                    )
+                    self.assertEqual(decrypted, plaintext)
                     expected_seq += 1
+                    return receiver_evt["body"]["env"]
 
                 initiator_env = {"session_token": ready_initiator["session_token"], "state_dir": init_dir}
                 joiner_env = {"session_token": ready_joiner["session_token"], "state_dir": join_dir}
 
-                await send_and_clone(initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-1", "hi-joiner")
-                await send_and_clone(joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-2", "hi-initiator")
+                with tempfile.TemporaryDirectory() as join_clone_tmp, tempfile.TemporaryDirectory() as init_clone_tmp:
+                    join_clone_dir = Path(join_clone_tmp) / "state"
+                    init_clone_dir = Path(init_clone_tmp) / "state"
+
+                    await send_and_receive(
+                        initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-1", "hi-joiner"
+                    )
+                    _clone_state(join_dir, join_clone_dir)
+
+                    joiner_stale_cipher = await send_and_receive(
+                        initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-2", "follow-up"
+                    )
+                    shutil.rmtree(join_clone_dir)
+                    join_clone_dir.mkdir(parents=True, exist_ok=True)
+                    rc, _, _ = await self._run_harness_raw(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        str(join_clone_dir),
+                        "--ciphertext",
+                        joiner_stale_cipher,
+                    )
+                    self.assertIsNotNone(rc)
+                    self.assertNotEqual(rc, 0)
+
+                    _clone_state(join_dir, join_clone_dir)
+                    joiner_resync_cipher = await send_and_receive(
+                        initiator_env, init_dir, initiator_sse, joiner_sse, join_dir, "msg-2-resync", "resynced"
+                    )
+                    cloned_resync_plaintext = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        str(join_clone_dir),
+                        "--ciphertext",
+                        joiner_resync_cipher,
+                    )
+                    self.assertEqual(cloned_resync_plaintext, "resynced")
+
+                    await send_and_receive(
+                        joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-3", "hi-initiator"
+                    )
+                    _clone_state(init_dir, init_clone_dir)
+
+                    initiator_stale_cipher = await send_and_receive(
+                        joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-4", "ack"
+                    )
+                    shutil.rmtree(init_clone_dir)
+                    init_clone_dir.mkdir(parents=True, exist_ok=True)
+                    rc_initiator, _, _ = await self._run_harness_raw(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        str(init_clone_dir),
+                        "--ciphertext",
+                        initiator_stale_cipher,
+                    )
+                    self.assertIsNotNone(rc_initiator)
+                    self.assertNotEqual(rc_initiator, 0)
+
+                    _clone_state(init_dir, init_clone_dir)
+                    initiator_resync_cipher = await send_and_receive(
+                        joiner_env, join_dir, joiner_sse, initiator_sse, init_dir, "msg-4-resync", "resynced-initiator"
+                    )
+                    resynced_plaintext = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        str(init_clone_dir),
+                        "--ciphertext",
+                        initiator_resync_cipher,
+                    )
+                    self.assertEqual(resynced_plaintext, "resynced-initiator")
 
                 await initiator_sse.release()
                 await joiner_sse.release()
