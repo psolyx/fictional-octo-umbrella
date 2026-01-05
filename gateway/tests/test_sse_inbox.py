@@ -97,6 +97,8 @@ class SseInboxTests(unittest.IsolatedAsyncioTestCase):
         resp1 = await self._post_inbox(session_token, send_frame)
         self.assertEqual(resp1.status, 200)
         body1 = await resp1.json()
+        self.assertEqual(body1["conv_home"], "gw_local")
+        self.assertEqual(body1["origin_gateway"], "gw_local")
 
         resp2 = await self._post_inbox(session_token, send_frame)
         self.assertEqual(resp2.status, 200)
@@ -107,6 +109,8 @@ class SseInboxTests(unittest.IsolatedAsyncioTestCase):
         event_type, payload = await read_sse_event(sse_resp)
         self.assertEqual(event_type, "conv.event")
         self.assertEqual(payload["body"]["msg_id"], "m1")
+        self.assertEqual(payload["body"]["conv_home"], "gw_local")
+        self.assertEqual(payload["body"]["origin_gateway"], "gw_local")
 
         with self.assertRaises(asyncio.TimeoutError):
             await asyncio.wait_for(read_sse_event(sse_resp), timeout=0.2)

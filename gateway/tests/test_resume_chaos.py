@@ -174,7 +174,7 @@ class ResumeStormInvariantTests(unittest.TestCase):
         device_id = "device"
         conv_id = "resume-storm"
 
-        runtime.conversations.create(conv_id, user_id, members=[])
+        runtime.conversations.create(conv_id, user_id, members=[], home_gateway=runtime.gateway_id)
         session = runtime.sessions.create(user_id, device_id)
         resume_token = session.resume_token
 

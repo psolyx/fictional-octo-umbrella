@@ -39,3 +39,4 @@ Each ADR MUST include the following sections, using the headings exactly:
 - [0003: SQLite durability for the gateway](decisions/0003-sqlite-durability-v1.md)
 - [0004: MLS library selection (Go-first)](decisions/0004-mls-library-selection-go-first.md)
 - [0005: Browser MLS via Go-to-WASM harness](decisions/0005-browser-mls-wasm-plan.md)
+- [0006: Gateway federation posture: relay-to-home](decisions/0006-gateway-federation-posture-relay-to-home.md)

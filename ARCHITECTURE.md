@@ -98,7 +98,13 @@ Rationale: MLS architecture guidance explicitly describes a strongly-consistent 
   - `msg_id`: client idempotency key
   - `env`: opaque envelope containing MLS wire message bytes
 
-### 5.4 Presence
+### 5.4 Gateway identity and routing metadata
+- Each deployment advertises a stable `gateway_id` (default `gw_local` in dev/test; overridable via `GATEWAY_ID`).
+- Every conversation is bound to a `conv_home` gateway that assigns `seq`; in v1 this is always the connected gateway.
+- Requests surface the accepting `origin_gateway` (equals `conv_home` in v1) and reserve `destination_gateway` as a future hint for relay-to-home federation.
+- Responses for conversation events and KeyPackage APIs include `conv_home`/`origin_gateway` or `served_by`/`user_home_gateway` to avoid ossifying single-gateway assumptions.
+
+### 5.5 Presence
 - Presence is a **lease** (soft state) with TTL, renewed periodically.
 - Watchers subscribe to a bounded watchlist; server enforces authorization and rate limits.
 

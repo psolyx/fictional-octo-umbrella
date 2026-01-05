@@ -18,6 +18,7 @@ class Conversation:
     conv_id: str
     owner_user_id: str
     created_at_ms: int
+    home_gateway: str = ""
 
 
 class InMemoryConversationStore:
@@ -27,14 +28,19 @@ class InMemoryConversationStore:
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
         self._remove_limits = FixedWindowRateLimiter(REMOVES_PER_MIN)
 
-    def create(self, conv_id: str, owner_user_id: str, members: Iterable[str]) -> None:
+    def create(self, conv_id: str, owner_user_id: str, members: Iterable[str], *, home_gateway: str) -> None:
         if conv_id in self._conversations:
             raise ValueError("conversation already exists")
         member_set = set(members)
         member_set.add(owner_user_id)
         if len(member_set) > MAX_MEMBERS_PER_CONV:
             raise LimitExceeded("too many members")
-        conversation = Conversation(conv_id=conv_id, owner_user_id=owner_user_id, created_at_ms=_now_ms())
+        conversation = Conversation(
+            conv_id=conv_id,
+            owner_user_id=owner_user_id,
+            created_at_ms=_now_ms(),
+            home_gateway=home_gateway,
+        )
         self._conversations[conv_id] = conversation
         roster = {user_id: "member" for user_id in member_set}
         roster[owner_user_id] = "owner"
@@ -97,6 +103,14 @@ class InMemoryConversationStore:
             return None
         return roster.get(user_id)
 
+    def home_gateway(self, conv_id: str, default_gateway: str) -> str:
+        conversation = self._conversations.get(conv_id)
+        if conversation is None:
+            raise ValueError("unknown conversation")
+        if not conversation.home_gateway:
+            conversation.home_gateway = default_gateway
+        return conversation.home_gateway
+
     def is_known(self, conv_id: str) -> bool:
         return conv_id in self._conversations
 
@@ -122,7 +136,7 @@ class SQLiteConversationStore:
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
         self._remove_limits = FixedWindowRateLimiter(REMOVES_PER_MIN)
 
-    def create(self, conv_id: str, owner_user_id: str, members: Iterable[str]) -> None:
+    def create(self, conv_id: str, owner_user_id: str, members: Iterable[str], *, home_gateway: str) -> None:
         member_set = set(members)
         member_set.add(owner_user_id)
         if len(member_set) > MAX_MEMBERS_PER_CONV:
@@ -140,8 +154,8 @@ class SQLiteConversationStore:
                     conn.rollback()
                     raise ValueError("conversation already exists")
                 cursor.execute(
-                    "INSERT INTO conversations (conv_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)",
-                    (conv_id, owner_user_id, now_ms),
+                    "INSERT INTO conversations (conv_id, owner_user_id, created_at_ms, home_gateway) VALUES (?, ?, ?, ?)",
+                    (conv_id, owner_user_id, now_ms, home_gateway),
                 )
                 for member in member_set:
                     role = "owner" if member == owner_user_id else "member"
@@ -284,15 +298,31 @@ class SQLiteConversationStore:
             return None
         return row[0]
 
+    def home_gateway(self, conv_id: str, default_gateway: str) -> str:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT home_gateway FROM conversations WHERE conv_id=?",
+                (conv_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown conversation")
+            home_gateway = row[0] or default_gateway
+            if not row[0] and default_gateway:
+                self._backend.connection.execute(
+                    "UPDATE conversations SET home_gateway=? WHERE conv_id=?",
+                    (home_gateway, conv_id),
+                )
+        return home_gateway
+
     def _require_conversation(self, conv_id: str) -> Conversation:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT conv_id, owner_user_id, created_at_ms FROM conversations WHERE conv_id=?",
+                "SELECT conv_id, owner_user_id, created_at_ms, home_gateway FROM conversations WHERE conv_id=?",
                 (conv_id,),
             ).fetchone()
         if row is None:
             raise ValueError("unknown conversation")
-        return Conversation(conv_id=row[0], owner_user_id=row[1], created_at_ms=row[2])
+        return Conversation(conv_id=row[0], owner_user_id=row[1], created_at_ms=row[2], home_gateway=row[3])
 
     def _require_admin(self, conversation: Conversation, actor_user_id: str) -> None:
         role = self.role(conversation.conv_id, actor_user_id)
