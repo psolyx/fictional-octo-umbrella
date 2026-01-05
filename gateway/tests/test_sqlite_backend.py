@@ -56,7 +56,7 @@ class SQLiteBackendTests(unittest.TestCase):
 
     def test_schema_version_and_home_gateway_defaulting(self):
         user_version = self.backend.connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(user_version, 5)
+        self.assertEqual(user_version, 6)
 
         columns = {
             row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversations)").fetchall()
@@ -74,3 +74,8 @@ class SQLiteBackendTests(unittest.TestCase):
             "SELECT home_gateway FROM conversations WHERE conv_id=?", ("c1",)
         ).fetchone()[0]
         self.assertEqual(stored_value, "gw_default")
+
+        social_columns = {
+            row[1] for row in self.backend.connection.execute("PRAGMA table_info(social_events)").fetchall()
+        }
+        self.assertIn("event_id", social_columns)

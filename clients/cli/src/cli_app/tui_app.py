@@ -44,6 +44,10 @@ def _build_default_settings() -> Dict[str, str]:
         "iterations": "50",
         "save_every": "10",
         "vector_file": str(default_vector),
+        "gateway_url": "http://127.0.0.1:8080",
+        "social_text": "",
+        "feed_limit": "5",
+        "feed_user_id": "",
     }
 
 
@@ -158,6 +162,34 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 [f"state_dir={args.state_dir}", f"iterations={args.iterations}", f"save_every={args.save_every}"]
             )
             exit_code, output = _invoke(lambda: mls_poc.handle_soak(args))
+        elif action == "social_publish":
+            text = fields.get("social_text", "")
+            gateway = fields.get("gateway_url", "")
+            if not text:
+                log_writer(["social_text is required to publish"])
+                return
+            if not gateway:
+                log_writer(["gateway_url is required to publish"])
+                return
+            args = SimpleNamespace(text=text, gateway=gateway, identity_file=model.identity_path)
+            _write_heading([f"gateway={gateway}"])
+            exit_code, output = _invoke(lambda: mls_poc._handle_social_publish(args))
+        elif action == "social_feed":
+            gateway = fields.get("gateway_url", "")
+            limit_val = _parse_int(fields.get("feed_limit", "0"), "feed_limit")
+            if limit_val is None:
+                return
+            if not gateway:
+                log_writer(["gateway_url is required to fetch feed"])
+                return
+            args = SimpleNamespace(
+                user_id=fields.get("feed_user_id") or None,
+                gateway=gateway,
+                limit=limit_val,
+                identity_file=model.identity_path,
+            )
+            _write_heading([f"gateway={gateway}", f"limit={limit_val}"])
+            exit_code, output = _invoke(lambda: mls_poc._handle_social_feed(args))
         elif action == "rotate_device":
             record = model.rotate_device()
             _write_heading(

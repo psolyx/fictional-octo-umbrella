@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import json
+from pathlib import Path
+
 from cli_app import identity_store
 
 
@@ -12,6 +15,8 @@ def test_load_or_create_identity_is_stable(tmp_path: Path):
     assert identity_path.exists()
     assert first == second
     assert first.user_id == second.user_id
+    assert first.seed_b64 == second.seed_b64
+    assert first.pub_key_b64 == second.pub_key_b64
 
 
 def test_rotate_device_changes_device_fields(tmp_path: Path):
@@ -38,4 +43,6 @@ def test_identity_written_atomically(tmp_path: Path):
     assert data["auth_token"] == record.auth_token
     assert "device_id" in data
     assert "device_credential" in data
+    assert data["seed_b64"] == record.seed_b64
+    assert data["pub_key_b64"] == record.pub_key_b64
     assert not identity_path.with_suffix(identity_path.suffix + ".tmp").exists()

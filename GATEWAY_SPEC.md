@@ -542,3 +542,38 @@ Semantics match WS frames.
 ## 11. References
 - ADR 0002 — Sequencing, idempotency, and echo-before-apply invariants.
 - MLS Delivery Service responsibilities are described in ARCHITECTURE.md.
+
+## Social HTTP API (v1, experimental)
+
+This gateway exposes an append-only social feed for CDN-friendly delivery. Events are signed by the publisher and validated by the gateway before acceptance.
+
+### Event format
+
+* All field names are snake_case.
+* Canonical bytes for signing are `json.dumps({"body": body, "kind": kind, "ts_ms": ts_ms, "user_id": user_id, "v": v}, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')`.
+* `event_id = sha256(canonical_bytes).hexdigest()`.
+* `user_id = "u_" + sha256(pub_key_bytes).hexdigest()` where `pub_key_bytes` is the decoded `pub_key` (base64url, no padding).
+* Fields:
+  * `v` (int)
+  * `user_id` (string, must match derived value from `pub_key`)
+  * `ts_ms` (int, Unix epoch ms)
+  * `kind` (string)
+  * `body` (JSON object)
+  * `pub_key` (base64url, no padding, Ed25519 public key)
+  * `sig` (base64url, no padding, Ed25519 signature over canonical bytes)
+  * `event_id` (hex string; optional on submit, recomputed server-side)
+* Duplicate submissions by `event_id` are idempotent: the gateway returns the stored event without rewriting.
+
+### Endpoints
+
+* `POST /v1/social/event`
+  * Body: event fields above. The gateway recomputes canonical bytes and `event_id`, derives `user_id` from `pub_key`, and rejects invalid signatures.
+  * On duplicate `event_id`, returns 200 with the stored event.
+  * Responses are `Cache-Control: no-store`.
+* `GET /v1/social/feed?user_id=...&from_ts_ms=...&limit=...&cursor=...`
+  * Returns events ordered by (`ts_ms`, `event_id`) for the requested `user_id`.
+  * Cursor is opaque (base64url over `{ts, event_id}`) and stable because the log is append-only.
+  * Cache-Control:
+    * first page (no cursor): `public, max-age=30`
+    * cursor pages: `public, max-age=31536000, immutable`
+* `GET /v1/social/event/{event_id}` returns the stored event and `Cache-Control: public, max-age=31536000, immutable`.

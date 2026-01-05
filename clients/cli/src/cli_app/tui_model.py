@@ -78,8 +78,25 @@ class TuiModel:
         identity: IdentityRecord | None = None,
         identity_path: Path | str = DEFAULT_IDENTITY_PATH,
     ) -> None:
-        self.menu_items: List[str] = ["vectors", "smoke", "soak", "rotate_device", "quit"]
-        self.field_order: List[str] = ["state_dir", "iterations", "save_every", "vector_file"]
+        self.menu_items: List[str] = [
+            "vectors",
+            "smoke",
+            "soak",
+            "social_publish",
+            "social_feed",
+            "rotate_device",
+            "quit",
+        ]
+        self.field_order: List[str] = [
+            "state_dir",
+            "iterations",
+            "save_every",
+            "vector_file",
+            "gateway_url",
+            "social_text",
+            "feed_limit",
+            "feed_user_id",
+        ]
         self.settings_path = Path(settings_path)
         self.max_log_lines = max_log_lines
         self.identity_path = Path(identity_path).expanduser()
@@ -91,6 +108,10 @@ class TuiModel:
             "iterations": initial_settings.get("iterations", "50"),
             "save_every": initial_settings.get("save_every", "10"),
             "vector_file": initial_settings.get("vector_file", ""),
+            "gateway_url": initial_settings.get("gateway_url", "http://127.0.0.1:8080"),
+            "social_text": initial_settings.get("social_text", ""),
+            "feed_limit": initial_settings.get("feed_limit", "5"),
+            "feed_user_id": initial_settings.get("feed_user_id", ""),
         }
 
         self.fields: Dict[str, str] = defaults

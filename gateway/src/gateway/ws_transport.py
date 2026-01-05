@@ -24,6 +24,17 @@ from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
 from .sqlite_log import SQLiteConversationLog
 from .sqlite_sessions import Session, SQLiteSessionStore, _now_ms
+from .social import (
+    GoEd25519Verifier,
+    InMemorySocialStore,
+    SQLiteSocialStore,
+    SocialEvent,
+    canonical_bytes as social_canonical_bytes,
+    compute_event_id as social_compute_event_id,
+    decode_cursor as social_decode_cursor,
+    derive_user_id as social_derive_user_id,
+    encode_cursor as social_encode_cursor,
+)
 
 
 _KEYPACKAGE_FETCH_LIMIT_PER_MIN = 60
@@ -108,6 +119,8 @@ class Runtime:
         now_func: Callable[[], int] = _now_ms,
         conversations,
         gateway_id: str,
+        social_store,
+        social_verifier: GoEd25519Verifier,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -120,6 +133,8 @@ class Runtime:
         self.now_func = now_func
         self.conversations = conversations
         self.gateway_id = gateway_id
+        self.social_store = social_store
+        self.social_verifier = social_verifier
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -164,6 +179,70 @@ def _derive_user_id(auth_token: str) -> str:
     if auth_token.startswith("Bearer "):
         return auth_token[len("Bearer ") :].strip()
     return auth_token
+
+
+def _social_event_to_dict(event: SocialEvent) -> dict[str, Any]:
+    return {
+        "v": event.v,
+        "user_id": event.user_id,
+        "ts_ms": event.ts_ms,
+        "kind": event.kind,
+        "body": event.body,
+        "pub_key": event.pub_key,
+        "sig": event.sig,
+        "event_id": event.event_id,
+    }
+
+
+def _parse_social_event(payload: dict[str, Any]) -> tuple[SocialEvent | None, bytes | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None, "payload must be object"
+    try:
+        version = int(payload.get("v"))
+    except (TypeError, ValueError):
+        return None, None, "v must be an integer"
+    if version != 1:
+        return None, None, "unsupported version"
+    user_id = payload.get("user_id")
+    ts_ms = payload.get("ts_ms")
+    kind = payload.get("kind")
+    body = payload.get("body")
+    pub_key = payload.get("pub_key")
+    sig = payload.get("sig")
+    provided_event_id = payload.get("event_id")
+    if not isinstance(user_id, str) or not isinstance(kind, str) or not isinstance(pub_key, str) or not isinstance(sig, str):
+        return None, None, "user_id, kind, pub_key, and sig must be strings"
+    if not isinstance(body, dict):
+        return None, None, "body must be a JSON object"
+    try:
+        ts_ms_int = int(ts_ms)
+    except (TypeError, ValueError):
+        return None, None, "ts_ms must be an integer"
+
+    event_fields = {"v": version, "user_id": user_id, "ts_ms": ts_ms_int, "kind": kind, "body": body}
+    canonical = social_canonical_bytes(event_fields)
+    computed_event_id = social_compute_event_id(canonical)
+    if provided_event_id is not None and provided_event_id != computed_event_id:
+        return None, None, "event_id mismatch"
+
+    try:
+        derived_user = social_derive_user_id(pub_key)
+    except Exception:
+        return None, None, "invalid pub_key"
+    if derived_user != user_id:
+        return None, None, "user_id does not match pub_key"
+
+    event = SocialEvent(
+        v=version,
+        user_id=user_id,
+        ts_ms=ts_ms_int,
+        kind=kind,
+        body=body,
+        pub_key=pub_key,
+        sig=sig,
+        event_id=computed_event_id,
+    )
+    return event, canonical, None
 
 
 def _authenticate_request(request: web.Request) -> Session | None:
@@ -498,6 +577,72 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
     except RateLimitExceeded as exc:
         return _with_no_store(_rate_limited(str(exc)))
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
+
+
+async def handle_social_event(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    event, canonical, error = _parse_social_event(body)
+    if error:
+        return _invalid_request(error)
+    assert event is not None and canonical is not None
+    if not runtime.social_verifier.verify(event.pub_key, event.sig, canonical):
+        return _invalid_request("invalid signature")
+
+    stored = runtime.social_store.upsert_event(event)
+    response = web.json_response(_social_event_to_dict(stored))
+    return _with_no_store(response)
+
+
+async def handle_social_feed(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return _invalid_request("user_id required")
+    cursor_param = request.query.get("cursor")
+    cache_control = "public, max-age=30"
+    if cursor_param:
+        try:
+            start_ts, start_event_id = social_decode_cursor(cursor_param)
+        except ValueError:
+            return _invalid_request("invalid cursor")
+        cache_control = "public, max-age=31536000, immutable"
+    else:
+        try:
+            start_ts = int(request.query.get("from_ts_ms", 0) or 0)
+        except ValueError:
+            return _invalid_request("from_ts_ms must be an integer")
+        start_event_id = None
+    try:
+        limit = int(request.query.get("limit", 20))
+    except ValueError:
+        return _invalid_request("limit must be an integer")
+    limit = max(1, min(limit, 100))
+
+    events, has_more = runtime.social_store.list_feed(user_id, start_ts, start_event_id, limit)
+    response_events = [_social_event_to_dict(evt) for evt in events]
+    next_cursor = None
+    if events and has_more:
+        last = events[-1]
+        next_cursor = social_encode_cursor(last.ts_ms, last.event_id)
+    response = web.json_response({"events": response_events, "cursor": next_cursor})
+    response.headers["Cache-Control"] = cache_control
+    return response
+
+
+async def handle_social_event_get(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    event_id = request.match_info.get("event_id") or ""
+    event = runtime.social_store.get_event(event_id)
+    if event is None:
+        return web.json_response({"code": "not_found", "message": "event not found"}, status=404)
+    response = web.json_response(_social_event_to_dict(event))
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 async def handle_inbox(request: web.Request) -> web.Response:
@@ -852,17 +997,20 @@ def create_app(
         sessions: SessionStore = SQLiteSessionStore(backend)
         keypackages = SQLiteKeyPackageStore(backend)
         conversations = SQLiteConversationStore(backend)
+        social_store = SQLiteSocialStore(backend.connection, backend.lock)
     else:
         log = ConversationLog()
         cursors = CursorStore()
         sessions = SessionStore()
         keypackages = InMemoryKeyPackageStore()
         conversations = InMemoryConversationStore()
+        social_store = InMemorySocialStore()
 
     presence = presence or Presence()
     hub = SubscriptionHub()
     fetch_limiter = FixedWindowRateLimiter(keypackage_fetch_limit_per_min)
     resolved_gateway_id = gateway_id or os.environ.get("GATEWAY_ID") or "gw_local"
+    social_verifier = GoEd25519Verifier()
     runtime = Runtime(
         log=log,
         cursors=cursors,
@@ -875,6 +1023,8 @@ def create_app(
         now_func=keypackage_now_func,
         conversations=conversations,
         gateway_id=resolved_gateway_id,
+        social_store=social_store,
+        social_verifier=social_verifier,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -902,6 +1052,9 @@ def create_app(
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
+    app.router.add_post("/v1/social/event", handle_social_event)
+    app.router.add_get("/v1/social/feed", handle_social_feed)
+    app.router.add_get("/v1/social/event/{event_id}", handle_social_event_get)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:

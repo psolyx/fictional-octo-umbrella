@@ -1,66 +1,32 @@
-"""CLI POC for running MLS harness scenarios locally."""
-
-from __future__ import annotations
-
 import argparse
+import io
 import os
-import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable
 
-from cli_app import identity_store
+from cli_app import identity_store, polycentric_ed25519
 
-MIN_GO_VERSION: Tuple[int, int] = (1, 22)
+MIN_GO_VERSION = polycentric_ed25519.MIN_GO_VERSION
 
 
 def find_repo_root() -> Path:
     """Find the repository root by walking parents from this file."""
 
-    current = Path(__file__).resolve()
-    for parent in [current] + list(current.parents):
-        candidate = parent if parent.is_dir() else parent.parent
-        harness_dir = candidate / "tools" / "mls_harness"
-        if harness_dir.is_dir():
-            return candidate
-    raise RuntimeError("Could not locate repository root containing tools/mls_harness")
+    return polycentric_ed25519.find_repo_root()
 
 
 def parse_go_version(raw: str) -> Tuple[int, int, int]:
-    match = re.search(r"go(\d+)\.(\d+)(?:\.(\d+))?", raw)
-    if not match:
-        raise ValueError(f"Unable to parse Go version from: {raw!r}")
-    major, minor, patch = match.groups()
-    return int(major), int(minor), int(patch or 0)
+    return polycentric_ed25519.parse_go_version(raw)
 
 
 def detect_go_version(go_path: str) -> Tuple[int, int, int]:
-    try:
-        env_output = subprocess.check_output([go_path, "env", "GOVERSION"], text=True).strip()
-    except subprocess.CalledProcessError:
-        env_output = ""
-
-    if env_output:
-        return parse_go_version(env_output)
-
-    version_output = subprocess.check_output([go_path, "version"], text=True).strip()
-    return parse_go_version(version_output)
+    return polycentric_ed25519.detect_go_version(go_path)
 
 
 def ensure_go_ready() -> str:
-    go_path = shutil.which("go")
-    if not go_path:
-        raise RuntimeError("Go toolchain is required but was not found in PATH")
-
-    version = detect_go_version(go_path)
-    if (version[0], version[1]) < MIN_GO_VERSION:
-        raise RuntimeError(
-            f"Go >= {MIN_GO_VERSION[0]}.{MIN_GO_VERSION[1]} is required (found {version[0]}.{version[1]}.{version[2]})"
-        )
-
-    return go_path
+    return polycentric_ed25519.ensure_go_ready()
 
 
 def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
@@ -103,6 +69,8 @@ def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
     return result.returncode
 
 
+# Remaining functions unchanged
+
 def build_parser() -> argparse.ArgumentParser:
     repo_root = find_repo_root()
     default_vector = repo_root / "tools" / "mls_harness" / "vectors" / "dm_smoke_v1.json"
@@ -129,6 +97,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     whoami = subparsers.add_parser("whoami", help="Show local Polycentric identity and device")
     whoami.add_argument(
+        "--identity-file",
+        default=str(identity_store.DEFAULT_IDENTITY_PATH),
+        help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
+    )
+
+    social = subparsers.add_parser("social", help="Publish or view social events")
+    social_sub = social.add_subparsers(dest="social_command", required=True)
+
+    publish = social_sub.add_parser("publish", help="Publish a short text event")
+    publish.add_argument("--text", required=True, help="Text body to publish")
+    publish.add_argument("--gateway", default="http://127.0.0.1:8080", help="Gateway base URL")
+    publish.add_argument(
+        "--identity-file",
+        default=str(identity_store.DEFAULT_IDENTITY_PATH),
+        help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
+    )
+
+    feed = social_sub.add_parser("feed", help="Fetch a user feed")
+    feed.add_argument("--user-id", help="User id to fetch (default: self)")
+    feed.add_argument("--gateway", default="http://127.0.0.1:8080", help="Gateway base URL")
+    feed.add_argument("--limit", type=int, default=5, help="Maximum events to fetch")
+    feed.add_argument(
         "--identity-file",
         default=str(identity_store.DEFAULT_IDENTITY_PATH),
         help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
@@ -184,6 +174,25 @@ def handle_whoami(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_social_publish(args: argparse.Namespace) -> int:
+    from cli_app import social_client
+
+    identity = identity_store.load_or_create_identity(args.identity_file)
+    event = social_client.publish_text(args.gateway, identity, args.text)
+    sys.stdout.write(json.dumps(event, indent=2) + "\n")
+    return 0
+
+
+def _handle_social_feed(args: argparse.Namespace) -> int:
+    from cli_app import social_client
+
+    identity = identity_store.load_or_create_identity(args.identity_file)
+    user_id = args.user_id or identity.user_id
+    feed = social_client.fetch_feed(args.gateway, user_id, limit=args.limit)
+    sys.stdout.write(json.dumps(feed, indent=2) + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -197,13 +206,17 @@ def main(argv: list[str] | None = None) -> int:
             return handle_soak(args)
         if args.command == "whoami":
             return handle_whoami(args)
+        if args.command == "social":
+            if args.social_command == "publish":
+                return _handle_social_publish(args)
+            if args.social_command == "feed":
+                return _handle_social_feed(args)
     except RuntimeError as exc:  # user-facing errors
-        sys.stderr.write(f"Error: {exc}\n")
+        sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    parser.error(f"Unknown command {args.command}")
-    return 2
+    return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == "__main__":  # pragma: no cover - convenience
+    raise SystemExit(main())

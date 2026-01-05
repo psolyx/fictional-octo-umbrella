@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5):
+        elif user_version not in (1, 2, 3, 4, 5, 6):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -65,7 +65,11 @@ class SQLiteBackend:
             self._migrate_v4_to_v5()
             user_version = 5
 
-        if user_version != 5:
+        if user_version == 5:
+            self._migrate_v5_to_v6()
+            user_version = 6
+
+        if user_version != 6:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -190,3 +194,19 @@ class SQLiteBackend:
         if "home_gateway" not in columns:
             self._conn.execute("ALTER TABLE conversations ADD COLUMN home_gateway TEXT NOT NULL DEFAULT ''")
         self._conn.execute("PRAGMA user_version = 5")
+
+    def _migrate_v5_to_v6(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS social_events (
+                event_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                body_json TEXT NOT NULL,
+                pub_key_b64 TEXT NOT NULL,
+                sig_b64 TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 6")
