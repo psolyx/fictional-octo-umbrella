@@ -12,9 +12,10 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 ## 0. MVP scope
 
-### MVP-1 (CLI-first)
+### MVP-1 (CLI/TUI-first)
 - Auth via Polycentric identity/device
 - DM chat (MLS group of size 2)
+- CLI + TUI deliverable for primary client experience
 - Offline delivery (close client, reopen, catch up)
 - Presence: online/offline + coarse last-seen for contacts-only watchlist
 - Operator: single-node gateway behind CDN
@@ -28,6 +29,13 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 ### MVP-3
 - Web UI integration (browser MLS via WASM)
 - Interop: CLI + Web in same DM/room
+
+---
+
+### MVP ↔ phases mapping
+- MVP-1 spans Phase 0, Phase 0.5, Phase 1 (gateway skeleton + resume + SSE fallback), Phase 1.5 reservations, and Phase 3.5 Polycentric social.
+- MVP-2 adds Phase 4 (rooms v1).
+- MVP-3 corresponds to Phase 5 (web integration).
 
 ---
 
@@ -53,12 +61,29 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 ---
 
+### Phase 0.5 — CLI/TUI foundation (retire: primary client UX ambiguity)
+**Deliverables**
+- CLI + TUI client shells capable of Phase 0 MLS flows (create group(2), encrypt/decrypt, persist/reload MLS state).
+- Basic UX coherence: shared command vocabulary + TUI navigation for DM conversations and history.
+- CLI/TUI integration with Polycentric identity/device provisioning used by MVP-1.
+
+**Exit criteria**
+- CLI and TUI both complete the Phase 0 MLS simulation workflow end-to-end on two devices.
+- Minimal accessibility checks (keyboard-only navigation) pass in the TUI DM flow.
+
+**Risk retired**
+- CLI/TUI are first-class and unblock MVP-1 without waiting on web client milestones.
+
+---
+
 ### Phase 1 — Gateway skeleton + resume (retire: CDN reliability + core protocol)
 **Deliverables**
 - Gateway WS server with:
-  - session auth (challenge + resume token)
+  - session auth (`session.start` with `auth_token`, `device_id`, `device_credential`)
+  - resume flow via `resume_token`
   - heartbeats
   - resume + replay (`from_seq`)
+- SSE fallback endpoints (`/v1/sse`, `/v1/inbox`) that mirror WS semantics for CDN-disconnect scenarios.
 - Durable per-conversation log with server-assigned `seq`.
 - Protocol smoke tests:
   - reconnect storms
@@ -106,7 +131,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
   - retention + GC policy
 
 **Exit criteria**
-- Multi-device test: 2 users × 2 devices, add/remove/rejoin, all decrypt.
+- Multi-device test: 2 users × 2 devices, device loss/wipe + resume via `resume_token` and MLS state resync, all decrypt.
 - KeyPackage exhaustion test: system degrades gracefully (rate limit + optional last-resort).
 
 **Risk retired**
@@ -133,6 +158,21 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Risk retired**
 - Presence is safe enough to ship.
+
+---
+
+### Phase 3.5 — Polycentric social layer MVP (retire: social substrate ambiguity)
+**Deliverables**
+- Signed Polycentric social events (posts/profile updates) emitted by gateway and verifiable via CDN-friendly HTTP query surfaces.
+- HTTP query APIs for social graph and feed retrieval designed for caching/CDN proxies.
+- Minimal CLI/TUI UX integration to view/publish social events alongside DM context.
+
+**Exit criteria**
+- Social events retrievable via HTTP queries with signature verification and replay protection exercised in automation.
+- CLI/TUI users can publish and fetch social events without bypassing caching posture.
+
+**Risk retired**
+- “Polycentric-based social platform” claim is grounded with signed events and client UX parity for MVP-1.
 
 ---
 
