@@ -8,6 +8,8 @@ import sys
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable
 
+from cli_app import identity_store
+
 from cli_app import mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, TuiModel, load_settings
 
@@ -62,19 +64,23 @@ def draw_screen(stdscr: curses.window, model: TuiModel) -> None:
 
     _render_text(stdscr, 0, 1, "Phase 0.5 MLS harness TUI")
     _render_text(stdscr, 1, 1, "Tab: focus | Enter: run | q: quit")
+    _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
+    _render_text(stdscr, 3, 1, f"device: {render.device_id}")
+    _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
 
-    _render_text(stdscr, 3, 1, "Actions")
+    header_offset = 6
+    _render_text(stdscr, header_offset, 1, "Actions")
     for idx, item in enumerate(render.menu_items):
         attr = curses.A_REVERSE if (render.focus_area == "menu" and idx == render.selected_menu) else 0
-        _render_text(stdscr, 4 + idx, 2, f"{item}", attr)
+        _render_text(stdscr, header_offset + 1 + idx, 2, f"{item}", attr)
 
     field_start_x = menu_width
-    _render_text(stdscr, 3, field_start_x, "Parameters")
+    _render_text(stdscr, header_offset, field_start_x, "Parameters")
     for idx, field in enumerate(render.field_order):
         value = render.fields.get(field, "")
         label = f"{field}: {value}"
         attr = curses.A_REVERSE if (render.focus_area == "fields" and idx == render.active_field) else 0
-        _render_text(stdscr, 4 + idx, field_start_x + 1, label, attr)
+        _render_text(stdscr, header_offset + 1 + idx, field_start_x + 1, label, attr)
 
     log_y = top_height
     stdscr.hline(log_y - 1, 0, curses.ACS_HLINE, max_x)
@@ -152,6 +158,15 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 [f"state_dir={args.state_dir}", f"iterations={args.iterations}", f"save_every={args.save_every}"]
             )
             exit_code, output = _invoke(lambda: mls_poc.handle_soak(args))
+        elif action == "rotate_device":
+            record = model.rotate_device()
+            _write_heading(
+                [
+                    f"new_device_id={record.device_id}",
+                    "device_credential rotated",  # opaque placeholder for gateway session.start
+                ]
+            )
+            exit_code, output = 0, []
         else:
             log_writer([f"Unknown action: {action}"])
             return

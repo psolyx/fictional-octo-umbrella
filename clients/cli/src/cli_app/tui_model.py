@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from cli_app.identity_store import (
+    DEFAULT_IDENTITY_PATH,
+    IdentityRecord,
+    load_or_create_identity,
+    rotate_device,
+)
 
 DEFAULT_SETTINGS_FILE = Path.home() / ".mls_tui_state.json"
 
@@ -56,6 +62,9 @@ class RenderState:
     active_field: int
     log_lines: List[str]
     log_scroll: int
+    user_id: str
+    device_id: str
+    identity_path: Path
 
 
 class TuiModel:
@@ -66,11 +75,16 @@ class TuiModel:
         initial_settings: Dict[str, str],
         settings_path: Path | str = DEFAULT_SETTINGS_FILE,
         max_log_lines: int = 500,
+        identity: IdentityRecord | None = None,
+        identity_path: Path | str = DEFAULT_IDENTITY_PATH,
     ) -> None:
-        self.menu_items: List[str] = ["vectors", "smoke", "soak", "quit"]
+        self.menu_items: List[str] = ["vectors", "smoke", "soak", "rotate_device", "quit"]
         self.field_order: List[str] = ["state_dir", "iterations", "save_every", "vector_file"]
         self.settings_path = Path(settings_path)
         self.max_log_lines = max_log_lines
+        self.identity_path = Path(identity_path).expanduser()
+
+        self.identity = identity if identity is not None else load_or_create_identity(self.identity_path)
 
         defaults = {
             "state_dir": initial_settings.get("state_dir", ""),
@@ -120,6 +134,13 @@ class TuiModel:
         if len(self.log_lines) > self.max_log_lines:
             self.log_lines = self.log_lines[-self.max_log_lines :]
         self.log_scroll = 0
+
+    def refresh_identity(self, record: IdentityRecord) -> None:
+        self.identity = record
+
+    def rotate_device(self) -> IdentityRecord:
+        self.identity = rotate_device(self.identity_path)
+        return self.identity
 
     def handle_key(self, key: str, char: Optional[str] = None) -> Optional[str]:
         """Handle a normalized key and return an action string when needed."""
@@ -181,4 +202,7 @@ class TuiModel:
             active_field=self.active_field,
             log_lines=list(self.log_lines),
             log_scroll=self.log_scroll,
+            user_id=self.identity.user_id,
+            device_id=self.identity.device_id,
+            identity_path=self.identity_path,
         )
