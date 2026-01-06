@@ -100,7 +100,9 @@ Rationale: MLS architecture guidance explicitly describes a strongly-consistent 
 
 ### 5.4 Gateway identity and routing metadata
 - Each deployment advertises a stable `gateway_id` (default `gw_local` in dev/test; overridable via `GATEWAY_ID`). In federated deployments `gateway_id` **MUST** be globally unique and stable over time; rotations are operationally breaking.
+- Gateway discovery (v2 convention): `gateway_id` remains opaque; operators MUST provide a directory that maps `gateway_id` to a reachable base URL. The canonical mapping interface is `GET /v1/gateways/resolve?gateway_id=...` returning `{ "gateway_id": "...", "gateway_url": "https://..." }`; gateways MAY serve this locally or through a signed directory service.
 - Every conversation is bound to a `conv_home` gateway that assigns `seq`; `conv_home` **MUST** be assigned when the conversation is created and **MUST NOT** change for the lifetime of the conversation.
+- `conv_home` selection is deterministic: rooms MUST use the creator's `user_home_gateway` as `conv_home` at `POST /v1/rooms/create`; DMs MUST use the initiating sender's `user_home_gateway` when the DM is first created. Creation requests received at a non-home gateway MUST be relayed to `conv_home` for sequencing authority.
 - Requests surface the accepting `origin_gateway` and reserve `destination_gateway` as a future hint for relay-to-home federation. Clients **MUST NOT** assume `origin_gateway == conv_home`; `conv_home` is the authoritative ordering identity even when connected to another gateway. In the current v1 deployment model they will typically be equal.
 - Responses for conversation events and KeyPackage APIs include `conv_home`/`origin_gateway` or `served_by`/`user_home_gateway` to avoid ossifying single-gateway assumptions.
 

@@ -226,6 +226,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 **Deliverables**
 - Inter-gateway transport and authentication to forward MLS traffic to `conv_home`.
 - Routing to `conv_home` for sends/replay with proxying of KeyPackage operations to the home gateway.
+- Discovery mechanism standardized and implemented per the gateway directory convention (v2) so routing metadata maps to reachable URLs.
 - Operational docs for multi-gateway deployments without introducing multi-writer semantics.
 
 **Exit criteria**
