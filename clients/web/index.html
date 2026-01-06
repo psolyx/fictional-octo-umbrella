@@ -79,6 +79,18 @@
     <button id="clear_log">Clear log</button>
   </fieldset>
 
+  <fieldset>
+    <legend>MLS vectors</legend>
+    <p>Verify the deterministic DM vector with the Go harness compiled to WASM.</p>
+    <div class="button-row">
+      <button id="run_vectors">Run vectors</button>
+      <span id="vector_status">idle</span>
+    </div>
+    <pre id="vector_output"></pre>
+  </fieldset>
+
+  <script src="vendor/wasm_exec.js"></script>
+  <script type="module" src="vectors_ui.js"></script>
   <script src="gateway_ws_client.js"></script>
 </body>
 </html>

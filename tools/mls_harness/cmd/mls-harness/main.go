@@ -2,33 +2,20 @@ package main
 
 import (
 	"bytes"
-	crand "crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/gob"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"hash"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 
 	mls "github.com/cisco/go-mls"
 	syntax "github.com/cisco/go-tls-syntax"
-)
 
-type participant struct {
-	name        string
-	initSecret  []byte
-	identityKey mls.SignaturePrivateKey
-	keyPackage  mls.KeyPackage
-	state       *mls.State
-}
+	"github.com/polycentric/fictional-octo-umbrella/tools/mls_harness/internal/harness"
+)
 
 type storedParticipant struct {
 	Name       string
@@ -41,6 +28,14 @@ type pendingCommit struct {
 	Commit    []byte
 	Welcome   []byte
 	NextState *mls.State
+}
+
+func init() {
+	gob.Register(&mls.State{})
+	gob.Register(&mls.MLSPlaintext{})
+	gob.Register(&mls.Welcome{})
+	gob.Register(&pendingCommit{})
+	gob.Register(&storedParticipant{})
 }
 
 func main() {
@@ -199,8 +194,8 @@ func runDMKeyPackage(stateDir, name string, seed int64) (string, error) {
 	if stateDir == "" {
 		return "", errors.New("state-dir is required")
 	}
-	rng := deterministicRNGWithSeed(seed)
-	restore := overrideCryptoRand(rng)
+	rng := harness.DeterministicRNGWithSeed(seed)
+	restore := harness.OverrideCryptoRand(rng)
 	defer restore()
 
 	participant, err := loadParticipant(stateDir)
@@ -208,10 +203,10 @@ func runDMKeyPackage(stateDir, name string, seed int64) (string, error) {
 		return "", fmt.Errorf("load participant: %w", err)
 	}
 	if participant == nil {
-		participant = &storedParticipant{Name: name, InitSecret: randomBytes(rng, 32)}
+		participant = &storedParticipant{Name: name, InitSecret: harness.RandomBytes(rng, 32)}
 	}
 	if len(participant.InitSecret) == 0 {
-		participant.InitSecret = randomBytes(rng, 32)
+		participant.InitSecret = harness.RandomBytes(rng, 32)
 	}
 	if participant.Name == "" {
 		participant.Name = name
@@ -250,8 +245,8 @@ func runDMInit(stateDir, peerKPBase64, groupIDBase64 string, seed int64) (string
 	if participant == nil {
 		return "", "", errors.New("participant state not initialized; run dm-keypackage first")
 	}
-	rng := deterministicRNGWithSeed(seed)
-	restore := overrideCryptoRand(rng)
+	rng := harness.DeterministicRNGWithSeed(seed)
+	restore := harness.OverrideCryptoRand(rng)
 	defer restore()
 
 	sigPriv, kp, err := buildIdentityAndKeyPackage(participant.InitSecret, participant.Name)
@@ -277,7 +272,7 @@ func runDMInit(stateDir, peerKPBase64, groupIDBase64 string, seed int64) (string
 		return "", "", fmt.Errorf("handle add: %w", err)
 	}
 
-	commitSecret := randomBytes(rng, 32)
+	commitSecret := harness.RandomBytes(rng, 32)
 	commitPT, welcome, nextState, err := state.Commit(commitSecret)
 	if err != nil {
 		return "", "", fmt.Errorf("commit: %w", err)
@@ -332,8 +327,8 @@ func runDMJoin(stateDir, welcomeBase64 string) error {
 		return fmt.Errorf("build identity: %w", err)
 	}
 
-	rng := deterministicRNG()
-	restore := overrideCryptoRand(rng)
+	rng := harness.DeterministicRNG()
+	restore := harness.OverrideCryptoRand(rng)
 	defer restore()
 
 	state, err := mls.NewJoinedState(participant.InitSecret, []mls.SignaturePrivateKey{sigPriv}, []mls.KeyPackage{*kp}, welcome)
@@ -466,11 +461,11 @@ func runSmoke(iterations, saveEvery int, stateDir string) error {
 		return fmt.Errorf("failed to create state-dir: %w", err)
 	}
 
-	rng := deterministicRNG()
-	restore := overrideCryptoRand(rng)
+	rng := harness.DeterministicRNG()
+	restore := harness.OverrideCryptoRand(rng)
 	defer restore()
 
-	alice, bob, err := bootstrapPair(rng)
+	alice, bob, err := harness.BootstrapPairWithDigest(rng, nil)
 	if err != nil {
 		return fmt.Errorf("failed to bootstrap participants: %w", err)
 	}
@@ -478,11 +473,11 @@ func runSmoke(iterations, saveEvery int, stateDir string) error {
 	for i := 0; i < iterations; i++ {
 		payload := []byte(fmt.Sprintf("msg-%d", i))
 
-		if err := exchangeOnceWithDigest(alice, bob, payload, "", nil); err != nil {
+		if err := harness.ExchangeOnceWithDigest(alice, bob, payload, "", nil); err != nil {
 			return fmt.Errorf("iteration %d alice->bob: %w", i, err)
 		}
 
-		if err := exchangeOnceWithDigest(bob, alice, payload, "", nil); err != nil {
+		if err := harness.ExchangeOnceWithDigest(bob, alice, payload, "", nil); err != nil {
 			return fmt.Errorf("iteration %d bob->alice: %w", i, err)
 		}
 
@@ -496,90 +491,29 @@ func runSmoke(iterations, saveEvery int, stateDir string) error {
 	return nil
 }
 
-type vectorSpec struct {
-	Name       string `json:"name"`
-	Suite      string `json:"cipher_suite"`
-	Iterations int    `json:"iterations"`
-	DigestHex  string `json:"digest_sha256_hex"`
-}
-
 func runVectors(vectorPath string) error {
 	if vectorPath == "" {
 		return errors.New("vector-file is required")
 	}
 
-	spec, err := loadVectorSpec(vectorPath)
+	result, err := harness.VerifyVectorFile(vectorPath)
 	if err != nil {
-		return fmt.Errorf("load vector spec: %w", err)
+		return err
 	}
 
-	rng := deterministicRNG()
-	restore := overrideCryptoRand(rng)
-	defer restore()
-	dig := newTranscriptDigest()
-
-	alice, bob, err := bootstrapPairWithDigest(rng, dig)
-	if err != nil {
-		return fmt.Errorf("failed to bootstrap participants: %w", err)
-	}
-
-	for i := 0; i < spec.Iterations; i++ {
-		payload := []byte(fmt.Sprintf("msg-%d", i))
-
-		aliceLabel := fmt.Sprintf("iter-%d-%s-%s", i, alice.name, bob.name)
-		if err := exchangeOnceWithDigest(alice, bob, payload, aliceLabel, dig); err != nil {
-			return fmt.Errorf("iteration %d alice->bob: %w", i, err)
-		}
-
-		bobLabel := fmt.Sprintf("iter-%d-%s-%s", i, bob.name, alice.name)
-		if err := exchangeOnceWithDigest(bob, alice, payload, bobLabel, dig); err != nil {
-			return fmt.Errorf("iteration %d bob->alice: %w", i, err)
-		}
-	}
-
-	computed := dig.hexSum()
-	expected := strings.ToLower(spec.DigestHex)
-	if computed != expected {
-		return fmt.Errorf("digest mismatch: computed %s expected %s", computed, expected)
+	if !result.OK {
+		return fmt.Errorf("digest mismatch: computed %s expected %s", result.Digest, result.ExpectedDigest)
 	}
 
 	fmt.Println("ok")
 	return nil
 }
 
-func exchangeOnce(sender, receiver *participant, msg []byte) error {
-	return exchangeOnceWithDigest(sender, receiver, msg, "", nil)
-}
-
-func exchangeOnceWithDigest(sender, receiver *participant, msg []byte, label string, dig *transcriptDigest) error {
-	ct, err := sender.state.Protect(msg)
-	if err != nil {
-		return fmt.Errorf("protect failed for %s: %w", sender.name, err)
-	}
-
-	if dig != nil {
-		if err := dig.addCiphertext(label, ct); err != nil {
-			return fmt.Errorf("digest update failed: %w", err)
-		}
-	}
-
-	pt, err := receiver.state.Unprotect(ct)
-	if err != nil {
-		return fmt.Errorf("unprotect failed for %s: %w", receiver.name, err)
-	}
-
-	if !bytes.Equal(pt, msg) {
-		return fmt.Errorf("plaintext mismatch for %s -> %s", sender.name, receiver.name)
-	}
-
-	return nil
-}
-
-func persistRoundTrip(stateDir string, alice, bob *participant) error {
-	if err := saveState(filepath.Join(stateDir, "alice.gob"), alice.state); err != nil {
+func persistRoundTrip(stateDir string, alice, bob *harness.Participant) error {
+	if err := saveState(filepath.Join(stateDir, "alice.gob"), alice.State); err != nil {
 		return fmt.Errorf("alice persist: %w", err)
 	}
-	if err := saveState(filepath.Join(stateDir, "bob.gob"), bob.state); err != nil {
+	if err := saveState(filepath.Join(stateDir, "bob.gob"), bob.State); err != nil {
 		return fmt.Errorf("bob persist: %w", err)
 	}
 
@@ -592,8 +526,8 @@ func persistRoundTrip(stateDir string, alice, bob *participant) error {
 		return fmt.Errorf("bob reload: %w", err)
 	}
 
-	alice.state = restoredAlice
-	bob.state = restoredBob
+	alice.State = restoredAlice
+	bob.State = restoredBob
 	return nil
 }
 
@@ -678,11 +612,11 @@ func saveParticipant(stateDir string, participant *storedParticipant) error {
 }
 
 func primeGobRegistrations() {
-	rng := deterministicRNG()
-	restore := overrideCryptoRand(rng)
+	rng := harness.DeterministicRNG()
+	restore := harness.OverrideCryptoRand(rng)
 	defer restore()
 
-	secret := randomBytes(rng, 32)
+	secret := harness.RandomBytes(rng, 32)
 	sigPriv, kp, err := buildIdentityAndKeyPackage(secret, "prime")
 	if err != nil {
 		return
@@ -709,7 +643,7 @@ func buildIdentityAndKeyPackage(secret []byte, name string) (mls.SignaturePrivat
 	if err != nil {
 		return mls.SignaturePrivateKey{}, nil, fmt.Errorf("create key package: %w", err)
 	}
-	if err := makeKeyPackageDeterministic(kp, sigPriv); err != nil {
+	if err := harness.MakeKeyPackageDeterministic(kp, sigPriv); err != nil {
 		return mls.SignaturePrivateKey{}, nil, fmt.Errorf("stabilize key package: %w", err)
 	}
 	return sigPriv, kp, nil
@@ -725,149 +659,6 @@ func parseKeyPackage(b64 string) (mls.KeyPackage, error) {
 		return mls.KeyPackage{}, fmt.Errorf("unmarshal keypackage: %w", err)
 	}
 	return kp, nil
-}
-
-func bootstrapPair(rng *rand.Rand) (*participant, *participant, error) {
-	return bootstrapPairWithDigest(rng, nil)
-}
-
-func newParticipant(rng *rand.Rand, suite mls.CipherSuite, name string) (*participant, error) {
-	secret := randomBytes(rng, 32)
-	scheme := suite.Scheme()
-	sigPriv, err := scheme.Derive(secret)
-	if err != nil {
-		return nil, fmt.Errorf("derive identity key: %w", err)
-	}
-	cred := mls.NewBasicCredential([]byte(name), scheme, sigPriv.PublicKey)
-	kp, err := mls.NewKeyPackageWithSecret(suite, secret, cred, sigPriv)
-	if err != nil {
-		return nil, fmt.Errorf("create key package: %w", err)
-	}
-
-	if err := makeKeyPackageDeterministic(kp, sigPriv); err != nil {
-		return nil, fmt.Errorf("stabilize key package: %w", err)
-	}
-
-	return &participant{
-		name:        name,
-		initSecret:  secret,
-		identityKey: sigPriv,
-		keyPackage:  *kp,
-	}, nil
-}
-
-func randomBytes(rng *rand.Rand, n int) []byte {
-	b := make([]byte, n)
-	if _, err := rng.Read(b); err != nil {
-		panic(err)
-	}
-	return b
-}
-
-func init() {
-	gob.Register(&mls.State{})
-	gob.Register(&mls.MLSPlaintext{})
-	gob.Register(&mls.Welcome{})
-	gob.Register(&pendingCommit{})
-	gob.Register(&storedParticipant{})
-}
-
-func deterministicRNG() *rand.Rand {
-	rand.Seed(42)
-	return rand.New(rand.NewSource(1337))
-}
-
-func deterministicRNGWithSeed(seed int64) *rand.Rand {
-	return rand.New(rand.NewSource(seed))
-}
-
-func overrideCryptoRand(rng *rand.Rand) func() {
-	original := crand.Reader
-	crand.Reader = rng
-	return func() {
-		crand.Reader = original
-	}
-}
-
-func makeKeyPackageDeterministic(kp *mls.KeyPackage, sigPriv mls.SignaturePrivateKey) error {
-	const deterministicExpiry uint64 = 4_102_444_800 // 2100-01-01 00:00:00 UTC
-
-	lifetime := mls.LifetimeExtension{NotBefore: 0, NotAfter: deterministicExpiry}
-	if err := kp.Extensions.Add(lifetime); err != nil {
-		return fmt.Errorf("set lifetime extension: %w", err)
-	}
-
-	if err := kp.Sign(sigPriv); err != nil {
-		return fmt.Errorf("re-sign key package: %w", err)
-	}
-
-	return nil
-}
-
-func bootstrapPairWithDigest(rng *rand.Rand, dig *transcriptDigest) (*participant, *participant, error) {
-	suite := mls.X25519_AES128GCM_SHA256_Ed25519
-
-	alice, err := newParticipant(rng, suite, "alice")
-	if err != nil {
-		return nil, nil, fmt.Errorf("alice init: %w", err)
-	}
-	bob, err := newParticipant(rng, suite, "bob")
-	if err != nil {
-		return nil, nil, fmt.Errorf("bob init: %w", err)
-	}
-
-	groupID := []byte{0x01, 0x02, 0x03, 0x04}
-	if dig != nil {
-		if err := dig.addBytes("group-id", groupID); err != nil {
-			return nil, nil, fmt.Errorf("digest group id: %w", err)
-		}
-		if err := dig.addKeyPackage("alice-key-package", alice.keyPackage); err != nil {
-			return nil, nil, fmt.Errorf("digest alice key package: %w", err)
-		}
-		if err := dig.addKeyPackage("bob-key-package", bob.keyPackage); err != nil {
-			return nil, nil, fmt.Errorf("digest bob key package: %w", err)
-		}
-	}
-
-	alice.state, err = mls.NewEmptyState(groupID, alice.initSecret, alice.identityKey, alice.keyPackage)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create group: %w", err)
-	}
-
-	add, err := alice.state.Add(bob.keyPackage)
-	if err != nil {
-		return nil, nil, fmt.Errorf("add bob: %w", err)
-	}
-	if dig != nil {
-		if err := dig.addMLSPlaintext("add", add); err != nil {
-			return nil, nil, fmt.Errorf("digest add: %w", err)
-		}
-	}
-	if _, err = alice.state.Handle(add); err != nil {
-		return nil, nil, fmt.Errorf("handle add: %w", err)
-	}
-
-	commitSecret := randomBytes(rng, 32)
-	commitPT, welcome, nextAlice, err := alice.state.Commit(commitSecret)
-	if err != nil {
-		return nil, nil, fmt.Errorf("commit: %w", err)
-	}
-	if dig != nil {
-		if err := dig.addMLSPlaintext("commit", commitPT); err != nil {
-			return nil, nil, fmt.Errorf("digest commit: %w", err)
-		}
-		if err := dig.addWelcome("welcome", welcome); err != nil {
-			return nil, nil, fmt.Errorf("digest welcome: %w", err)
-		}
-	}
-	alice.state = nextAlice
-
-	bob.state, err = mls.NewJoinedState(bob.initSecret, []mls.SignaturePrivateKey{bob.identityKey}, []mls.KeyPackage{bob.keyPackage}, *welcome)
-	if err != nil {
-		return nil, nil, fmt.Errorf("bob join: %w", err)
-	}
-
-	return alice, bob, nil
 }
 
 func registerStateTypes(state *mls.State) {
@@ -896,106 +687,4 @@ func registerValue(v interface{}) {
 		return
 	}
 	gob.Register(v)
-}
-
-type transcriptDigest struct {
-	h hash.Hash
-}
-
-func newTranscriptDigest() *transcriptDigest {
-	return &transcriptDigest{h: sha256.New()}
-}
-
-func (t *transcriptDigest) addBytes(label string, data []byte) error {
-	if t == nil {
-		return nil
-	}
-	if _, err := t.h.Write([]byte(label)); err != nil {
-		return err
-	}
-
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-	if _, err := t.h.Write(lenBuf[:]); err != nil {
-		return err
-	}
-	if _, err := t.h.Write(data); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (t *transcriptDigest) addKeyPackage(label string, kp mls.KeyPackage) error {
-	data, err := syntax.Marshal(kp)
-	if err != nil {
-		return err
-	}
-	return t.addBytes(label, data)
-}
-
-func (t *transcriptDigest) addMLSPlaintext(label string, pt *mls.MLSPlaintext) error {
-	if pt == nil {
-		return fmt.Errorf("nil plaintext for label %s", label)
-	}
-	data, err := syntax.Marshal(pt)
-	if err != nil {
-		return err
-	}
-	return t.addBytes(label, data)
-}
-
-func (t *transcriptDigest) addWelcome(label string, welcome *mls.Welcome) error {
-	if welcome == nil {
-		return fmt.Errorf("nil welcome for label %s", label)
-	}
-	data, err := syntax.Marshal(*welcome)
-	if err != nil {
-		return err
-	}
-	return t.addBytes(label, data)
-}
-
-func (t *transcriptDigest) addCiphertext(label string, ct *mls.MLSCiphertext) error {
-	if ct == nil {
-		return fmt.Errorf("nil ciphertext for label %s", label)
-	}
-	data, err := syntax.Marshal(*ct)
-	if err != nil {
-		return err
-	}
-	return t.addBytes(label, data)
-}
-
-func (t *transcriptDigest) hexSum() string {
-	if t == nil {
-		return ""
-	}
-	return hex.EncodeToString(t.h.Sum(nil))
-}
-
-func loadVectorSpec(path string) (*vectorSpec, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read vector file: %w", err)
-	}
-
-	var spec vectorSpec
-	if err := json.Unmarshal(data, &spec); err != nil {
-		return nil, fmt.Errorf("unmarshal vector file: %w", err)
-	}
-
-	if spec.Name == "" {
-		return nil, errors.New("vector name is required")
-	}
-	if spec.Suite != mls.X25519_AES128GCM_SHA256_Ed25519.String() {
-		return nil, fmt.Errorf("unsupported cipher_suite %q", spec.Suite)
-	}
-	if spec.Iterations <= 0 {
-		return nil, fmt.Errorf("iterations must be positive (got %d)", spec.Iterations)
-	}
-	if spec.DigestHex == "" {
-		return nil, errors.New("digest_sha256_hex is required")
-	}
-
-	return &spec, nil
 }

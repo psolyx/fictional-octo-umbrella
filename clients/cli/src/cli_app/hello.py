@@ -49,7 +49,12 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
     )
 
     fetch_parser = subparsers.add_parser("fetch", help="fetch social events")
-    fetch_parser.add_argument("--user_id", required=True, help="user_id to fetch")
+    fetch_parser.add_argument(
+        "--user_id",
+        required=False,
+        default=None,
+        help="user_id to fetch; defaults to the local identity",
+    )
     fetch_parser.add_argument("--limit", type=int, default=20, help="max events to return")
     fetch_parser.add_argument("--after-hash", dest="after_hash", default=None, help="optional cursor hash")
     fetch_parser.add_argument("--gateway-url", default=base_url_default, help="gateway base URL")
@@ -75,10 +80,11 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
             _emit(output, json.dumps(event, sort_keys=True))
             return 0
         if args.command == "fetch":
-            identity_store.load_or_create_identity(args.identity_path)
+            identity = identity_store.load_or_create_identity(args.identity_path)
+            user_id = args.user_id or identity.user_id
             events = social.fetch_social_events(
                 args.gateway_url,
-                user_id=args.user_id,
+                user_id=user_id,
                 limit=args.limit,
                 after_hash=args.after_hash,
             )
