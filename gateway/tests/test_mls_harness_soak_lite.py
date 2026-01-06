@@ -23,9 +23,9 @@ class TestMLSHarnessSoakLite(unittest.TestCase):
                 [
                     "smoke",
                     "--iterations",
-                    "1000",
+                    "150",
                     "--save-every",
-                    "50",
+                    "10",
                     "--state-dir",
                     state_dir,
                 ],

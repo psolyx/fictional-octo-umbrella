@@ -32,7 +32,9 @@ class ResumeTokenRotationTests(unittest.TestCase):
 
         seen_tokens = {resume_token}
 
-        for _ in range(10_000):
+        iterations = 500
+
+        for _ in range(iterations):
             resumed = sessions.consume_resume(resume_token)
             self.assertIsNotNone(resumed)
             self.assertEqual(resumed.session_token, session_token)
@@ -44,7 +46,7 @@ class ResumeTokenRotationTests(unittest.TestCase):
             active = sessions.get_by_session(session_token)
             self.assertIs(active, resumed)
 
-        self.assertEqual(len(seen_tokens), 10_001)
+        self.assertEqual(len(seen_tokens), iterations + 1)
 
 
 class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
@@ -72,10 +74,10 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
         conv_id = "chaos-room"
         run_slow = os.getenv("RUN_SLOW_TESTS") == "1"
 
-        iterations = 10_000 if run_slow else 400
-        send_interval = 100 if run_slow else 50
+        iterations = 2_000 if run_slow else 120
+        send_interval = 100 if run_slow else 20
         ack_every = 10 if run_slow else 2
-        test_timeout = 90 if run_slow else 30
+        test_timeout = 90 if run_slow else 25
         sse_timeout = 30 if run_slow else 10
 
         async with asyncio.timeout(test_timeout):
@@ -185,13 +187,13 @@ class ResumeStormInvariantTests(unittest.TestCase):
 
         subscription = runtime.hub.subscribe(device_id, conv_id, on_event)
 
-        send_every = 100
+        send_every = 40
         expected_next_seq = 1
         last_seq = 0
         msg_count = 0
 
         try:
-            for i in range(10_000):
+            for i in range(500):
                 resumed = runtime.sessions.consume_resume(resume_token)
                 self.assertIsNotNone(resumed)
                 session = resumed

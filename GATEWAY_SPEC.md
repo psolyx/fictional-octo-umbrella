@@ -63,6 +63,30 @@ Semantics match WS frames.
 - **Not found (404):** directory does not contain the requested `gateway_id`
 - This endpoint is safe to ignore for v1 single-gateway clients but is the discovery hook for v2 relay-to-home routing.
 
+### 3.5 Social event log (append-only, CDN-cacheable reads)
+- Social events are stored per-user as a single-head append-only chain. Forks are rejected: every event after the first MUST reference the current head via `prev_hash`; the first event MUST set `prev_hash` to `""` or `null`.
+- Event fields:
+  - `user_id`: Ed25519 public key encoded with URL-safe base64 (no padding).
+  - `event_hash`: hex SHA-256 of the canonical bytes (see below).
+  - `prev_hash`: empty string/`null` for the first event, otherwise the prior head’s `event_hash`.
+  - `ts_ms`: event timestamp in milliseconds.
+  - `kind`: opaque event type label (e.g., `post`).
+  - `payload`: JSON object payload; it is normalized before signing to guarantee deterministic bytes.
+  - `sig_b64`: Ed25519 signature over the canonical bytes, URL-safe base64 (no padding).
+- Canonicalization for signing and hashing:
+  - Normalize `payload` with `json.dumps(payload, separators=(",", ":"), sort_keys=True)` and parse it back to a JSON object to remove formatting noise.
+  - Build a JSON object `{ "kind": kind, "payload": normalized_payload, "prev_hash": prev_hash or "", "ts_ms": ts_ms, "user_id": user_id }`, serialize it with `separators=(",", ":")` and `sort_keys=True`, and encode it as UTF-8. These bytes are signed and hashed.
+  - `event_hash = hex(sha256(canonical_bytes))`. Servers MUST compute and persist this; clients SHOULD recompute to verify integrity.
+- Endpoints:
+  - `POST /v1/social/events`
+    - Authenticated with `Authorization: Bearer {session_token}`.
+    - Body: `{ prev_hash, ts_ms, kind, payload, sig_b64 }` (uses session-bound `user_id`).
+    - Server MUST verify the signature against `user_id` (Ed25519), enforce the single-head rule, and persist `(user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64)` append-only.
+    - Failure cases return `400 invalid_request` (bad signature, bad chain) or `401 unauthorized` (missing/expired session).
+  - `GET /v1/social/events?user_id=...&limit=...&after_hash=...`
+    - Returns `{ "events": [ {user_id, event_hash, prev_hash, ts_ms, kind, payload, sig_b64}, ... ] }` ordered from oldest after `after_hash`.
+    - Responses MUST include `Cache-Control: public, max-age=30` and SHOULD include a strong validator (`ETag` based on the returned head hash and `Last-Modified` based on the newest `ts_ms`).
+
 ---
 
 ## 4. Authentication and session lifecycle

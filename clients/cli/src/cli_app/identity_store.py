@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import base64
 import json
+import base64
+import json
 import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+
+from nacl.signing import SigningKey
 
 DEFAULT_IDENTITY_PATH = Path.home() / ".polycentric_demo" / "identity.json"
 
@@ -18,6 +22,8 @@ class IdentityRecord:
     user_id: str
     device_id: str
     device_credential: str
+    social_private_key_b64: str
+    social_public_key_b64: str
 
 
 def _b64url(data: bytes) -> str:
@@ -31,7 +37,10 @@ def _derive_user_id(auth_token: str) -> str:
 
 
 def _generate_identity() -> IdentityRecord:
-    auth_token = f"Bearer pc_sys_{_b64url(secrets.token_bytes(32))}"
+    signing_key = SigningKey.generate()
+    social_public_key_b64 = _b64url(signing_key.verify_key.encode())
+    social_private_key_b64 = _b64url(signing_key.encode())
+    auth_token = f"Bearer {social_public_key_b64}"
     user_id = _derive_user_id(auth_token)
     device_id = f"d_{_b64url(secrets.token_bytes(16))}"
     device_credential = _b64url(secrets.token_bytes(32))
@@ -40,6 +49,8 @@ def _generate_identity() -> IdentityRecord:
         user_id=user_id,
         device_id=device_id,
         device_credential=device_credential,
+        social_private_key_b64=social_private_key_b64,
+        social_public_key_b64=social_public_key_b64,
     )
 
 
@@ -66,11 +77,15 @@ def _load_identity(path: Path) -> IdentityRecord:
     user_id = str(data.get("user_id") or _derive_user_id(auth_token))
     device_id = str(data["device_id"])
     device_credential = str(data["device_credential"])
+    social_private_key_b64 = str(data["social_private_key_b64"])
+    social_public_key_b64 = str(data["social_public_key_b64"])
     return IdentityRecord(
         auth_token=auth_token,
         user_id=user_id,
         device_id=device_id,
         device_credential=device_credential,
+        social_private_key_b64=social_private_key_b64,
+        social_public_key_b64=social_public_key_b64,
     )
 
 
@@ -95,6 +110,8 @@ def rotate_device(path: Path | str = DEFAULT_IDENTITY_PATH) -> IdentityRecord:
         user_id=current.user_id,
         device_id=f"d_{_b64url(secrets.token_bytes(16))}",
         device_credential=_b64url(secrets.token_bytes(32)),
+        social_private_key_b64=current.social_private_key_b64,
+        social_public_key_b64=current.social_public_key_b64,
     )
     _atomic_write_json(Path(path).expanduser(), updated)
     return updated
