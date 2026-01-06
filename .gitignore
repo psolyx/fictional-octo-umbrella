@@ -1,0 +1,13 @@
+# Python caches and virtual environments
+**/__pycache__/
+**/*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Build outputs
+build/
+dist/
+
+# OS-specific files
+.DS_Store
