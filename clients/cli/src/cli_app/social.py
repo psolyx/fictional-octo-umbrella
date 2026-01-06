@@ -9,8 +9,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from nacl.exceptions import BadSignatureError
-from nacl.signing import SigningKey, VerifyKey
+from cli_app.crypto_ed25519 import sign as sign_ed25519
+from cli_app.crypto_ed25519 import verify as verify_ed25519
 
 from .identity_store import IdentityRecord
 
@@ -44,7 +44,6 @@ def compute_event_hash(canonical_bytes: bytes) -> str:
 
 
 def _sign_event(identity: IdentityRecord, *, prev_hash: str | None, ts_ms: int, kind: str, payload: Any) -> tuple[str, str]:
-    signing_key = SigningKey(_b64url_decode(identity.social_private_key_b64))
     canonical_bytes = canonical_social_bytes(
         user_id=identity.social_public_key_b64,
         prev_hash=prev_hash,
@@ -52,7 +51,7 @@ def _sign_event(identity: IdentityRecord, *, prev_hash: str | None, ts_ms: int, 
         kind=kind,
         payload=payload,
     )
-    signature = signing_key.sign(canonical_bytes).signature
+    signature = sign_ed25519(_b64url_decode(identity.social_private_key_b64), canonical_bytes)
     return _b64url(signature), compute_event_hash(canonical_bytes)
 
 
@@ -66,8 +65,8 @@ def _verify_event_signature(event: dict) -> None:
     )
     sig = _b64url_decode(str(event["sig_b64"]))
     try:
-        VerifyKey(_b64url_decode(event["user_id"])).verify(canonical_bytes, sig)
-    except BadSignatureError as exc:
+        verify_ed25519(_b64url_decode(event["user_id"]), canonical_bytes, sig)
+    except ValueError as exc:
         raise ValueError("invalid event signature") from exc
     expected_hash = compute_event_hash(canonical_bytes)
     if expected_hash != event.get("event_hash"):

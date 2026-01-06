@@ -4,13 +4,9 @@ import unittest
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from gateway.crypto_ed25519 import generate_keypair, sign
 from gateway.social import canonical_event_bytes
 from gateway.ws_transport import create_app
-
-try:
-    from nacl.signing import SigningKey
-except ImportError as exc:  # pragma: no cover - dependencies enforced in gateway setup
-    raise RuntimeError("PyNaCl must be installed for social tests") from exc
 
 
 def _b64url(data: bytes) -> str:
@@ -19,8 +15,8 @@ def _b64url(data: bytes) -> str:
 
 class SocialEventTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.signing_key = SigningKey.generate()
-        self.user_id = _b64url(self.signing_key.verify_key.encode())
+        self.seed, public_key = generate_keypair()
+        self.user_id = _b64url(public_key)
         self.app = create_app(db_path=str(tempfile.NamedTemporaryFile(delete=False).name))
         self.server = TestServer(self.app)
         await self.server.start_server()
@@ -42,7 +38,7 @@ class SocialEventTests(unittest.IsolatedAsyncioTestCase):
         canonical = canonical_event_bytes(
             user_id=self.user_id, prev_hash=prev_hash, ts_ms=ts_ms, kind=kind, payload=payload
         )
-        signature = self.signing_key.sign(canonical).signature
+        signature = sign(self.seed, canonical)
         return _b64url(signature)
 
     async def _publish(self, body: dict) -> dict:
@@ -88,6 +84,26 @@ class SocialEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("public", cache_control)
         self.assertIn("max-age=30", cache_control)
         self.assertIn("ETag", get_resp.headers)
+
+    async def test_duplicate_publish_is_idempotent(self):
+        payload = {"text": "dup"}
+        sig = self._sig(None, 5, "post", payload)
+        request_body = {"prev_hash": None, "ts_ms": 5, "kind": "post", "payload": payload, "sig_b64": sig}
+
+        first = await self._publish(request_body)
+        self.assertEqual(first["status"], 200)
+
+        second = await self._publish(request_body)
+        self.assertEqual(second["status"], 200)
+        self.assertEqual(second["body"]["event_hash"], first["body"]["event_hash"])
+
+        get_resp = await self.client.get(
+            "/v1/social/events",
+            params={"user_id": self.user_id, "limit": "10"},
+        )
+        self.assertEqual(get_resp.status, 200)
+        events = await get_resp.json()
+        self.assertEqual(len(events.get("events", [])), 1)
 
     async def test_rejects_invalid_signature_and_prev_hash(self):
         payload = {"text": "hi"}

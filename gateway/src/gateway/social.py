@@ -8,8 +8,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, List
 
-from nacl.exceptions import BadSignatureError
-from nacl.signing import VerifyKey
+from gateway.crypto_ed25519 import verify as verify_signature
 
 
 def _b64url_decode(data: str) -> bytes:
@@ -77,8 +76,8 @@ def _verify_signature(user_id: str, sig_b64: str, canonical_bytes: bytes) -> Non
         raise InvalidSignature("invalid signature encoding")
 
     try:
-        VerifyKey(public_key).verify(canonical_bytes, signature)
-    except BadSignatureError:
+        verify_signature(public_key, canonical_bytes, signature)
+    except ValueError:
         raise InvalidSignature("signature verification failed")
 
 
@@ -113,6 +112,9 @@ class InMemorySocialStore:
 
         with self._lock:
             events = self._events.get(user_id, [])
+            for existing in events:
+                if existing.event_hash == event_hash:
+                    return existing
             head = events[-1] if events else None
             if head is None:
                 if prev_hash not in (None, ""):
@@ -173,6 +175,16 @@ class SQLiteSocialStore:
 
         with self._backend.lock:
             conn = self._backend.connection
+            existing_row = conn.execute(
+                """
+                SELECT user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64
+                FROM social_events
+                WHERE user_id = ? AND event_hash = ?
+                """,
+                (user_id, event_hash),
+            ).fetchone()
+            if existing_row:
+                return SocialEvent(**existing_row)
             head_row = conn.execute(
                 "SELECT event_hash FROM social_events WHERE user_id = ? ORDER BY rowid DESC LIMIT 1",
                 (user_id,),

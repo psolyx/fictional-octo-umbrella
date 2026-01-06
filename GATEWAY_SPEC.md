@@ -82,6 +82,7 @@ Semantics match WS frames.
     - Authenticated with `Authorization: Bearer {session_token}`.
     - Body: `{ prev_hash, ts_ms, kind, payload, sig_b64 }` (uses session-bound `user_id`).
     - Server MUST verify the signature against `user_id` (Ed25519), enforce the single-head rule, and persist `(user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64)` append-only.
+    - Duplicate publishes (same canonical bytes) MUST be idempotent: the gateway returns the existing event even if `prev_hash` no longer matches the current head, and duplicate rows are rejected.
     - Failure cases return `400 invalid_request` (bad signature, bad chain) or `401 unauthorized` (missing/expired session).
   - `GET /v1/social/events?user_id=...&limit=...&after_hash=...`
     - Returns `{ "events": [ {user_id, event_hash, prev_hash, ts_ms, kind, payload, sig_b64}, ... ] }` ordered from oldest after `after_hash`.
