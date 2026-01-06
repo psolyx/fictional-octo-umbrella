@@ -1,9 +1,11 @@
 # Web client skeleton
 
-This static demo exercises the gateway v1 WebSocket protocol without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations.
+This static demo exercises the gateway v1 WebSocket protocol without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations. The MLS WASM verifier requires being served over HTTP (for example, `python -m http.server`) so that the browser can fetch `wasm_exec.js`, the harness module, and the vector JSON.
 
 ## Usage
-1. Open `clients/web/index.html` in a modern browser. No npm/yarn/pnpm setup is required.
+1. Build the MLS harness WASM module: `tools/mls_harness/build_wasm.sh`.
+2. Serve the directory over HTTP (for example, `python -m http.server`). Opening the HTML file directly will not work for WASM fetches.
+3. Open `clients/web/index.html` in a modern browser. No npm/yarn/pnpm setup is required. The WASM vector check fetches artifacts under `clients/web/vendor/` and `clients/web/vectors/` from the static server started in the previous step.
 2. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
 3. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
 4. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
