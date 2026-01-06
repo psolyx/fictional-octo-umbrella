@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
-import base64
-import json
 import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
-from nacl.signing import SigningKey
+from cli_app.crypto_ed25519 import generate_keypair
 
 DEFAULT_IDENTITY_PATH = Path.home() / ".polycentric_demo" / "identity.json"
 
@@ -37,9 +35,9 @@ def _derive_user_id(auth_token: str) -> str:
 
 
 def _generate_identity() -> IdentityRecord:
-    signing_key = SigningKey.generate()
-    social_public_key_b64 = _b64url(signing_key.verify_key.encode())
-    social_private_key_b64 = _b64url(signing_key.encode())
+    seed, public_key = generate_keypair()
+    social_public_key_b64 = _b64url(public_key)
+    social_private_key_b64 = _b64url(seed)
     auth_token = f"Bearer {social_public_key_b64}"
     user_id = _derive_user_id(auth_token)
     device_id = f"d_{_b64url(secrets.token_bytes(16))}"

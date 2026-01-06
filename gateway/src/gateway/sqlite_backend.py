@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -69,7 +69,11 @@ class SQLiteBackend:
             self._migrate_v5_to_v6()
             user_version = 6
 
-        if user_version != 6:
+        if user_version == 6:
+            self._migrate_v6_to_v7()
+            user_version = 7
+
+        if user_version != 7:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -214,3 +218,22 @@ class SQLiteBackend:
             "CREATE INDEX IF NOT EXISTS social_events_user_ts_idx ON social_events (user_id, ts_ms, event_hash)"
         )
         self._conn.execute("PRAGMA user_version = 6")
+
+    def _migrate_v6_to_v7(self) -> None:
+        # Delete duplicate rows before enforcing uniqueness.
+        duplicate_rowids = self._conn.execute(
+            """
+            SELECT rowid FROM social_events
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM social_events GROUP BY user_id, event_hash
+            )
+            """
+        ).fetchall()
+        if duplicate_rowids:
+            ids = [row[0] for row in duplicate_rowids]
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(f"DELETE FROM social_events WHERE rowid IN ({placeholders})", ids)
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS social_events_user_event_hash_idx ON social_events (user_id, event_hash)"
+        )
+        self._conn.execute("PRAGMA user_version = 7")
