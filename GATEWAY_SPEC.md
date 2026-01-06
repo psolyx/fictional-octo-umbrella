@@ -142,7 +142,7 @@ Semantics match WS frames.
   ```
 - `POST /v1/session/resume` accepts `{ "resume_token": "rt_..." }` and returns the same body as `session.ready` on success. On failure it returns `{ "code": "resume_failed", "message": "resume token invalid or expired" }`.
 
-### 4.3 Gateway identity
+### 4.4 Gateway identity
 - `gateway_id` names the gateway namespace used across routing metadata fields: `conv_home`, `origin_gateway`, `destination_gateway` (reserved hint), `served_by`, and `user_home_gateway`.
 - `gateway_id` **MUST** be globally unique in federated deployments and **MUST** remain stable over time; rotating an identifier is considered an operationally breaking change.
 - Every conversation is bound to a `conv_home` gateway when created; `conv_home` **MUST NOT** change for the lifetime of the conversation.
