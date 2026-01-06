@@ -56,6 +56,13 @@ Semantics match WS frames.
 - The canonical resolution interface is `GET /v1/gateways/resolve?gateway_id=...` returning `{ "gateway_id": "...", "gateway_url": "https://..." }` for HTTP/WebSocket base URLs. Gateways MAY serve this locally or via an operator-distributed signed directory.
 - In v1 single-gateway deployments clients typically connect directly and MAY ignore discovery, but v2 federation relies on this mapping; clients MUST treat absence of mapping data as a transient discovery error rather than assuming the connected gateway is authoritative.
 
+#### 3.4.1 `/v1/gateways/resolve`
+- **Request:** `GET /v1/gateways/resolve?gateway_id={id}`
+- **Success (200):** `{"gateway_id": "{id}", "gateway_url": "https://..."}`
+- **Client error (400):** missing or empty `gateway_id`
+- **Not found (404):** directory does not contain the requested `gateway_id`
+- This endpoint is safe to ignore for v1 single-gateway clients but is the discovery hook for v2 relay-to-home routing.
+
 ---
 
 ## 4. Authentication and session lifecycle

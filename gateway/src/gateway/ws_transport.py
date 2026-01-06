@@ -108,6 +108,8 @@ class Runtime:
         now_func: Callable[[], int] = _now_ms,
         conversations,
         gateway_id: str,
+        gateway_public_url: str,
+        gateway_directory: dict[str, str],
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -120,6 +122,8 @@ class Runtime:
         self.now_func = now_func
         self.conversations = conversations
         self.gateway_id = gateway_id
+        self.gateway_public_url = gateway_public_url
+        self.gateway_directory = gateway_directory
 
 
 async def handle_health(_: web.Request) -> web.Response:
@@ -198,6 +202,29 @@ def _validate_session_start_body(body: dict[str, Any]) -> Tuple[tuple[str, str] 
         return None, "device_credential must be a string if provided"
     user_id = _derive_user_id(auth_token)
     return (user_id, device_id), None
+
+
+def _load_gateway_directory(directory_path: str | None) -> dict[str, str]:
+    if not directory_path:
+        return {}
+
+    try:
+        with open(directory_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        raise ValueError("gateway directory file not found") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid gateway directory JSON") from exc
+
+    gateways = data.get("gateways") if isinstance(data, dict) else None
+    if not isinstance(gateways, dict):
+        raise ValueError("gateway directory must contain a gateways object")
+
+    directory: dict[str, str] = {}
+    for gateway_id, gateway_url in gateways.items():
+        if isinstance(gateway_id, str) and isinstance(gateway_url, str):
+            directory[gateway_id] = gateway_url
+    return directory
 
 
 def _validate_session_resume_body(body: dict[str, Any]) -> Tuple[str | None, str | None]:
@@ -832,6 +859,22 @@ async def handle_room_demote(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_gateway_resolve(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app["runtime"]
+    gateway_id = request.query.get("gateway_id")
+    if not gateway_id:
+        return _invalid_request("gateway_id required")
+
+    if gateway_id == runtime.gateway_id:
+        return web.json_response({"gateway_id": gateway_id, "gateway_url": runtime.gateway_public_url})
+
+    mapped_url = runtime.gateway_directory.get(gateway_id)
+    if mapped_url is not None:
+        return web.json_response({"gateway_id": gateway_id, "gateway_url": mapped_url})
+
+    return web.json_response({"code": "not_found", "message": "gateway_id not found"}, status=404)
+
+
 def create_app(
     *,
     ping_interval_s: int = 30,
@@ -843,6 +886,8 @@ def create_app(
     keypackage_fetch_limit_per_min: int = _KEYPACKAGE_FETCH_LIMIT_PER_MIN,
     keypackage_now_func: Callable[[], int] = _now_ms,
     gateway_id: str | None = None,
+    gateway_public_url: str | None = None,
+    gateway_directory_path: str | None = None,
 ) -> web.Application:
     backend: SQLiteBackend | None = None
     if db_path is not None:
@@ -863,6 +908,10 @@ def create_app(
     hub = SubscriptionHub()
     fetch_limiter = FixedWindowRateLimiter(keypackage_fetch_limit_per_min)
     resolved_gateway_id = gateway_id or os.environ.get("GATEWAY_ID") or "gw_local"
+    resolved_gateway_public_url = gateway_public_url or os.environ.get("GATEWAY_PUBLIC_URL") or "http://localhost"
+    gateway_directory = _load_gateway_directory(
+        gateway_directory_path or os.environ.get("GATEWAY_DIRECTORY_PATH")
+    )
     runtime = Runtime(
         log=log,
         cursors=cursors,
@@ -875,6 +924,8 @@ def create_app(
         now_func=keypackage_now_func,
         conversations=conversations,
         gateway_id=resolved_gateway_id,
+        gateway_public_url=resolved_gateway_public_url,
+        gateway_directory=gateway_directory,
     )
     app = web.Application()
     app["runtime"] = runtime
@@ -902,6 +953,7 @@ def create_app(
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
+    app.router.add_get("/v1/gateways/resolve", handle_gateway_resolve)
     app.router.add_get("/v1/ws", websocket_handler)
     if backend is not None:
         async def close_db(_: web.Application) -> None:
