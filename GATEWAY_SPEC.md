@@ -238,7 +238,7 @@ Semantics match WS frames.
       }
     }
     ```
-  - `conv_home` identifies the ordering authority for the conversation; `origin_gateway` is the gateway that accepted the send. In v1 they are identical. Clients MUST ignore unknown fields.
+  - `conv_home` identifies the ordering authority for the conversation; `origin_gateway` is the gateway that accepted the send. In current v1 non-federated deployments they will typically match the connected gateway, but clients **MUST NOT** assume equality and **MUST** treat `conv_home` as authoritative even when connected elsewhere. Clients MUST ignore unknown fields.
 
 ### 7.2 Ack / cursor advance
 - Clients acknowledge progress with `conv.ack` (per device cursor):
