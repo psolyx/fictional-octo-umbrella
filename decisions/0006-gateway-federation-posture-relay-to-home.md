@@ -12,6 +12,9 @@ Today v1 deployments run a single gateway behind a CDN. Protocol frames and impl
 - Protocol reserves routing metadata (`conv_home`, `origin_gateway`, optional `destination_gateway`) and KeyPackage fields (`served_by`, `user_home_gateway`) in v1 to keep v2 changes additive.
 - Identifiers are stable: `gateway_id` **MUST** be globally unique in federated deployments and remain stable over time, and `conv_home` **MUST** be assigned on conversation creation and **MUST NOT** change. Clients **MUST NOT** assume `origin_gateway == conv_home`, though in the current single-gateway v1 posture they will typically be equal.
 
+### Discovery (reserved)
+- Discovery of `gateway_id`/`conv_home` to a reachable URL or transport destination is reserved in the specification for v1 but intentionally not implemented; later federation work will define and standardize the mapping.
+
 ## Consequences
 - v1 stays single-gateway but emits routing metadata so clients remain compatible as federation arrives.
 - Future work focuses on inter-gateway auth/transport and routing to `conv_home`, not multi-writer reconciliation.
