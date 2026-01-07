@@ -78,8 +78,35 @@ class TuiModel:
         identity: IdentityRecord | None = None,
         identity_path: Path | str = DEFAULT_IDENTITY_PATH,
     ) -> None:
-        self.menu_items: List[str] = ["vectors", "smoke", "soak", "rotate_device", "quit"]
-        self.field_order: List[str] = ["state_dir", "iterations", "save_every", "vector_file"]
+        self.menu_items: List[str] = [
+            "vectors",
+            "smoke",
+            "soak",
+            "dm_keypackage",
+            "dm_init",
+            "dm_join",
+            "dm_commit_apply",
+            "dm_encrypt",
+            "dm_decrypt",
+            "rotate_device",
+            "quit",
+        ]
+        self.field_order: List[str] = [
+            "state_dir",
+            "iterations",
+            "save_every",
+            "vector_file",
+            "dm_state_dir",
+            "dm_name",
+            "dm_seed",
+            "dm_group_id",
+            "dm_peer_keypackage",
+            "dm_self_keypackage",
+            "dm_welcome",
+            "dm_commit",
+            "dm_plaintext",
+            "dm_ciphertext",
+        ]
         self.settings_path = Path(settings_path)
         self.max_log_lines = max_log_lines
         self.identity_path = Path(identity_path).expanduser()
@@ -91,6 +118,16 @@ class TuiModel:
             "iterations": initial_settings.get("iterations", "50"),
             "save_every": initial_settings.get("save_every", "10"),
             "vector_file": initial_settings.get("vector_file", ""),
+            "dm_state_dir": initial_settings.get("dm_state_dir", ""),
+            "dm_name": initial_settings.get("dm_name", ""),
+            "dm_seed": initial_settings.get("dm_seed", "1337"),
+            "dm_group_id": initial_settings.get("dm_group_id", "ZHMtZG0tZ3JvdXA="),
+            "dm_peer_keypackage": initial_settings.get("dm_peer_keypackage", ""),
+            "dm_self_keypackage": initial_settings.get("dm_self_keypackage", ""),
+            "dm_welcome": initial_settings.get("dm_welcome", ""),
+            "dm_commit": initial_settings.get("dm_commit", ""),
+            "dm_plaintext": initial_settings.get("dm_plaintext", ""),
+            "dm_ciphertext": initial_settings.get("dm_ciphertext", ""),
         }
 
         self.fields: Dict[str, str] = defaults
@@ -125,6 +162,10 @@ class TuiModel:
 
     def update_field_value(self, new_value: str) -> None:
         field_key = self.field_order[self.active_field]
+        self.fields[field_key] = new_value
+        self._persist()
+
+    def set_field_value(self, field_key: str, new_value: str) -> None:
         self.fields[field_key] = new_value
         self._persist()
 
