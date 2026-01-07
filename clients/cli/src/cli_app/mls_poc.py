@@ -134,6 +134,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
     )
 
+    dm_keypackage = subparsers.add_parser("dm-keypackage", help="Generate a DM KeyPackage")
+    dm_keypackage.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_keypackage.add_argument("--name", required=True, help="Participant name (required)")
+    dm_keypackage.add_argument("--seed", required=True, type=int, help="Deterministic RNG seed (required)")
+
+    dm_init = subparsers.add_parser("dm-init", help="Initialize a DM group and emit Welcome/Commit")
+    dm_init.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_init.add_argument("--peer-keypackage", required=True, help="Peer KeyPackage (base64, required)")
+    dm_init.add_argument("--group-id", required=True, help="MLS group id (base64, required)")
+    dm_init.add_argument("--seed", required=True, type=int, help="Deterministic RNG seed (required)")
+
+    dm_join = subparsers.add_parser("dm-join", help="Join a DM group using a Welcome")
+    dm_join.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_join.add_argument("--welcome", required=True, help="Welcome message (base64, required)")
+
+    dm_commit_apply = subparsers.add_parser("dm-commit-apply", help="Apply a DM commit")
+    dm_commit_apply.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_commit_apply.add_argument("--commit", required=True, help="Commit message (base64, required)")
+
+    dm_encrypt = subparsers.add_parser("dm-encrypt", help="Encrypt a DM plaintext message")
+    dm_encrypt.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_encrypt.add_argument("--plaintext", required=True, help="Plaintext message (required)")
+
+    dm_decrypt = subparsers.add_parser("dm-decrypt", help="Decrypt a DM ciphertext message")
+    dm_decrypt.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    dm_decrypt.add_argument("--ciphertext", required=True, help="Ciphertext message (base64, required)")
+
     return parser
 
 
@@ -184,6 +211,84 @@ def handle_whoami(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_dm_keypackage(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-keypackage",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--name",
+            args.name,
+            "--seed",
+            str(args.seed),
+        ],
+    )
+
+
+def handle_dm_init(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-init",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--peer-keypackage",
+            args.peer_keypackage,
+            "--group-id",
+            args.group_id,
+            "--seed",
+            str(args.seed),
+        ],
+    )
+
+
+def handle_dm_join(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-join",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--welcome",
+            args.welcome,
+        ],
+    )
+
+
+def handle_dm_commit_apply(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-commit-apply",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--commit",
+            args.commit,
+        ],
+    )
+
+
+def handle_dm_encrypt(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-encrypt",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--plaintext",
+            args.plaintext,
+        ],
+    )
+
+
+def handle_dm_decrypt(args: argparse.Namespace) -> int:
+    return run_harness(
+        "dm-decrypt",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--ciphertext",
+            args.ciphertext,
+        ],
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -197,6 +302,18 @@ def main(argv: list[str] | None = None) -> int:
             return handle_soak(args)
         if args.command == "whoami":
             return handle_whoami(args)
+        if args.command == "dm-keypackage":
+            return handle_dm_keypackage(args)
+        if args.command == "dm-init":
+            return handle_dm_init(args)
+        if args.command == "dm-join":
+            return handle_dm_join(args)
+        if args.command == "dm-commit-apply":
+            return handle_dm_commit_apply(args)
+        if args.command == "dm-encrypt":
+            return handle_dm_encrypt(args)
+        if args.command == "dm-decrypt":
+            return handle_dm_decrypt(args)
     except RuntimeError as exc:  # user-facing errors
         sys.stderr.write(f"Error: {exc}\n")
         return 1

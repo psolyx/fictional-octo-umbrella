@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import curses
 import io
+import json
 import sys
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable
@@ -44,6 +45,16 @@ def _build_default_settings() -> Dict[str, str]:
         "iterations": "50",
         "save_every": "10",
         "vector_file": str(default_vector),
+        "dm_state_dir": "",
+        "dm_name": "",
+        "dm_seed": "1337",
+        "dm_group_id": "ZHMtZG0tZ3JvdXA=",
+        "dm_peer_keypackage": "",
+        "dm_self_keypackage": "",
+        "dm_welcome": "",
+        "dm_commit": "",
+        "dm_plaintext": "",
+        "dm_ciphertext": "",
     }
 
 
@@ -104,6 +115,25 @@ def _visible_log(lines: Iterable[str], height: int, scroll: int) -> list[str]:
     return collected[start:end]
 
 
+def _extract_single_output_line(lines: Iterable[str]) -> str | None:
+    for line in reversed(list(lines)):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _parse_dm_init_output(lines: Iterable[str]) -> tuple[str, str] | None:
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "welcome" in payload and "commit" in payload:
+            return str(payload["welcome"]), str(payload["commit"])
+    return None
+
+
 def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) -> None:
     action = model.current_action()
     fields = model.render().fields
@@ -158,6 +188,126 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 [f"state_dir={args.state_dir}", f"iterations={args.iterations}", f"save_every={args.save_every}"]
             )
             exit_code, output = _invoke(lambda: mls_poc.handle_soak(args))
+        elif action == "dm_keypackage":
+            seed = _parse_int(fields.get("dm_seed", "0"), "dm_seed")
+            if seed is None:
+                return
+            if not fields.get("dm_state_dir"):
+                log_writer(["dm_state_dir is required for dm_keypackage"])
+                return
+            if not fields.get("dm_name"):
+                log_writer(["dm_name is required for dm_keypackage"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                name=fields.get("dm_name", ""),
+                seed=seed,
+            )
+            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_name={args.name}", f"dm_seed={args.seed}"])
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_keypackage(args))
+            if exit_code == 0:
+                keypackage = _extract_single_output_line(output)
+                if keypackage:
+                    model.set_field_value("dm_self_keypackage", keypackage)
+        elif action == "dm_init":
+            seed = _parse_int(fields.get("dm_seed", "0"), "dm_seed")
+            if seed is None:
+                return
+            missing = []
+            if not fields.get("dm_state_dir"):
+                missing.append("dm_state_dir")
+            if not fields.get("dm_peer_keypackage"):
+                missing.append("dm_peer_keypackage")
+            if not fields.get("dm_group_id"):
+                missing.append("dm_group_id")
+            if missing:
+                log_writer([f"Missing required fields for dm_init: {', '.join(missing)}"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                peer_keypackage=fields.get("dm_peer_keypackage", ""),
+                group_id=fields.get("dm_group_id", ""),
+                seed=seed,
+            )
+            _write_heading(
+                [
+                    f"dm_state_dir={args.state_dir}",
+                    f"dm_peer_keypackage={args.peer_keypackage}",
+                    f"dm_group_id={args.group_id}",
+                    f"dm_seed={args.seed}",
+                ]
+            )
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_init(args))
+            if exit_code == 0:
+                parsed = _parse_dm_init_output(output)
+                if parsed:
+                    welcome, commit = parsed
+                    model.set_field_value("dm_welcome", welcome)
+                    model.set_field_value("dm_commit", commit)
+                    output.append(f"dm_init parsed welcome={len(welcome)} bytes, commit={len(commit)} bytes")
+        elif action == "dm_join":
+            if not fields.get("dm_state_dir"):
+                log_writer(["dm_state_dir is required for dm_join"])
+                return
+            if not fields.get("dm_welcome"):
+                log_writer(["dm_welcome is required for dm_join"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                welcome=fields.get("dm_welcome", ""),
+            )
+            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_welcome={args.welcome}"])
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_join(args))
+        elif action == "dm_commit_apply":
+            if not fields.get("dm_state_dir"):
+                log_writer(["dm_state_dir is required for dm_commit_apply"])
+                return
+            if not fields.get("dm_commit"):
+                log_writer(["dm_commit is required for dm_commit_apply"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                commit=fields.get("dm_commit", ""),
+            )
+            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_commit={args.commit}"])
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_commit_apply(args))
+        elif action == "dm_encrypt":
+            if not fields.get("dm_state_dir"):
+                log_writer(["dm_state_dir is required for dm_encrypt"])
+                return
+            if fields.get("dm_plaintext") == "":
+                log_writer(["dm_plaintext is required for dm_encrypt"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                plaintext=fields.get("dm_plaintext", ""),
+            )
+            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_plaintext={args.plaintext}"])
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_encrypt(args))
+            if exit_code == 0:
+                ciphertext = _extract_single_output_line(output)
+                if ciphertext:
+                    model.set_field_value("dm_ciphertext", ciphertext)
+                    output.append(f"me(plaintext): {args.plaintext}")
+                    output.append(f"me(ciphertext): {ciphertext}")
+        elif action == "dm_decrypt":
+            if not fields.get("dm_state_dir"):
+                log_writer(["dm_state_dir is required for dm_decrypt"])
+                return
+            if not fields.get("dm_ciphertext"):
+                log_writer(["dm_ciphertext is required for dm_decrypt"])
+                return
+            args = SimpleNamespace(
+                state_dir=fields.get("dm_state_dir", ""),
+                ciphertext=fields.get("dm_ciphertext", ""),
+            )
+            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_ciphertext={args.ciphertext}"])
+            exit_code, output = _invoke(lambda: mls_poc.handle_dm_decrypt(args))
+            if exit_code == 0:
+                plaintext = _extract_single_output_line(output)
+                if plaintext is not None:
+                    model.set_field_value("dm_plaintext", plaintext)
+                    output.append(f"peer(plaintext): {plaintext}")
         elif action == "rotate_device":
             record = model.rotate_device()
             _write_heading(
