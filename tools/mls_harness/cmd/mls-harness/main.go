@@ -2,41 +2,18 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/gob"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	mls "github.com/cisco/go-mls"
-	syntax "github.com/cisco/go-tls-syntax"
 
+	"github.com/polycentric/fictional-octo-umbrella/tools/mls_harness/internal/dm"
 	"github.com/polycentric/fictional-octo-umbrella/tools/mls_harness/internal/harness"
 )
-
-type storedParticipant struct {
-	Name       string
-	InitSecret []byte
-	State      *mls.State
-	Pending    *pendingCommit
-}
-
-type pendingCommit struct {
-	Commit    []byte
-	Welcome   []byte
-	NextState *mls.State
-}
-
-func init() {
-	gob.Register(&mls.State{})
-	gob.Register(&mls.MLSPlaintext{})
-	gob.Register(&mls.Welcome{})
-	gob.Register(&pendingCommit{})
-	gob.Register(&storedParticipant{})
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -194,107 +171,39 @@ func runDMKeyPackage(stateDir, name string, seed int64) (string, error) {
 	if stateDir == "" {
 		return "", errors.New("state-dir is required")
 	}
-	rng := harness.DeterministicRNGWithSeed(seed)
-	restore := harness.OverrideCryptoRand(rng)
-	defer restore()
-
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil {
-		participant = &storedParticipant{Name: name, InitSecret: harness.RandomBytes(rng, 32)}
-	}
-	if len(participant.InitSecret) == 0 {
-		participant.InitSecret = harness.RandomBytes(rng, 32)
-	}
-	if participant.Name == "" {
-		participant.Name = name
-	}
-
-	_, kp, err := buildIdentityAndKeyPackage(participant.InitSecret, participant.Name)
+	participantBlob, kp, err := dm.KeyPackage(participantBlob, name, seed)
 	if err != nil {
-		return "", fmt.Errorf("create keypackage: %w", err)
+		return "", err
 	}
-	kpBytes, err := syntax.Marshal(*kp)
-	if err != nil {
-		return "", fmt.Errorf("marshal keypackage: %w", err)
-	}
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return "", fmt.Errorf("save participant: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(kpBytes), nil
+	return kp, nil
 }
 
 func runDMInit(stateDir, peerKPBase64, groupIDBase64 string, seed int64) (string, string, error) {
 	if stateDir == "" {
 		return "", "", errors.New("state-dir is required")
 	}
-	if peerKPBase64 == "" {
-		return "", "", errors.New("peer-keypackage is required")
-	}
-	groupID, err := base64.StdEncoding.DecodeString(groupIDBase64)
-	if err != nil {
-		return "", "", fmt.Errorf("decode group-id: %w", err)
-	}
-
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return "", "", fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil {
+	if participantBlob == "" {
 		return "", "", errors.New("participant state not initialized; run dm-keypackage first")
 	}
-	rng := harness.DeterministicRNGWithSeed(seed)
-	restore := harness.OverrideCryptoRand(rng)
-	defer restore()
-
-	sigPriv, kp, err := buildIdentityAndKeyPackage(participant.InitSecret, participant.Name)
+	participantBlob, welcome, commit, err := dm.Init(participantBlob, peerKPBase64, groupIDBase64, seed)
 	if err != nil {
-		return "", "", fmt.Errorf("build identity: %w", err)
+		return "", "", err
 	}
-
-	peerKP, err := parseKeyPackage(peerKPBase64)
-	if err != nil {
-		return "", "", fmt.Errorf("parse peer keypackage: %w", err)
-	}
-
-	state, err := mls.NewEmptyState(groupID, participant.InitSecret, sigPriv, *kp)
-	if err != nil {
-		return "", "", fmt.Errorf("create group: %w", err)
-	}
-
-	add, err := state.Add(peerKP)
-	if err != nil {
-		return "", "", fmt.Errorf("add peer: %w", err)
-	}
-	if _, err := state.Handle(add); err != nil {
-		return "", "", fmt.Errorf("handle add: %w", err)
-	}
-
-	commitSecret := harness.RandomBytes(rng, 32)
-	commitPT, welcome, nextState, err := state.Commit(commitSecret)
-	if err != nil {
-		return "", "", fmt.Errorf("commit: %w", err)
-	}
-
-	commitBytes, err := syntax.Marshal(*commitPT)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal commit: %w", err)
-	}
-	welcomeBytes, err := syntax.Marshal(*welcome)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal welcome: %w", err)
-	}
-
-	participant.State = state
-	participant.Pending = &pendingCommit{Commit: commitBytes, Welcome: welcomeBytes, NextState: nextState}
-
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return "", "", fmt.Errorf("save participant: %w", err)
 	}
-
-	return base64.StdEncoding.EncodeToString(welcomeBytes), base64.StdEncoding.EncodeToString(commitBytes), nil
+	return welcome, commit, nil
 }
 
 func runDMJoin(stateDir, welcomeBase64 string) error {
@@ -305,41 +214,18 @@ func runDMJoin(stateDir, welcomeBase64 string) error {
 		return errors.New("welcome is required")
 	}
 
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil {
+	if participantBlob == "" {
 		return errors.New("participant state not initialized; run dm-keypackage first")
 	}
-
-	welcomeBytes, err := base64.StdEncoding.DecodeString(welcomeBase64)
+	participantBlob, err = dm.Join(participantBlob, welcomeBase64)
 	if err != nil {
-		return fmt.Errorf("decode welcome: %w", err)
+		return err
 	}
-	var welcome mls.Welcome
-	if _, err := syntax.Unmarshal(welcomeBytes, &welcome); err != nil {
-		return fmt.Errorf("unmarshal welcome: %w", err)
-	}
-
-	sigPriv, kp, err := buildIdentityAndKeyPackage(participant.InitSecret, participant.Name)
-	if err != nil {
-		return fmt.Errorf("build identity: %w", err)
-	}
-
-	rng := harness.DeterministicRNG()
-	restore := harness.OverrideCryptoRand(rng)
-	defer restore()
-
-	state, err := mls.NewJoinedState(participant.InitSecret, []mls.SignaturePrivateKey{sigPriv}, []mls.KeyPackage{*kp}, welcome)
-	if err != nil {
-		return fmt.Errorf("join state: %w", err)
-	}
-
-	participant.State = state
-	participant.Pending = nil
-
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return fmt.Errorf("save participant: %w", err)
 	}
 	return nil
@@ -352,98 +238,57 @@ func runDMCommitApply(stateDir, commitBase64 string) error {
 	if commitBase64 == "" {
 		return errors.New("commit is required")
 	}
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil || participant.State == nil {
+	if participantBlob == "" {
 		return errors.New("participant state not initialized")
 	}
-
-	commitBytes, err := base64.StdEncoding.DecodeString(commitBase64)
+	participantBlob, _, err = dm.CommitApply(participantBlob, commitBase64)
 	if err != nil {
-		return fmt.Errorf("decode commit: %w", err)
+		return err
 	}
-	var commitPT mls.MLSPlaintext
-	if _, err := syntax.Unmarshal(commitBytes, &commitPT); err != nil {
-		return fmt.Errorf("unmarshal commit: %w", err)
-	}
-
-	if participant.Pending != nil {
-		if !bytes.Equal(participant.Pending.Commit, commitBytes) {
-			return errors.New("commit mismatch for pending apply")
-		}
-		if participant.Pending.NextState == nil {
-			return errors.New("pending commit missing next state")
-		}
-		participant.State = participant.Pending.NextState
-		participant.Pending = nil
-	} else {
-		nextState, err := participant.State.Handle(&commitPT)
-		if err != nil {
-			if strings.Contains(err.Error(), "epoch mismatch") && participant.State.Epoch == commitPT.Epoch+1 {
-				if err := saveParticipant(stateDir, participant); err != nil {
-					return fmt.Errorf("save participant: %w", err)
-				}
-				return nil
-			}
-			return fmt.Errorf("handle commit: %w", err)
-		}
-		participant.State = nextState
-	}
-
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return fmt.Errorf("save participant: %w", err)
 	}
 	return nil
 }
 
 func runDMEncrypt(stateDir, plaintext string) (string, error) {
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil || participant.State == nil {
+	if participantBlob == "" {
 		return "", errors.New("participant state not initialized")
 	}
-	ct, err := participant.State.Protect([]byte(plaintext))
+	participantBlob, ciphertext, err := dm.Encrypt(participantBlob, plaintext)
 	if err != nil {
-		return "", fmt.Errorf("protect: %w", err)
+		return "", err
 	}
-	ctBytes, err := syntax.Marshal(*ct)
-	if err != nil {
-		return "", fmt.Errorf("marshal ciphertext: %w", err)
-	}
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return "", fmt.Errorf("persist state: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(ctBytes), nil
+	return ciphertext, nil
 }
 
 func runDMDecrypt(stateDir, ciphertextBase64 string) (string, error) {
-	participant, err := loadParticipant(stateDir)
+	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("load participant: %w", err)
 	}
-	if participant == nil || participant.State == nil {
+	if participantBlob == "" {
 		return "", errors.New("participant state not initialized")
 	}
-	ctBytes, err := base64.StdEncoding.DecodeString(ciphertextBase64)
+	participantBlob, plaintext, err := dm.Decrypt(participantBlob, ciphertextBase64)
 	if err != nil {
-		return "", fmt.Errorf("decode ciphertext: %w", err)
+		return "", err
 	}
-	var ct mls.MLSCiphertext
-	if _, err := syntax.Unmarshal(ctBytes, &ct); err != nil {
-		return "", fmt.Errorf("unmarshal ciphertext: %w", err)
-	}
-	pt, err := participant.State.Unprotect(&ct)
-	if err != nil {
-		return "", fmt.Errorf("unprotect: %w", err)
-	}
-	if err := saveParticipant(stateDir, participant); err != nil {
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
 		return "", fmt.Errorf("persist state: %w", err)
 	}
-	return string(pt), nil
+	return plaintext, nil
 }
 
 func runSmoke(iterations, saveEvery int, stateDir string) error {
@@ -560,105 +405,29 @@ func participantPath(stateDir string) string {
 	return filepath.Join(stateDir, "participant.gob")
 }
 
-func loadParticipant(stateDir string) (*storedParticipant, error) {
-	primeGobRegistrations()
+func loadParticipantBlob(stateDir string) (string, error) {
 	path := participantPath(stateDir)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return "", nil
 		}
-		return nil, fmt.Errorf("read participant: %w", err)
+		return "", fmt.Errorf("read participant: %w", err)
 	}
-
-	var participant storedParticipant
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&participant); err != nil {
-		return nil, fmt.Errorf("decode participant: %w", err)
-	}
-
-	registerStateTypes(participant.State)
-	if participant.Pending != nil {
-		registerStateTypes(participant.Pending.NextState)
-	}
-
-	return &participant, nil
+	return string(bytes.TrimSpace(data)), nil
 }
 
-func saveParticipant(stateDir string, participant *storedParticipant) error {
-	if participant == nil {
-		return errors.New("nil participant")
-	}
+func saveParticipantBlob(stateDir, participantBlob string) error {
 	if stateDir == "" {
 		return errors.New("state-dir is required")
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("create state-dir: %w", err)
 	}
-
-	registerStateTypes(participant.State)
-	if participant.Pending != nil {
-		registerStateTypes(participant.Pending.NextState)
-		registerValue(participant.Pending)
-	}
-
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(participant); err != nil {
-		return fmt.Errorf("encode participant: %w", err)
-	}
-	if err := os.WriteFile(participantPath(stateDir), buf.Bytes(), 0o600); err != nil {
+	if err := os.WriteFile(participantPath(stateDir), []byte(participantBlob), 0o600); err != nil {
 		return fmt.Errorf("write participant: %w", err)
 	}
 	return nil
-}
-
-func primeGobRegistrations() {
-	rng := harness.DeterministicRNG()
-	restore := harness.OverrideCryptoRand(rng)
-	defer restore()
-
-	secret := harness.RandomBytes(rng, 32)
-	sigPriv, kp, err := buildIdentityAndKeyPackage(secret, "prime")
-	if err != nil {
-		return
-	}
-	state, err := mls.NewEmptyState([]byte{0xAA}, secret, sigPriv, *kp)
-	if err != nil {
-		return
-	}
-	registerStateTypes(state)
-}
-
-func buildIdentityAndKeyPackage(secret []byte, name string) (mls.SignaturePrivateKey, *mls.KeyPackage, error) {
-	if len(secret) == 0 {
-		return mls.SignaturePrivateKey{}, nil, errors.New("init secret required")
-	}
-	suite := mls.X25519_AES128GCM_SHA256_Ed25519
-	scheme := suite.Scheme()
-	sigPriv, err := scheme.Derive(secret)
-	if err != nil {
-		return mls.SignaturePrivateKey{}, nil, fmt.Errorf("derive identity key: %w", err)
-	}
-	cred := mls.NewBasicCredential([]byte(name), scheme, sigPriv.PublicKey)
-	kp, err := mls.NewKeyPackageWithSecret(suite, secret, cred, sigPriv)
-	if err != nil {
-		return mls.SignaturePrivateKey{}, nil, fmt.Errorf("create key package: %w", err)
-	}
-	if err := harness.MakeKeyPackageDeterministic(kp, sigPriv); err != nil {
-		return mls.SignaturePrivateKey{}, nil, fmt.Errorf("stabilize key package: %w", err)
-	}
-	return sigPriv, kp, nil
-}
-
-func parseKeyPackage(b64 string) (mls.KeyPackage, error) {
-	data, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return mls.KeyPackage{}, fmt.Errorf("decode keypackage: %w", err)
-	}
-	var kp mls.KeyPackage
-	if _, err := syntax.Unmarshal(data, &kp); err != nil {
-		return mls.KeyPackage{}, fmt.Errorf("unmarshal keypackage: %w", err)
-	}
-	return kp, nil
 }
 
 func registerStateTypes(state *mls.State) {
