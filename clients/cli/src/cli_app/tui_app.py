@@ -30,6 +30,10 @@ def _normalize_key(key: int) -> tuple[str, str | None]:
         return "BACKSPACE", None
     if key == curses.KEY_DC:
         return "DELETE", None
+    if key == 14:  # ctrl-n
+        return "CTRL_N", None
+    if key == 16:  # ctrl-p
+        return "CTRL_P", None
     if key in (ord("q"), ord("Q")):
         return "q", None
     if 32 <= key <= 126:
@@ -67,47 +71,63 @@ def _render_text(window: curses.window, y: int, x: int, text: str, attr: int = 0
 def draw_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.erase()
     max_y, max_x = stdscr.getmaxyx()
-    log_height = max(5, max_y // 3)
-    top_height = max_y - log_height
-    menu_width = 18
+    left_width = min(40, max(24, max_x // 3))
+    right_start = left_width + 1
+    header_offset = 6
+    compose_height = 3
+    transcript_height = max(3, max_y - header_offset - compose_height - 1)
 
     render = model.render()
 
     _render_text(stdscr, 0, 1, "Phase 0.5 MLS harness TUI")
-    _render_text(stdscr, 1, 1, "Tab: focus | Enter: run | q: quit")
+    _render_text(stdscr, 1, 1, "Tab: focus | Enter: run | q: quit | n: new DM")
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
 
-    header_offset = 6
-    _render_text(stdscr, header_offset, 1, "Actions")
+    stdscr.vline(header_offset, left_width, curses.ACS_VLINE, max(1, max_y - header_offset))
+
+    _render_text(stdscr, header_offset, 1, "Conversations")
+    for idx, conv in enumerate(render.dm_conversations):
+        attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
+        label = conv.get("name", "")
+        _render_text(stdscr, header_offset + 1 + idx, 2, label, attr)
+
+    action_start = header_offset + 2 + len(render.dm_conversations)
+    _render_text(stdscr, action_start, 1, "Actions")
     for idx, item in enumerate(render.menu_items):
         attr = curses.A_REVERSE if (render.focus_area == "menu" and idx == render.selected_menu) else 0
-        _render_text(stdscr, header_offset + 1 + idx, 2, f"{item}", attr)
+        _render_text(stdscr, action_start + 1 + idx, 2, f"{item}", attr)
 
-    field_start_x = menu_width
-    _render_text(stdscr, header_offset, field_start_x, "Parameters")
+    field_start = action_start + 2 + len(render.menu_items)
+    _render_text(stdscr, field_start, 1, "Parameters")
     for idx, field in enumerate(render.field_order):
         value = render.fields.get(field, "")
         label = f"{field}: {value}"
         attr = curses.A_REVERSE if (render.focus_area == "fields" and idx == render.active_field) else 0
-        _render_text(stdscr, header_offset + 1 + idx, field_start_x + 1, label, attr)
+        _render_text(stdscr, field_start + 1 + idx, 2, label, attr)
 
-    log_y = top_height
-    stdscr.hline(log_y - 1, 0, curses.ACS_HLINE, max_x)
-    _render_text(stdscr, log_y - 1, 2, "Output (latest at bottom)")
+    transcript_top = header_offset
+    stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
+    _render_text(stdscr, transcript_top - 1, right_start + 2, "Transcript (latest at bottom)")
+    visible_transcript = _visible_transcript(render.transcript, transcript_height, render.transcript_scroll)
+    highlight_idx = max(0, len(visible_transcript) - 1 - render.transcript_scroll)
+    for idx, entry in enumerate(visible_transcript):
+        line = _format_transcript_entry(entry)
+        attr = curses.A_REVERSE if render.focus_area == "transcript" and idx == highlight_idx else 0
+        _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
 
-    visible_log = _visible_log(render.log_lines, log_height - 1, render.log_scroll)
-    highlight_idx = max(0, len(visible_log) - 1 - render.log_scroll)
-    for idx, line in enumerate(visible_log):
-        attr = curses.A_REVERSE if render.focus_area == "log" and idx == highlight_idx else 0
-        _render_text(stdscr, log_y + idx, 1, line, attr)
+    compose_top = transcript_top + transcript_height + 1
+    stdscr.hline(compose_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
+    _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
+    compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
+    _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
     stdscr.refresh()
 
 
-def _visible_log(lines: Iterable[str], height: int, scroll: int) -> list[str]:
-    collected = list(lines)
+def _visible_transcript(entries: Iterable[Dict[str, str]], height: int, scroll: int) -> list[Dict[str, str]]:
+    collected = list(entries)
     if height <= 0:
         return []
     end = max(0, len(collected) - scroll)
@@ -132,6 +152,43 @@ def _parse_dm_init_output(lines: Iterable[str]) -> tuple[str, str] | None:
         if isinstance(payload, dict) and "welcome" in payload and "commit" in payload:
             return str(payload["welcome"]), str(payload["commit"])
     return None
+
+
+def _format_transcript_entry(entry: Dict[str, str]) -> str:
+    direction = entry.get("dir", "sys")
+    text = entry.get("text", "")
+    if direction == "out":
+        prefix = "me"
+    elif direction == "in":
+        prefix = "peer"
+    else:
+        prefix = "sys"
+    return f"{prefix}: {text}"
+
+
+def _run_dm_encrypt(model: TuiModel, log_writer: Callable[[Iterable[str]], None], plaintext: str) -> None:
+    fields = model.render().fields
+    if not fields.get("dm_state_dir"):
+        log_writer(["dm_state_dir is required for dm_encrypt"])
+        return
+    if plaintext == "":
+        log_writer(["dm_plaintext is required for dm_encrypt"])
+        return
+    args = SimpleNamespace(
+        state_dir=fields.get("dm_state_dir", ""),
+        plaintext=plaintext,
+    )
+    log_writer([f"dm_encrypt state_dir={args.state_dir}"])
+    exit_code, output = _invoke(lambda: mls_poc.handle_dm_encrypt(args))
+    if exit_code == 0:
+        ciphertext = _extract_single_output_line(output)
+        if ciphertext:
+            model.set_field_value("dm_ciphertext", ciphertext)
+            model.set_field_value("dm_plaintext", plaintext)
+            model.append_transcript("out", plaintext)
+            model.append_transcript("out", f"[ciphertext] {ciphertext}")
+    suffix = "ok" if exit_code == 0 else f"failed ({exit_code})"
+    log_writer(output + [f"Completed: {suffix}"])
 
 
 def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) -> None:
@@ -272,24 +329,8 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
             _write_heading([f"dm_state_dir={args.state_dir}", f"dm_commit={args.commit}"])
             exit_code, output = _invoke(lambda: mls_poc.handle_dm_commit_apply(args))
         elif action == "dm_encrypt":
-            if not fields.get("dm_state_dir"):
-                log_writer(["dm_state_dir is required for dm_encrypt"])
-                return
-            if fields.get("dm_plaintext") == "":
-                log_writer(["dm_plaintext is required for dm_encrypt"])
-                return
-            args = SimpleNamespace(
-                state_dir=fields.get("dm_state_dir", ""),
-                plaintext=fields.get("dm_plaintext", ""),
-            )
-            _write_heading([f"dm_state_dir={args.state_dir}", f"dm_plaintext={args.plaintext}"])
-            exit_code, output = _invoke(lambda: mls_poc.handle_dm_encrypt(args))
-            if exit_code == 0:
-                ciphertext = _extract_single_output_line(output)
-                if ciphertext:
-                    model.set_field_value("dm_ciphertext", ciphertext)
-                    output.append(f"me(plaintext): {args.plaintext}")
-                    output.append(f"me(ciphertext): {ciphertext}")
+            _run_dm_encrypt(model, log_writer, fields.get("dm_plaintext", ""))
+            return
         elif action == "dm_decrypt":
             if not fields.get("dm_state_dir"):
                 log_writer(["dm_state_dir is required for dm_decrypt"])
@@ -307,7 +348,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 plaintext = _extract_single_output_line(output)
                 if plaintext is not None:
                     model.set_field_value("dm_plaintext", plaintext)
-                    output.append(f"peer(plaintext): {plaintext}")
+                    model.append_transcript("in", plaintext)
         elif action == "rotate_device":
             record = model.rotate_device()
             _write_heading(
@@ -369,8 +410,25 @@ def main() -> int:
             action = model.handle_key(normalized, char)
             if action == "quit":
                 break
+            if action == "new_conv":
+                fields = model.render().fields
+                if not fields.get("dm_name") or not fields.get("dm_state_dir"):
+                    model.append_transcript(
+                        "sys",
+                        "Set dm_name and dm_state_dir in Parameters before creating a new DM.",
+                    )
+                else:
+                    model.add_conv(fields.get("dm_name", ""), fields.get("dm_state_dir", ""))
+                    model.append_transcript("sys", f"Added conversation {fields.get('dm_name', '')}.")
             if action == "run":
-                _run_action(model, model.append_log)
+                _run_action(model, lambda lines: [model.append_transcript("sys", line) for line in lines])
+            if action == "send":
+                compose_text = model.compose_text.strip("\n")
+                if compose_text:
+                    _run_dm_encrypt(model, lambda lines: [model.append_transcript("sys", line) for line in lines], compose_text)
+                    model.compose_text = ""
+                else:
+                    model.append_transcript("sys", "Compose buffer is empty.")
 
     curses.wrapper(_runner)
     return 0
