@@ -89,8 +89,52 @@
     <pre id="vector_output"></pre>
   </fieldset>
 
+  <fieldset>
+    <legend>MLS DM (local)</legend>
+    <p>Local-only DM flow using the Go WASM harness. Participant state can be saved to IndexedDB and reloaded after refresh.</p>
+    <div class="button-row">
+      <button id="dm_create_alice">Create Alice</button>
+      <button id="dm_create_bob">Create Bob</button>
+      <button id="dm_reset_state">Reset local state</button>
+      <span id="dm_status">idle</span>
+    </div>
+    <label>
+      group_id (base64)
+      <input type="text" id="dm_group_id" size="48" readonly />
+    </label>
+    <div class="button-row">
+      <button id="dm_init">Init (Alice → Bob)</button>
+      <button id="dm_join">Join (Bob)</button>
+      <button id="dm_commit_apply">Apply commit (Alice)</button>
+    </div>
+    <label>
+      Alice plaintext (local only)
+      <input type="text" id="dm_alice_plaintext" size="48" placeholder="hello from alice" />
+    </label>
+    <button id="dm_encrypt_alice">Encrypt Alice → Bob</button>
+    <label>
+      Bob plaintext (local only)
+      <input type="text" id="dm_bob_plaintext" size="48" placeholder="hello from bob" />
+    </label>
+    <button id="dm_encrypt_bob">Encrypt Bob → Alice</button>
+    <label>
+      Last ciphertext (base64)
+      <input type="text" id="dm_ciphertext" size="64" readonly />
+    </label>
+    <label>
+      Last decrypted plaintext (local only)
+      <input type="text" id="dm_decrypted" size="48" readonly />
+    </label>
+    <div class="button-row">
+      <button id="dm_save_state">Save to IndexedDB</button>
+      <button id="dm_load_state">Load from IndexedDB</button>
+    </div>
+    <pre id="dm_output"></pre>
+  </fieldset>
+
   <script src="vendor/wasm_exec.js"></script>
   <script type="module" src="vectors_ui.js"></script>
+  <script type="module" src="dm_ui.js"></script>
   <script src="gateway_ws_client.js"></script>
 </body>
 </html>
