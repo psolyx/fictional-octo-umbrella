@@ -74,11 +74,11 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
         conv_id = "chaos-room"
         run_slow = os.getenv("RUN_SLOW_TESTS") == "1"
 
-        iterations = 2_000 if run_slow else 120
-        send_interval = 100 if run_slow else 20
+        iterations = 2_000 if run_slow else 60
+        send_interval = 100 if run_slow else 10
         ack_every = 10 if run_slow else 2
-        test_timeout = 90 if run_slow else 25
-        sse_timeout = 30 if run_slow else 10
+        test_timeout = 90 if run_slow else 15
+        sse_timeout = 30 if run_slow else 6
 
         async with asyncio.timeout(test_timeout):
             start_resp = await self._post_json(

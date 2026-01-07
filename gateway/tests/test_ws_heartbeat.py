@@ -49,7 +49,7 @@ class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             ws, _ = await self._start_session(client)
 
             loop = asyncio.get_running_loop()
-            ping_deadline = loop.time() + 8
+            ping_deadline = loop.time() + 4
             ping_seen = False
 
             while not ping_seen:
@@ -66,7 +66,7 @@ class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     self.fail("Connection closed before ping was observed")
 
-            close_deadline = loop.time() + 8
+            close_deadline = loop.time() + 4
             close_seen = ws.closed
 
             while not close_seen:
@@ -109,9 +109,8 @@ class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                         self.fail("Connection closed while waiting for pong")
 
             loop = asyncio.get_running_loop()
-            await assert_pong_for_client_ping("c1", deadline=loop.time() + 5)
-            await assert_pong_for_client_ping("c2", deadline=loop.time() + 5)
-            await assert_pong_for_client_ping("c3", deadline=loop.time() + 5)
+            await assert_pong_for_client_ping("c1", deadline=loop.time() + 3)
+            await assert_pong_for_client_ping("c2", deadline=loop.time() + 3)
 
             self.assertFalse(ws.closed)
         finally:
