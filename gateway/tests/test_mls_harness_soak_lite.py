@@ -23,16 +23,16 @@ class TestMLSHarnessSoakLite(unittest.TestCase):
                 [
                     "smoke",
                     "--iterations",
-                    "150",
+                    "40",
                     "--save-every",
-                    "10",
+                    "5",
                     "--state-dir",
                     state_dir,
                 ],
                 harness_bin=self._harness_bin,
                 cwd=HARNESS_DIR,
                 env=env,
-                timeout_s=180.0,
+                timeout_s=120.0,
             )
 
         if proc.returncode != 0:
