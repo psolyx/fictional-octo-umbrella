@@ -215,6 +215,15 @@ def build_parser() -> argparse.ArgumentParser:
     gw_tail = subparsers.add_parser("gw-tail", help="Tail gateway SSE replay for a conversation")
     gw_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_tail.add_argument("--from-seq", type=int, help="Sequence to replay from (defaults to stored cursor)")
+    gw_tail.add_argument("--max-events", type=int, help="Stop after emitting this many events")
+    gw_tail.add_argument(
+        "--idle-timeout-s",
+        type=float,
+        nargs="?",
+        const=5.0,
+        default=None,
+        help="Stop if idle for this many seconds (default: none; if flag present defaults to 5.0)",
+    )
     gw_tail.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
     gw_kp_publish = subparsers.add_parser("gw-kp-publish", help="Publish KeyPackages to the gateway directory")
@@ -227,6 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
     gw_kp_fetch = subparsers.add_parser("gw-kp-fetch", help="Fetch KeyPackages from the gateway directory")
     gw_kp_fetch.add_argument("--user-id", required=True, help="User id to fetch from (required)")
     gw_kp_fetch.add_argument("--count", type=int, required=True, help="Number of KeyPackages to fetch (required)")
+    gw_kp_fetch.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Allow zero KeyPackages without exiting non-zero (default: fail fast)",
+    )
     gw_kp_fetch.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
     gw_dm_create = subparsers.add_parser("gw-dm-create", help="Create a DM conversation via the gateway")
@@ -252,6 +266,20 @@ def build_parser() -> argparse.ArgumentParser:
     gw_dm_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_dm_tail.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
     gw_dm_tail.add_argument("--from-seq", type=int, help="Sequence to replay from (defaults to stored cursor)")
+    gw_dm_tail.add_argument("--max-events", type=int, help="Stop after emitting this many events")
+    gw_dm_tail.add_argument(
+        "--idle-timeout-s",
+        type=float,
+        nargs="?",
+        const=5.0,
+        default=None,
+        help="Stop if idle for this many seconds (default: none; if flag present defaults to 5.0)",
+    )
+    gw_dm_tail.add_argument(
+        "--wipe-state",
+        action="store_true",
+        help="Delete state_dir before replaying events (requires --from-seq, recommended 1)",
+    )
     gw_dm_tail.add_argument("--ack", action=argparse.BooleanOptionalAction, default=True, help="Ack events (default)")
     gw_dm_tail.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
@@ -402,7 +430,14 @@ def handle_gw_tail(args: argparse.Namespace) -> int:
         if args.from_seq is not None
         else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
     )
-    for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
+    for event in gateway_client.sse_tail(
+        base_url,
+        session_token,
+        args.conv_id,
+        from_seq,
+        max_events=args.max_events,
+        idle_timeout_s=args.idle_timeout_s,
+    ):
         sys.stdout.write(f"{json.dumps(event, sort_keys=True)}\n")
     return 0
 
@@ -437,7 +472,11 @@ def handle_gw_kp_publish(args: argparse.Namespace) -> int:
 def handle_gw_kp_fetch(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     response = gateway_client.keypackages_fetch(base_url, session_token, args.user_id, args.count)
-    for keypackage in response.get("keypackages", []):
+    keypackages = response.get("keypackages", [])
+    if not keypackages and not args.allow_empty:
+        sys.stderr.write(f"No KeyPackages available for user {args.user_id}.\n")
+        return 1
+    for keypackage in keypackages:
         sys.stdout.write(f"{keypackage}\n")
     return 0
 
@@ -519,12 +558,29 @@ def handle_gw_dm_send(args: argparse.Namespace) -> int:
 
 def handle_gw_dm_tail(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
-    from_seq = (
-        args.from_seq
-        if args.from_seq is not None
-        else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
-    )
-    for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
+    if args.wipe_state:
+        if args.from_seq is None:
+            raise RuntimeError("--wipe-state requires --from-seq (use --from-seq 1 to rebuild state)")
+        state_path = Path(args.state_dir)
+        if state_path.exists() and not state_path.is_dir():
+            raise RuntimeError(f"Refusing to wipe non-directory state_dir: {state_path}")
+        if state_path.is_dir():
+            shutil.rmtree(state_path)
+        from_seq = args.from_seq
+    else:
+        from_seq = (
+            args.from_seq
+            if args.from_seq is not None
+            else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
+        )
+    for event in gateway_client.sse_tail(
+        base_url,
+        session_token,
+        args.conv_id,
+        from_seq,
+        max_events=args.max_events,
+        idle_timeout_s=args.idle_timeout_s,
+    ):
         body = event.get("body", {})
         seq = body.get("seq")
         env_b64 = body.get("env")

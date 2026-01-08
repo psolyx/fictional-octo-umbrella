@@ -80,7 +80,9 @@ python -m cli_app.mls_poc --profile u1d1 gw-dm-init-send \
 
 python -m cli_app.mls_poc --profile u2d1 gw-dm-tail \
   --conv-id "${CONV_ID}" \
-  --state-dir "${STATE_BASE}/u2d1"
+  --state-dir "${STATE_BASE}/u2d1" \
+  --max-events 2 \
+  --idle-timeout-s
 
 python -m cli_app.mls_poc --profile u1d1 gw-dm-send \
   --conv-id "${CONV_ID}" \
@@ -89,7 +91,9 @@ python -m cli_app.mls_poc --profile u1d1 gw-dm-send \
 
 python -m cli_app.mls_poc --profile u2d1 gw-dm-tail \
   --conv-id "${CONV_ID}" \
-  --state-dir "${STATE_BASE}/u2d1"
+  --state-dir "${STATE_BASE}/u2d1" \
+  --max-events 1 \
+  --idle-timeout-s
 
 python - <<'PY'
 from cli_app import gateway_store
@@ -103,6 +107,33 @@ gateway_store.save_session(stored["base_url"], "", stored["resume_token"], paths
 PY
 
 python -m cli_app.mls_poc --profile u2d1 gw-resume --base-url "${GW_BASE_URL}"
+
+python -m cli_app.mls_poc --profile u1d1 gw-dm-send \
+  --conv-id "${CONV_ID}" \
+  --state-dir "${STATE_BASE}/u1d1" \
+  --plaintext "hello after resume"
+
 python -m cli_app.mls_poc --profile u2d1 gw-dm-tail \
   --conv-id "${CONV_ID}" \
-  --state-dir "${STATE_BASE}/u2d1"
+  --state-dir "${STATE_BASE}/u2d1" \
+  --max-events 1 \
+  --idle-timeout-s
+
+python -m cli_app.mls_poc --profile u2d1 gw-dm-tail \
+  --conv-id "${CONV_ID}" \
+  --state-dir "${STATE_BASE}/u2d1" \
+  --from-seq 1 \
+  --wipe-state \
+  --max-events 4 \
+  --idle-timeout-s
+
+python -m cli_app.mls_poc --profile u1d1 gw-dm-send \
+  --conv-id "${CONV_ID}" \
+  --state-dir "${STATE_BASE}/u1d1" \
+  --plaintext "hello after resync"
+
+python -m cli_app.mls_poc --profile u2d1 gw-dm-tail \
+  --conv-id "${CONV_ID}" \
+  --state-dir "${STATE_BASE}/u2d1" \
+  --max-events 1 \
+  --idle-timeout-s
