@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -12,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Tuple
 
-from cli_app import gateway_client, gateway_store, identity_store
+from cli_app import dm_envelope, gateway_client, gateway_store, identity_store
 
 MIN_GO_VERSION: Tuple[int, int] = (1, 22)
 
@@ -104,6 +106,59 @@ def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
     return result.returncode
 
 
+def _run_harness_capture(subcommand: str, extra_args: Iterable[str]) -> str:
+    repo_root = find_repo_root()
+    go_path = ensure_go_ready()
+
+    harness_dir = repo_root / "tools" / "mls_harness"
+    cmd = [
+        go_path,
+        "run",
+        "-p",
+        "1",
+        "./cmd/mls-harness",
+        subcommand,
+        *extra_args,
+    ]
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "GOTOOLCHAIN": "local",
+            "GOFLAGS": "-mod=vendor",
+            "GOMAXPROCS": "1",
+            "GOMEMLIMIT": "700MiB",
+        }
+    )
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(harness_dir),
+        env=env,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        raise RuntimeError(f"harness {subcommand} failed")
+    return result.stdout
+
+
+def _first_nonempty_line(output: str) -> str:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    raise RuntimeError("harness output was empty")
+
+
+def _msg_id_for_env(env_b64: str) -> str:
+    env_bytes = base64.b64decode(env_b64)
+    return hashlib.sha256(env_bytes).hexdigest()
+
+
 def build_parser() -> argparse.ArgumentParser:
     repo_root = find_repo_root()
     default_vector = repo_root / "tools" / "mls_harness" / "vectors" / "dm_smoke_v1.json"
@@ -156,6 +211,44 @@ def build_parser() -> argparse.ArgumentParser:
     gw_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_tail.add_argument("--from-seq", type=int, help="Sequence to replay from (defaults to stored cursor)")
     gw_tail.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_kp_publish = subparsers.add_parser("gw-kp-publish", help="Publish KeyPackages to the gateway directory")
+    gw_kp_publish.add_argument("--count", type=int, required=True, help="Number of KeyPackages to publish (required)")
+    gw_kp_publish.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_kp_publish.add_argument("--name", default="participant", help="Participant name (default: participant)")
+    gw_kp_publish.add_argument("--seed-base", type=int, default=1337, help="Seed base (default: 1337)")
+    gw_kp_publish.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_kp_fetch = subparsers.add_parser("gw-kp-fetch", help="Fetch KeyPackages from the gateway directory")
+    gw_kp_fetch.add_argument("--user-id", required=True, help="User id to fetch from (required)")
+    gw_kp_fetch.add_argument("--count", type=int, required=True, help="Number of KeyPackages to fetch (required)")
+    gw_kp_fetch.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_dm_create = subparsers.add_parser("gw-dm-create", help="Create a DM conversation via the gateway")
+    gw_dm_create.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_dm_create.add_argument("--peer-user-id", required=True, help="Peer user id (required)")
+    gw_dm_create.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_dm_init = subparsers.add_parser("gw-dm-init-send", help="Init a DM and send Welcome/Commit via gateway")
+    gw_dm_init.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_dm_init.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_dm_init.add_argument("--peer-kp-b64", required=True, help="Peer KeyPackage (base64, required)")
+    gw_dm_init.add_argument("--group-id", required=True, help="Group id (base64, required)")
+    gw_dm_init.add_argument("--seed", type=int, default=7331, help="Deterministic seed (default: 7331)")
+    gw_dm_init.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_dm_send = subparsers.add_parser("gw-dm-send", help="Encrypt and send a DM application message")
+    gw_dm_send.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_dm_send.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_dm_send.add_argument("--plaintext", required=True, help="Plaintext message (required)")
+    gw_dm_send.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_dm_tail = subparsers.add_parser("gw-dm-tail", help="Tail and apply DM gateway events")
+    gw_dm_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_dm_tail.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_dm_tail.add_argument("--from-seq", type=int, help="Sequence to replay from (defaults to stored cursor)")
+    gw_dm_tail.add_argument("--ack", action=argparse.BooleanOptionalAction, default=True, help="Ack events (default)")
+    gw_dm_tail.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
     dm_keypackage = subparsers.add_parser("dm-keypackage", help="Generate a DM KeyPackage")
     dm_keypackage.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
@@ -295,6 +388,164 @@ def handle_gw_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_gw_kp_publish(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    identity = identity_store.load_or_create_identity(identity_store.DEFAULT_IDENTITY_PATH)
+    keypackages: list[str] = []
+    for offset in range(args.count):
+        output = _run_harness_capture(
+            "dm-keypackage",
+            [
+                "--state-dir",
+                args.state_dir,
+                "--name",
+                args.name,
+                "--seed",
+                str(args.seed_base + offset),
+            ],
+        )
+        keypackages.append(_first_nonempty_line(output))
+    response = gateway_client.keypackages_publish(
+        base_url,
+        session_token,
+        identity.device_id,
+        keypackages,
+    )
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_kp_fetch(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    response = gateway_client.keypackages_fetch(base_url, session_token, args.user_id, args.count)
+    for keypackage in response.get("keypackages", []):
+        sys.stdout.write(f"{keypackage}\n")
+    return 0
+
+
+def handle_gw_dm_create(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    response = gateway_client.room_create(base_url, session_token, args.conv_id, [args.peer_user_id])
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_dm_init_send(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    output = _run_harness_capture(
+        "dm-init",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--peer-keypackage",
+            args.peer_kp_b64,
+            "--group-id",
+            args.group_id,
+            "--seed",
+            str(args.seed),
+        ],
+    )
+    payload = json.loads(_first_nonempty_line(output))
+    welcome = str(payload["welcome"])
+    commit = str(payload["commit"])
+
+    welcome_env = dm_envelope.pack(0x01, welcome)
+    welcome_msg_id = _msg_id_for_env(welcome_env)
+    welcome_response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        args.conv_id,
+        welcome_msg_id,
+        welcome_env,
+    )
+    sys.stdout.write(f"welcome_seq: {welcome_response['seq']}\n")
+
+    commit_env = dm_envelope.pack(0x02, commit)
+    commit_msg_id = _msg_id_for_env(commit_env)
+    commit_response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        args.conv_id,
+        commit_msg_id,
+        commit_env,
+    )
+    sys.stdout.write(f"commit_seq: {commit_response['seq']}\n")
+    return 0
+
+
+def handle_gw_dm_send(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    output = _run_harness_capture(
+        "dm-encrypt",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--plaintext",
+            args.plaintext,
+        ],
+    )
+    ciphertext_b64 = _first_nonempty_line(output)
+    env_b64 = dm_envelope.pack(0x03, ciphertext_b64)
+    msg_id = _msg_id_for_env(env_b64)
+    response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        args.conv_id,
+        msg_id,
+        env_b64,
+    )
+    sys.stdout.write(f"seq: {response['seq']}\n")
+    return 0
+
+
+def handle_gw_dm_tail(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    from_seq = args.from_seq if args.from_seq is not None else gateway_store.get_next_seq(args.conv_id)
+    for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
+        body = event.get("body", {})
+        seq = body.get("seq")
+        env_b64 = body.get("env")
+        if not isinstance(seq, int) or not isinstance(env_b64, str):
+            continue
+        kind, payload_b64 = dm_envelope.unpack(env_b64)
+        if kind == 0x01:
+            _run_harness_capture(
+                "dm-join",
+                [
+                    "--state-dir",
+                    args.state_dir,
+                    "--welcome",
+                    payload_b64,
+                ],
+            )
+        elif kind == 0x02:
+            _run_harness_capture(
+                "dm-commit-apply",
+                [
+                    "--state-dir",
+                    args.state_dir,
+                    "--commit",
+                    payload_b64,
+                ],
+            )
+        elif kind == 0x03:
+            output = _run_harness_capture(
+                "dm-decrypt",
+                [
+                    "--state-dir",
+                    args.state_dir,
+                    "--ciphertext",
+                    payload_b64,
+                ],
+            )
+            plaintext = _first_nonempty_line(output)
+            sys.stdout.write(f"{plaintext}\n")
+        if args.ack:
+            gateway_client.inbox_ack(base_url, session_token, args.conv_id, seq)
+            gateway_store.update_next_seq(args.conv_id, seq)
+    return 0
+
+
 def handle_dm_keypackage(args: argparse.Namespace) -> int:
     return run_harness(
         "dm-keypackage",
@@ -408,6 +659,18 @@ def main(argv: list[str] | None = None) -> int:
             return handle_gw_ack(args)
         if args.command == "gw-tail":
             return handle_gw_tail(args)
+        if args.command == "gw-kp-publish":
+            return handle_gw_kp_publish(args)
+        if args.command == "gw-kp-fetch":
+            return handle_gw_kp_fetch(args)
+        if args.command == "gw-dm-create":
+            return handle_gw_dm_create(args)
+        if args.command == "gw-dm-init-send":
+            return handle_gw_dm_init_send(args)
+        if args.command == "gw-dm-send":
+            return handle_gw_dm_send(args)
+        if args.command == "gw-dm-tail":
+            return handle_gw_dm_tail(args)
     except RuntimeError as exc:  # user-facing errors
         sys.stderr.write(f"Error: {exc}\n")
         return 1

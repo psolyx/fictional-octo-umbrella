@@ -68,6 +68,67 @@ def inbox_send(
     return {"seq": int(response["seq"])}
 
 
+def keypackages_publish(
+    base_url: str,
+    session_token: str,
+    device_id: str,
+    keypackages: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"device_id": device_id, "keypackages": keypackages}
+    return _post_json(
+        _build_url(base_url, "/v1/keypackages"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def keypackages_fetch(
+    base_url: str,
+    session_token: str,
+    user_id: str,
+    count: int,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"user_id": user_id, "count": count}
+    return _post_json(
+        _build_url(base_url, "/v1/keypackages/fetch"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def keypackages_rotate(
+    base_url: str,
+    session_token: str,
+    device_id: str,
+    revoke: bool,
+    replacement: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "device_id": device_id,
+        "revoke": revoke,
+        "replacement": replacement,
+    }
+    return _post_json(
+        _build_url(base_url, "/v1/keypackages/rotate"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_create(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/create"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict[str, object]:
     payload = {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": seq}}
     _post_json(
