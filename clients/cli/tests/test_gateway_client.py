@@ -1,8 +1,9 @@
 import json
+from pathlib import Path
 from typing import Iterable
 from unittest import mock
 
-from cli_app import gateway_client
+from cli_app import gateway_client, mls_poc
 
 
 class DummyResponse:
@@ -181,3 +182,18 @@ def test_room_create_posts_expected_payload():
         response = gateway_client.room_create("https://gw.test", "st", "c_123", ["u_456"])
 
     assert response == {"status": "ok"}
+
+
+def test_load_session_uses_explicit_path():
+    session_path = Path("session.json")
+    with mock.patch("cli_app.mls_poc.gateway_store.load_session") as load_session:
+        load_session.return_value = {
+            "base_url": "https://gw.test",
+            "session_token": "st",
+            "resume_token": "rt",
+        }
+        base_url, session_token = mls_poc._load_session(None, session_path)
+
+    load_session.assert_called_once_with(session_path)
+    assert base_url == "https://gw.test"
+    assert session_token == "st"

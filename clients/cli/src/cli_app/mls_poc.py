@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Tuple
 
-from cli_app import dm_envelope, gateway_client, gateway_store, identity_store
+from cli_app import dm_envelope, gateway_client, gateway_store, identity_store, profile_paths
 
 MIN_GO_VERSION: Tuple[int, int] = (1, 22)
 
@@ -164,6 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     default_vector = repo_root / "tools" / "mls_harness" / "vectors" / "dm_smoke_v1.json"
 
     parser = argparse.ArgumentParser(description="MLS DM POC using the Go harness")
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="Profile name for storing identity/session/cursor state (default: default)",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     vectors = subparsers.add_parser("vectors", help="Verify deterministic vector output")
@@ -186,8 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     whoami = subparsers.add_parser("whoami", help="Show local Polycentric identity and device")
     whoami.add_argument(
         "--identity-file",
-        default=str(identity_store.DEFAULT_IDENTITY_PATH),
-        help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
+        default=None,
+        help="Path to identity JSON (defaults to the profile identity path)",
     )
 
     gw_start = subparsers.add_parser("gw-start", help="Start a gateway session and persist tokens")
@@ -313,7 +318,7 @@ def handle_soak(args: argparse.Namespace) -> int:
 
 
 def handle_whoami(args: argparse.Namespace) -> int:
-    path = Path(args.identity_file)
+    path = Path(args.identity_file) if args.identity_file else args.profile_paths.identity_path
     identity = identity_store.load_or_create_identity(path)
     auth_body = identity.auth_token
     if identity.auth_token.startswith("Bearer "):
@@ -327,8 +332,8 @@ def handle_whoami(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_session(base_url: str | None) -> tuple[str, str]:
-    stored = gateway_store.load_session()
+def _load_session(base_url: str | None, session_path: Path) -> tuple[str, str]:
+    stored = gateway_store.load_session(session_path)
     if stored is None:
         raise RuntimeError("No stored gateway session. Run gw-start or gw-resume first.")
 
@@ -337,30 +342,40 @@ def _load_session(base_url: str | None) -> tuple[str, str]:
 
 
 def handle_gw_start(args: argparse.Namespace) -> int:
-    identity = identity_store.load_or_create_identity(identity_store.DEFAULT_IDENTITY_PATH)
+    identity = identity_store.load_or_create_identity(args.profile_paths.identity_path)
     response = gateway_client.session_start(
         args.base_url,
         identity.auth_token,
         identity.device_id,
         identity.device_credential,
     )
-    gateway_store.save_session(args.base_url, response["session_token"], response["resume_token"])
+    gateway_store.save_session(
+        args.base_url,
+        response["session_token"],
+        response["resume_token"],
+        args.profile_paths.session_path,
+    )
     sys.stdout.write("Gateway session started.\n")
     return 0
 
 
 def handle_gw_resume(args: argparse.Namespace) -> int:
-    stored = gateway_store.load_session()
+    stored = gateway_store.load_session(args.profile_paths.session_path)
     if stored is None:
         raise RuntimeError("No stored gateway session. Run gw-start first.")
     response = gateway_client.session_resume(args.base_url, stored["resume_token"])
-    gateway_store.save_session(args.base_url, response["session_token"], response["resume_token"])
+    gateway_store.save_session(
+        args.base_url,
+        response["session_token"],
+        response["resume_token"],
+        args.profile_paths.session_path,
+    )
     sys.stdout.write("Gateway session resumed.\n")
     return 0
 
 
 def handle_gw_send(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     response = gateway_client.inbox_send(
         base_url,
         session_token,
@@ -373,24 +388,28 @@ def handle_gw_send(args: argparse.Namespace) -> int:
 
 
 def handle_gw_ack(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     gateway_client.inbox_ack(base_url, session_token, args.conv_id, args.seq)
-    next_seq = gateway_store.update_next_seq(args.conv_id, args.seq)
+    next_seq = gateway_store.update_next_seq(args.conv_id, args.seq, args.profile_paths.cursors_path)
     sys.stdout.write(f"next_seq: {next_seq}\n")
     return 0
 
 
 def handle_gw_tail(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
-    from_seq = args.from_seq if args.from_seq is not None else gateway_store.get_next_seq(args.conv_id)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    from_seq = (
+        args.from_seq
+        if args.from_seq is not None
+        else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
+    )
     for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
         sys.stdout.write(f"{json.dumps(event, sort_keys=True)}\n")
     return 0
 
 
 def handle_gw_kp_publish(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
-    identity = identity_store.load_or_create_identity(identity_store.DEFAULT_IDENTITY_PATH)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    identity = identity_store.load_or_create_identity(args.profile_paths.identity_path)
     keypackages: list[str] = []
     for offset in range(args.count):
         output = _run_harness_capture(
@@ -416,7 +435,7 @@ def handle_gw_kp_publish(args: argparse.Namespace) -> int:
 
 
 def handle_gw_kp_fetch(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     response = gateway_client.keypackages_fetch(base_url, session_token, args.user_id, args.count)
     for keypackage in response.get("keypackages", []):
         sys.stdout.write(f"{keypackage}\n")
@@ -424,14 +443,14 @@ def handle_gw_kp_fetch(args: argparse.Namespace) -> int:
 
 
 def handle_gw_dm_create(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     response = gateway_client.room_create(base_url, session_token, args.conv_id, [args.peer_user_id])
     sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
     return 0
 
 
 def handle_gw_dm_init_send(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     output = _run_harness_capture(
         "dm-init",
         [
@@ -474,7 +493,7 @@ def handle_gw_dm_init_send(args: argparse.Namespace) -> int:
 
 
 def handle_gw_dm_send(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     output = _run_harness_capture(
         "dm-encrypt",
         [
@@ -499,8 +518,12 @@ def handle_gw_dm_send(args: argparse.Namespace) -> int:
 
 
 def handle_gw_dm_tail(args: argparse.Namespace) -> int:
-    base_url, session_token = _load_session(args.base_url)
-    from_seq = args.from_seq if args.from_seq is not None else gateway_store.get_next_seq(args.conv_id)
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    from_seq = (
+        args.from_seq
+        if args.from_seq is not None
+        else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
+    )
     for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
         body = event.get("body", {})
         seq = body.get("seq")
@@ -542,7 +565,7 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
             sys.stdout.write(f"{plaintext}\n")
         if args.ack:
             gateway_client.inbox_ack(base_url, session_token, args.conv_id, seq)
-            gateway_store.update_next_seq(args.conv_id, seq)
+            gateway_store.update_next_seq(args.conv_id, seq, args.profile_paths.cursors_path)
     return 0
 
 
@@ -627,6 +650,7 @@ def handle_dm_decrypt(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.profile_paths = profile_paths.resolve_profile_paths(args.profile)
 
     try:
         if args.command == "vectors":
