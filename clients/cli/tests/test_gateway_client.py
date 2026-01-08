@@ -1,4 +1,7 @@
+import argparse
+import io
 import json
+import socket
 from pathlib import Path
 from typing import Iterable
 from unittest import mock
@@ -22,6 +25,17 @@ class DummyResponse:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+
+class DummyTimeoutResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        raise socket.timeout()
 
 
 def test_session_start_posts_expected_payload_and_headers():
@@ -103,9 +117,11 @@ def test_sse_tail_parses_data_lines():
             b"",
             [
                 b"event: conv.event\n",
-                b"data: {\"v\":1,\"t\":\"conv.event\",\"body\":{\"seq\":9}}\n",
+                b"data: {\"v\":1,\n",
+                b"data: \"t\":\"conv.event\",\"body\":{\"seq\":9}}\n",
                 b"\n",
                 b"data:{\"v\":1,\"t\":\"conv.event\",\"body\":{\"seq\":10}}\n",
+                b"\n",
             ],
         )
 
@@ -116,6 +132,40 @@ def test_sse_tail_parses_data_lines():
         {"v": 1, "t": "conv.event", "body": {"seq": 9}},
         {"v": 1, "t": "conv.event", "body": {"seq": 10}},
     ]
+
+
+def test_sse_tail_honors_max_events():
+    def fake_urlopen(request):
+        return DummyResponse(
+            b"",
+            [
+                b"data: {\"v\":1,\"t\":\"conv.event\",\"body\":{\"seq\":1}}\n",
+                b"\n",
+                b"data: {\"v\":1,\"t\":\"conv.event\",\"body\":{\"seq\":2}}\n",
+                b"\n",
+                b"data: {\"v\":1,\"t\":\"conv.event\",\"body\":{\"seq\":3}}\n",
+                b"\n",
+            ],
+        )
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        events = list(gateway_client.sse_tail("https://gw.test", "st", "c_123", 1, max_events=2))
+
+    assert events == [
+        {"v": 1, "t": "conv.event", "body": {"seq": 1}},
+        {"v": 1, "t": "conv.event", "body": {"seq": 2}},
+    ]
+
+
+def test_sse_tail_exits_cleanly_on_idle_timeout():
+    def fake_urlopen(request, timeout=None):
+        assert timeout == 0.01
+        return DummyTimeoutResponse()
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        events = list(gateway_client.sse_tail("https://gw.test", "st", "c_123", 1, idle_timeout_s=0.01))
+
+    assert events == []
 
 
 def test_keypackage_directory_endpoints():
@@ -168,6 +218,28 @@ def test_keypackage_directory_endpoints():
         "revoke": True,
         "replacement": ["kp2"],
     }
+
+
+def test_gw_kp_fetch_empty_fails_fast():
+    def fake_urlopen(request):
+        return DummyResponse(b'{"keypackages":[]}')
+
+    args = argparse.Namespace(
+        user_id="user-1",
+        count=1,
+        base_url=None,
+        allow_empty=False,
+        profile_paths=mock.Mock(session_path=Path("session.json")),
+    )
+
+    with mock.patch("cli_app.mls_poc._load_session", return_value=("https://gw.test", "st")):
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            stderr = io.StringIO()
+            with mock.patch("sys.stderr", stderr):
+                result = mls_poc.handle_gw_kp_fetch(args)
+
+    assert result == 1
+    assert stderr.getvalue().strip() == "No KeyPackages available for user user-1."
 
 
 def test_room_create_posts_expected_payload():

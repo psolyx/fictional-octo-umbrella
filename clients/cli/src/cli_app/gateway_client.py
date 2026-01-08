@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, Iterator, Optional
@@ -139,14 +141,53 @@ def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict
     return {}
 
 
-def sse_tail(base_url: str, session_token: str, conv_id: str, from_seq: int) -> Iterator[Dict[str, object]]:
+def sse_tail(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    from_seq: int,
+    max_events: Optional[int] = None,
+    idle_timeout_s: Optional[float] = None,
+) -> Iterator[Dict[str, object]]:
     query = urllib.parse.urlencode({"conv_id": conv_id, "from_seq": from_seq})
     url = _build_url(base_url, f"/v1/sse?{query}")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {session_token}"})
-    with urllib.request.urlopen(request) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8").strip("\r\n")
-            if line.startswith("data:"):
-                payload = line[len("data:") :].lstrip()
-                if payload:
-                    yield json.loads(payload)
+    data_lines: list[str] = []
+    emitted = 0
+
+    def _flush_event() -> Optional[Dict[str, object]]:
+        nonlocal data_lines
+        if not data_lines:
+            return None
+        payload = "\n".join(data_lines)
+        data_lines = []
+        if not payload:
+            return None
+        return json.loads(payload)
+
+    try:
+        with urllib.request.urlopen(request, timeout=idle_timeout_s) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").rstrip("\r\n")
+                if line.startswith(":"):
+                    continue
+                if not line:
+                    event = _flush_event()
+                    if event is not None:
+                        yield event
+                        emitted += 1
+                        if max_events is not None and emitted >= max_events:
+                            return
+                    continue
+                if line.startswith("data:"):
+                    payload = line[len("data:") :].lstrip()
+                    data_lines.append(payload)
+        event = _flush_event()
+        if event is not None and (max_events is None or emitted < max_events):
+            yield event
+    except socket.timeout:
+        return
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, socket.timeout):
+            return
+        raise
