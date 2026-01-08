@@ -115,3 +115,69 @@ def test_sse_tail_parses_data_lines():
         {"v": 1, "t": "conv.event", "body": {"seq": 9}},
         {"v": 1, "t": "conv.event", "body": {"seq": 10}},
     ]
+
+
+def test_keypackage_directory_endpoints():
+    calls = {"publish": None, "fetch": None, "rotate": None}
+
+    def fake_urlopen(request):
+        payload = json.loads(request.data.decode("utf-8"))
+        if request.full_url == "https://gw.test/v1/keypackages":
+            calls["publish"] = payload
+            assert request.get_header("Authorization") == "Bearer st"
+            return DummyResponse(b'{"status":"ok"}')
+        if request.full_url == "https://gw.test/v1/keypackages/fetch":
+            calls["fetch"] = payload
+            assert request.get_header("Authorization") == "Bearer st"
+            return DummyResponse(b'{"keypackages":["kp1","kp2"]}')
+        if request.full_url == "https://gw.test/v1/keypackages/rotate":
+            calls["rotate"] = payload
+            assert request.get_header("Authorization") == "Bearer st"
+            return DummyResponse(b'{"status":"ok"}')
+        raise AssertionError("Unexpected request url")
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        publish_response = gateway_client.keypackages_publish(
+            "https://gw.test",
+            "st",
+            "device-1",
+            ["kp1"],
+        )
+        fetch_response = gateway_client.keypackages_fetch(
+            "https://gw.test",
+            "st",
+            "user-1",
+            2,
+        )
+        rotate_response = gateway_client.keypackages_rotate(
+            "https://gw.test",
+            "st",
+            "device-1",
+            True,
+            ["kp2"],
+        )
+
+    assert publish_response == {"status": "ok"}
+    assert fetch_response == {"keypackages": ["kp1", "kp2"]}
+    assert rotate_response == {"status": "ok"}
+    assert calls["publish"] == {"device_id": "device-1", "keypackages": ["kp1"]}
+    assert calls["fetch"] == {"user_id": "user-1", "count": 2}
+    assert calls["rotate"] == {
+        "device_id": "device-1",
+        "revoke": True,
+        "replacement": ["kp2"],
+    }
+
+
+def test_room_create_posts_expected_payload():
+    def fake_urlopen(request):
+        assert request.full_url == "https://gw.test/v1/rooms/create"
+        assert request.get_header("Authorization") == "Bearer st"
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload == {"conv_id": "c_123", "members": ["u_456"]}
+        return DummyResponse(b'{"status":"ok"}')
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        response = gateway_client.room_create("https://gw.test", "st", "c_123", ["u_456"])
+
+    assert response == {"status": "ok"}
