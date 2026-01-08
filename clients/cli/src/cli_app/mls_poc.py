@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -11,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Tuple
 
-from cli_app import identity_store
+from cli_app import gateway_client, gateway_store, identity_store
 
 MIN_GO_VERSION: Tuple[int, int] = (1, 22)
 
@@ -134,6 +135,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to identity JSON (default: ~/.polycentric_demo/identity.json)",
     )
 
+    gw_start = subparsers.add_parser("gw-start", help="Start a gateway session and persist tokens")
+    gw_start.add_argument("--base-url", required=True, help="Gateway base URL (required)")
+
+    gw_resume = subparsers.add_parser("gw-resume", help="Resume a gateway session and rotate tokens")
+    gw_resume.add_argument("--base-url", required=True, help="Gateway base URL (required)")
+
+    gw_send = subparsers.add_parser("gw-send", help="Send an encrypted envelope to the gateway inbox")
+    gw_send.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_send.add_argument("--msg-id", required=True, help="Message id (required)")
+    gw_send.add_argument("--env-b64", required=True, help="Ciphertext envelope (base64, required)")
+    gw_send.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_ack = subparsers.add_parser("gw-ack", help="Acknowledge a conversation sequence")
+    gw_ack.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_ack.add_argument("--seq", required=True, type=int, help="Sequence number to acknowledge (required)")
+    gw_ack.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_tail = subparsers.add_parser("gw-tail", help="Tail gateway SSE replay for a conversation")
+    gw_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_tail.add_argument("--from-seq", type=int, help="Sequence to replay from (defaults to stored cursor)")
+    gw_tail.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
     dm_keypackage = subparsers.add_parser("dm-keypackage", help="Generate a DM KeyPackage")
     dm_keypackage.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
     dm_keypackage.add_argument("--name", required=True, help="Participant name (required)")
@@ -208,6 +231,67 @@ def handle_whoami(args: argparse.Namespace) -> int:
     sys.stdout.write(f"auth_token: {auth_body}\n")
     sys.stdout.write(f"device_id: {identity.device_id}\n")
     sys.stdout.write(f"identity_file: {path.expanduser()}\n")
+    return 0
+
+
+def _load_session(base_url: str | None) -> tuple[str, str]:
+    stored = gateway_store.load_session()
+    if stored is None:
+        raise RuntimeError("No stored gateway session. Run gw-start or gw-resume first.")
+
+    resolved_base_url = base_url or stored["base_url"]
+    return resolved_base_url, stored["session_token"]
+
+
+def handle_gw_start(args: argparse.Namespace) -> int:
+    identity = identity_store.load_or_create_identity(identity_store.DEFAULT_IDENTITY_PATH)
+    response = gateway_client.session_start(
+        args.base_url,
+        identity.auth_token,
+        identity.device_id,
+        identity.device_credential,
+    )
+    gateway_store.save_session(args.base_url, response["session_token"], response["resume_token"])
+    sys.stdout.write("Gateway session started.\n")
+    return 0
+
+
+def handle_gw_resume(args: argparse.Namespace) -> int:
+    stored = gateway_store.load_session()
+    if stored is None:
+        raise RuntimeError("No stored gateway session. Run gw-start first.")
+    response = gateway_client.session_resume(args.base_url, stored["resume_token"])
+    gateway_store.save_session(args.base_url, response["session_token"], response["resume_token"])
+    sys.stdout.write("Gateway session resumed.\n")
+    return 0
+
+
+def handle_gw_send(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        args.conv_id,
+        args.msg_id,
+        args.env_b64,
+    )
+    sys.stdout.write(f"seq: {response['seq']}\n")
+    return 0
+
+
+def handle_gw_ack(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    gateway_client.inbox_ack(base_url, session_token, args.conv_id, args.seq)
+    next_seq = gateway_store.update_next_seq(args.conv_id, args.seq)
+    sys.stdout.write(f"next_seq: {next_seq}\n")
+    return 0
+
+
+def handle_gw_tail(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url)
+    from_seq = args.from_seq if args.from_seq is not None else gateway_store.get_next_seq(args.conv_id)
+    for event in gateway_client.sse_tail(base_url, session_token, args.conv_id, from_seq):
+        sys.stdout.write(f"{json.dumps(event, sort_keys=True)}\n")
     return 0
 
 
@@ -314,6 +398,16 @@ def main(argv: list[str] | None = None) -> int:
             return handle_dm_encrypt(args)
         if args.command == "dm-decrypt":
             return handle_dm_decrypt(args)
+        if args.command == "gw-start":
+            return handle_gw_start(args)
+        if args.command == "gw-resume":
+            return handle_gw_resume(args)
+        if args.command == "gw-send":
+            return handle_gw_send(args)
+        if args.command == "gw-ack":
+            return handle_gw_ack(args)
+        if args.command == "gw-tail":
+            return handle_gw_tail(args)
     except RuntimeError as exc:  # user-facing errors
         sys.stderr.write(f"Error: {exc}\n")
         return 1
