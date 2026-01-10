@@ -25,6 +25,40 @@
   const db_name = 'gateway_web_demo';
   const store_name = 'settings';
   const next_id = () => `msg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const dm_kind_labels = {
+    1: 'welcome',
+    2: 'commit',
+    3: 'app_ciphertext',
+  };
+
+  const bytes_to_hex = (bytes) =>
+    Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+
+  const bytes_to_base64 = (bytes) => {
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 1) {
+      binary += String.fromCharCode(bytes[offset]);
+    }
+    return btoa(binary);
+  };
+
+  const base64_to_bytes = (value) => {
+    try {
+      const binary = atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let offset = 0; offset < binary.length; offset += 1) {
+        bytes[offset] = binary.charCodeAt(offset);
+      }
+      return bytes;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const sha256_hex = async (bytes) => {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return bytes_to_hex(new Uint8Array(digest));
+  };
 
   const append_log = (line) => {
     const now = new Date().toISOString();
@@ -50,7 +84,21 @@
     if (body.origin_gateway) {
       parts.push(`origin_gateway=${body.origin_gateway}`);
     }
-    const env_display = typeof body.env !== 'undefined' ? JSON.stringify(body.env) : '';
+    let env_display = typeof body.env !== 'undefined' ? JSON.stringify(body.env) : '';
+    if (typeof body.env === 'string') {
+      const env_bytes = base64_to_bytes(body.env);
+      if (env_bytes && env_bytes.length >= 1) {
+        const kind = env_bytes[0];
+        const payload_bytes = env_bytes.slice(1);
+        const payload_b64 = bytes_to_base64(payload_bytes);
+        const kind_label = dm_kind_labels[kind] || `unknown(0x${kind.toString(16).padStart(2, '0')})`;
+        const payload_prefix = payload_b64.slice(0, 32);
+        const payload_suffix = payload_b64.length > payload_prefix.length ? '...' : '';
+        env_display =
+          `dm_env(kind=${kind_label} payload_len=${payload_bytes.length}` +
+          ` payload_b64_prefix=${payload_prefix}${payload_suffix})`;
+      }
+    }
     entry.textContent = `${parts.join(' ')} env=${env_display}`;
     event_log.prepend(entry);
   };
@@ -316,12 +364,20 @@
     client.ack(conv_id_input.value.trim(), seq_value);
   });
 
-  send_btn.addEventListener('click', () => {
-    client.send_ciphertext(
-      conv_id_input.value.trim(),
-      msg_id_input.value.trim(),
-      ciphertext_input.value.trim()
-    );
+  send_btn.addEventListener('click', async () => {
+    const conv_id = conv_id_input.value.trim();
+    const ciphertext = ciphertext_input.value.trim();
+    let msg_id = msg_id_input.value.trim();
+    if (!msg_id) {
+      const env_bytes = base64_to_bytes(ciphertext);
+      if (!env_bytes) {
+        append_log('invalid base64 ciphertext');
+        return;
+      }
+      msg_id = await sha256_hex(env_bytes);
+      msg_id_input.value = msg_id;
+    }
+    client.send_ciphertext(conv_id, msg_id, ciphertext);
   });
 
   clear_log_btn.addEventListener('click', () => {
