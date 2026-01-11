@@ -14,6 +14,12 @@
   const seq_input = document.getElementById('seq');
   const msg_id_input = document.getElementById('msg_id');
   const ciphertext_input = document.getElementById('ciphertext_input');
+  let social_user_id_input = null;
+  let social_limit_input = null;
+  let social_after_hash_input = null;
+  let social_fetch_btn = null;
+  let social_log_pre = null;
+  let social_list = null;
 
   const connect_start_btn = document.getElementById('connect_start');
   const connect_resume_btn = document.getElementById('connect_resume');
@@ -64,6 +70,131 @@
     const now = new Date().toISOString();
     debug_log.value += `[${now}] ${line}\n`;
     debug_log.scrollTop = debug_log.scrollHeight;
+  };
+
+  const reset_social_output = () => {
+    if (social_log_pre) {
+      social_log_pre.textContent = '';
+    }
+    if (social_list) {
+      social_list.innerHTML = '';
+    }
+  };
+
+  const render_social_error = (message) => {
+    reset_social_output();
+    if (social_log_pre) {
+      social_log_pre.textContent = `error: ${message}`;
+    }
+  };
+
+  const render_social_events = (events) => {
+    reset_social_output();
+    if (!Array.isArray(events)) {
+      render_social_error('invalid response payload');
+      return;
+    }
+    if (social_log_pre) {
+      social_log_pre.textContent = JSON.stringify(events, null, 2);
+    }
+    if (!social_list) {
+      return;
+    }
+    if (events.length === 0) {
+      const empty_item = document.createElement('li');
+      empty_item.textContent = 'no events';
+      social_list.appendChild(empty_item);
+      return;
+    }
+    events.forEach((event) => {
+      const list_item = document.createElement('li');
+      if (!event || typeof event !== 'object') {
+        list_item.textContent = 'invalid event';
+        social_list.appendChild(list_item);
+        return;
+      }
+      const parts = [];
+      if (event.user_id) {
+        parts.push(`user_id=${event.user_id}`);
+      }
+      if (event.event_hash) {
+        parts.push(`event_hash=${String(event.event_hash).slice(0, 12)}`);
+      }
+      if (event.kind) {
+        parts.push(`kind=${event.kind}`);
+      }
+      if (typeof event.ts_ms !== 'undefined') {
+        parts.push(`ts_ms=${event.ts_ms}`);
+      }
+      list_item.textContent = parts.length > 0 ? parts.join(' ') : 'event';
+      social_list.appendChild(list_item);
+    });
+  };
+
+  const to_social_base_url = (gateway_url) => {
+    if (!gateway_url) {
+      return null;
+    }
+    if (gateway_url.startsWith('ws://')) {
+      return `http://${gateway_url.slice(5)}`;
+    }
+    if (gateway_url.startsWith('wss://')) {
+      return `https://${gateway_url.slice(6)}`;
+    }
+    if (gateway_url.startsWith('http://') || gateway_url.startsWith('https://')) {
+      return gateway_url;
+    }
+    return null;
+  };
+
+  const fetch_social_events = async () => {
+    if (!social_user_id_input || !social_limit_input || !social_after_hash_input) {
+      append_log('social feed inputs missing');
+      return;
+    }
+    const user_id = social_user_id_input.value.trim();
+    const limit_value = Number(social_limit_input.value);
+    const after_hash = social_after_hash_input.value.trim();
+    if (!user_id) {
+      render_social_error('user_id required');
+      return;
+    }
+    if (Number.isNaN(limit_value) || limit_value <= 0) {
+      render_social_error('limit must be a positive number');
+      return;
+    }
+    const gateway_url = gateway_url_input.value.trim();
+    const base_url = to_social_base_url(gateway_url);
+    if (!base_url) {
+      render_social_error('gateway_url must start with ws:// or wss://');
+      return;
+    }
+    const request_url = new URL('/v1/social/events', base_url);
+    request_url.searchParams.set('user_id', user_id);
+    request_url.searchParams.set('limit', String(limit_value));
+    if (after_hash) {
+      request_url.searchParams.set('after_hash', after_hash);
+    }
+    try {
+      const response = await fetch(request_url.toString(), { method: 'GET' });
+      if (!response.ok) {
+        render_social_error(`http ${response.status} ${response.statusText}`);
+        return;
+      }
+      const payload = await response.json();
+      render_social_events(payload && payload.events ? payload.events : []);
+    } catch (err) {
+      render_social_error(err.message || 'fetch failed');
+    }
+    write_setting('social_user_id', user_id).catch((err) =>
+      append_log(`failed to persist social_user_id: ${err.message}`)
+    );
+    write_setting('social_limit', limit_value).catch((err) =>
+      append_log(`failed to persist social_limit: ${err.message}`)
+    );
+    write_setting('social_after_hash', after_hash).catch((err) =>
+      append_log(`failed to persist social_after_hash: ${err.message}`)
+    );
   };
 
   const render_event = (body) => {
@@ -358,6 +489,75 @@
 
   const client = new GatewayWsClient();
 
+  const build_social_panel = () => {
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = 'Social feed';
+    fieldset.appendChild(legend);
+
+    const user_id_label = document.createElement('label');
+    user_id_label.textContent = 'user_id';
+    const user_id_input = document.createElement('input');
+    user_id_input.type = 'text';
+    user_id_input.id = 'social_user_id';
+    user_id_input.size = 32;
+    user_id_label.appendChild(user_id_input);
+    fieldset.appendChild(user_id_label);
+
+    const limit_label = document.createElement('label');
+    limit_label.textContent = 'limit';
+    const limit_input = document.createElement('input');
+    limit_input.type = 'number';
+    limit_input.id = 'social_limit';
+    limit_input.min = '1';
+    limit_input.value = '50';
+    limit_label.appendChild(limit_input);
+    fieldset.appendChild(limit_label);
+
+    const after_hash_label = document.createElement('label');
+    after_hash_label.textContent = 'after_hash (optional)';
+    const after_hash_input = document.createElement('input');
+    after_hash_input.type = 'text';
+    after_hash_input.id = 'social_after_hash';
+    after_hash_input.size = 48;
+    after_hash_label.appendChild(after_hash_input);
+    fieldset.appendChild(after_hash_label);
+
+    const button_row = document.createElement('div');
+    button_row.className = 'button-row';
+    const fetch_btn = document.createElement('button');
+    fetch_btn.id = 'social_fetch_events';
+    fetch_btn.textContent = 'Fetch events';
+    button_row.appendChild(fetch_btn);
+    fieldset.appendChild(button_row);
+
+    const output_label = document.createElement('p');
+    output_label.textContent = 'Events';
+    fieldset.appendChild(output_label);
+
+    const list = document.createElement('ul');
+    list.id = 'social_list';
+    fieldset.appendChild(list);
+
+    const pre = document.createElement('pre');
+    pre.id = 'social_log';
+    fieldset.appendChild(pre);
+
+    const event_fieldset = event_log.closest('fieldset');
+    if (event_fieldset && event_fieldset.parentNode) {
+      event_fieldset.parentNode.insertBefore(fieldset, event_fieldset);
+    } else {
+      document.body.appendChild(fieldset);
+    }
+
+    social_user_id_input = user_id_input;
+    social_limit_input = limit_input;
+    social_after_hash_input = after_hash_input;
+    social_fetch_btn = fetch_btn;
+    social_log_pre = pre;
+    social_list = list;
+  };
+
   const hydrate_inputs = async () => {
     try {
       const saved_url = await read_setting('gateway_url');
@@ -367,6 +567,24 @@
       const saved_resume_token = await read_setting('resume_token');
       if (saved_resume_token) {
         resume_token_input.value = saved_resume_token;
+      }
+      if (social_user_id_input) {
+        const saved_user_id = await read_setting('social_user_id');
+        if (saved_user_id) {
+          social_user_id_input.value = saved_user_id;
+        }
+      }
+      if (social_limit_input) {
+        const saved_limit = await read_setting('social_limit');
+        if (typeof saved_limit === 'number' && !Number.isNaN(saved_limit)) {
+          social_limit_input.value = String(saved_limit);
+        }
+      }
+      if (social_after_hash_input) {
+        const saved_after_hash = await read_setting('social_after_hash');
+        if (saved_after_hash) {
+          social_after_hash_input.value = saved_after_hash;
+        }
       }
     } catch (err) {
       append_log(`failed to hydrate inputs: ${err.message}`);
@@ -454,5 +672,11 @@
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
   });
 
+  build_social_panel();
+  if (social_fetch_btn) {
+    social_fetch_btn.addEventListener('click', () => {
+      fetch_social_events().catch((err) => render_social_error(err.message || 'fetch failed'));
+    });
+  }
   hydrate_inputs();
 })();
