@@ -1,58 +1,73 @@
-# Web client bootstrap threat model
+# device bootstrap threat model (web client)
 
-This document focuses on device bootstrap for the static web client. The client is ciphertext-only until MLS binding lands; key material is derived and stored locally without server access to plaintext.
+## 1) scope and non-goals
+- scope: web client device bootstrap, including identity and device key material handling, resume_token handling, and reconnect flows through the gateway.
+- scope includes storage choices in the browser and how they interact with mls state and ciphertext replay.
+- non-goals: designing new protocol fields, changing gateway behavior, or altering mls wire formats.
+- non-goals: plaintext handling, message search, or server-side analytics.
 
-## Scope and assumptions
-- Web client runs in modern browsers without additional packages; only WebSocket connectivity to the gateway is required.
-- The UI stays frameworkless/static (plain JS/HTML/CSS) with no Node/npm toolchain in the critical path.
-- User obtains a bootstrap secret through an out-of-band channel (QR code or one-time alphanumeric code) and uses it to start a session.
-- Browser storage uses IndexedDB for long-lived secrets and session state.
-- Gateway stores/forwards ciphertext only; MLS enrollment and signature verification will be added later.
+## 2) assets
+- identity keys (polycentric system key pair) bound to a user identity.
+- device credentials (mls credential and signature key pair).
+- mls state and epoch secrets.
+- key_packages used for onboarding and multi_device joins.
+- cursors and sequence tracking (next_seq and from_seq).
+- conversation ciphertext and envelopes stored for offline delivery.
+- resume_token used to resume a session with the gateway.
 
-## Assets
-- Bootstrap secret (QR/one-time code) used to authenticate the first session.
-- Resume tokens and pending outbound ciphertext queued locally.
-- Future MLS key material (identity key, signature keys, group states) stored in IndexedDB.
+## 3) trust boundaries
+- browser: trusted to enforce origin isolation but not trusted against xss or malicious extensions.
+- gateway: stores and forwards ciphertext only; not trusted with plaintext or mls secrets.
+- storage: browser storage is untrusted against local compromise and rollback.
+- network: untrusted; must assume active attackers and tls termination at cdn edges.
+- cdn: untrusted for confidentiality; trusted only for availability and routing.
 
-## Adversaries and capabilities
-- Network attackers who can observe/modify traffic between browser and gateway until TLS is established.
-- Malicious scripts injected via XSS or compromised extensions.
-- Phishing pages pretending to be the web client.
-- Physical access to an unlocked device with a running session.
+## 4) adversary models
+- malicious javascript (xss or supply chain injection in static assets).
+- malicious browser extension with page or storage access.
+- compromised device (malware or physical access).
+- network attacker (mitm, replay, injection, or downgrade attempts).
+- malicious gateway or operator (metadata inspection, selective dropping, replay).
 
-## Bootstrap flows
-- **QR code**: user scans a QR containing the bootstrap secret on a trusted device, transferring it to the browser via clipboard or camera capture. The secret must be displayed only long enough for the scan and never cached in plaintext logs.
-- **One-time code**: user types a short-lived alphanumeric code. The code should be rate-limited on the gateway and accepted once.
-- After bootstrap, the client requests a `resume_token` for future reconnects and stores it in IndexedDB.
+## 5) device bootstrap flows and failure modes
 
-## Cross-device trust
-- When adding a new browser, verify the device fingerprint (user agent + origin + timestamp) on the originating trusted device before issuing a new bootstrap secret.
-- Require user confirmation (e.g., approve on an existing device) before the gateway accepts the new resume token binding.
-- Display the list of active devices with last-seen metadata so users can revoke old resume tokens.
+### initial provisioning
+- flow: first device generates identity keys and a device credential, registers key_packages, and establishes mls state for new conversations.
+- failure modes: key loss, partial writes of mls state, or replayed bootstrap responses.
+- mitigations: atomic storage writes with versioning, use of monotonic counters in mls state, and strict validation of server responses.
 
-## Storage model (IndexedDB)
-- Store resume tokens, last-used gateway URL, pending ciphertext queue, and MLS state (when available) in IndexedDB with origin isolation.
-- Avoid localStorage/sessionStorage for secrets to reduce accidental leakage.
-- Protect against partial writes: write to a new object store entry and swap only after fsync-equivalent completion.
-- Provide a "clear local state" control to delete IndexedDB records and force re-bootstrap.
+### resume and reconnect
+- flow: device reconnects using resume_token, requests replay from from_seq, and advances cursors with next_seq.
+- failure modes: token theft, replayed or reordered responses, and cursor rollback.
+- mitigations: short-lived resume_token, bound to device identity and origin, and monotonic cursor enforcement to ignore stale replies.
 
-## Key handling and confidentiality
-- Keep bootstrap secrets and resume tokens in memory only as long as needed; clear form fields after use.
-- Never send plaintext or derived MLS keys to the gateway; only ciphertext leaves the browser.
-- Use Web Crypto for key generation once MLS arrives; avoid exporting raw keys unless explicitly requested by the user.
+### multi_device separation
+- flow: each device maintains independent credentials and mls state; joins are authenticated using key_packages and in-group commits.
+- failure modes: device state mixup, shared storage leakage, or cross_device rollback.
+- mitigations: per_device storage namespaces, explicit device_id labeling, and refusing to load mls state from a different device context.
 
-## Phishing defenses
-- Emphasize the canonical origin (e.g., `https://app.example`) in UI copy and onboarding instructions.
-- Encourage users to verify TLS padlock and origin before scanning a QR or typing a one-time code.
-- Consider binding bootstrap secrets to expected origin metadata so stolen codes cannot be redeemed on other origins.
+## 6) storage model and mitigations
 
-## XSS and content security policy
-- Enforce a strict Content Security Policy when the app is hosted: disallow inline scripts/styles, restrict script sources to the first-party origin, and set `connect-src` to `self` plus explicit `ws:`/`wss:` endpoints used for the gateway.
-- Keep `eval` disabled; when the MLS WebAssembly binding arrives, prefer adding `'wasm-unsafe-eval'` to `script-src` instead of loosening to `unsafe-eval`.
-- Escape all rendered text from gateway events; do not inject HTML from ciphertext or metadata.
-- Avoid third-party analytics/ads that widen the attack surface.
+### what is stored
+- encrypted mls state, device credentials, key_packages, and minimal cursor state.
+- cached ciphertext envelopes required for offline replay.
 
-## Recovery and reset
-- Provide a recovery path when IndexedDB is lost: allow re-bootstrap with a fresh QR/one-time code and invalidate old resume tokens.
-- Add a "reset all devices" flow that revokes every resume token and requires new bootstrap secrets for each device.
-- Offer a "panic" action to wipe local IndexedDB and cached data immediately if compromise is suspected.
+### what must not be stored
+- plaintext messages, plaintext mls secrets, raw unencrypted key material, or any derived contact graph.
+
+### integrity and rollback
+- store mls state with version and epoch metadata to detect rollback.
+- reject older epochs and cursors; only advance next_seq monotonically.
+- record a hash of the latest accepted state to detect tampering in local storage.
+
+## 7) web-specific mitigations
+- csp baseline: default-src 'self'; connect-src 'self' https: wss: to allow websocket and sse; object-src 'none'; base-uri 'none'; frame-ancestors 'none'.
+- script-src should be 'self' with no unsafe-eval; add 'wasm-unsafe-eval' only if webassembly mls requires it.
+- no dynamic code loading from remote origins; static assets are pinned and integrity checked when possible.
+- avoid exposing secrets to service workers or shared storage; prefer per_origin storage with strict access.
+
+## 8) open risks and follow-ups
+- interop test suite covering web and cli clients in shared conversations.
+- formal review of webassembly mls binding security and constant-time behavior.
+- storage hardening for rollback resistance across browser restarts and upgrades.
+- recovery flow for lost devices without reusing compromised credentials.
