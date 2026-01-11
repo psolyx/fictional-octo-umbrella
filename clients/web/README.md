@@ -39,7 +39,12 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
 The DM demo uses local-only plaintext inputs/outputs for proof-of-life and does not send plaintext to the gateway. The WASM binary is generated locally and ignored by git; do not commit `clients/web/vendor/*.wasm`.
 
 ## Recommended CSP
-- Baseline (no WASM yet):
-  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; base-uri 'self'; form-action 'self'`
-  - The static files load without inline scripts or styles, and WebSocket connectivity is limited to the current origin plus explicit `ws:`/`wss:` endpoints.
-- When adding the MLS WASM binding later, prefer extending `script-src` with `'wasm-unsafe-eval'` instead of enabling `unsafe-eval`.
+The web client ships with a CSP enforced via `<meta http-equiv>` in `index.html`. The current policy string is:
+`default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`
+
+### Meta CSP limitations
+- HTTP response headers are preferred for CSP; `<meta http-equiv>` is acceptable for this static demo, but not every directive is enforced when delivered via meta.
+- `frame-ancestors` is **not** enforced when CSP is delivered via `<meta http-equiv>`; to enforce it, configure the CSP header at your server/CDN.
+
+### Why `connect-src` includes `ws:`/`wss:`
+`connect-src` governs WebSocket and EventSource (SSE) endpoints. To allow realtime gateway connections, it must include `ws:`/`wss:` (in addition to the current origin).
