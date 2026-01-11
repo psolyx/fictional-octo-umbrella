@@ -53,7 +53,6 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
         "--user_id",
         required=False,
         default=None,
-        nargs="?",
         help="user_id to fetch; defaults to the local identity",
     )
     fetch_parser.add_argument("--limit", type=int, default=20, help="max events to return")
