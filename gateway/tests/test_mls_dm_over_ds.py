@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import importlib
 import importlib.metadata
 import json
@@ -52,6 +54,22 @@ async def read_sse_event(response, timeout: float = 1.0):
             event_type = text[len("event:") :].strip()
         elif text.startswith("data:"):
             data = json.loads(text[len("data:") :].strip())
+
+
+def pack_dm_env(kind: int, payload_b64: str) -> str:
+    env_bytes = bytes([kind]) + base64.b64decode(payload_b64, validate=True)
+    return base64.b64encode(env_bytes).decode("utf-8")
+
+
+def unpack_dm_env(env_b64: str) -> Tuple[int, str]:
+    env_bytes = base64.b64decode(env_b64, validate=True)
+    kind = env_bytes[0]
+    payload_b64 = base64.b64encode(env_bytes[1:]).decode("utf-8")
+    return kind, payload_b64
+
+
+def msg_id_for_env(env_b64: str) -> str:
+    return hashlib.sha256(base64.b64decode(env_b64, validate=True)).hexdigest()
 
 
 class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
@@ -211,11 +229,16 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(joiner_sse.status, 200)
 
             expected_seq = 1
+            welcome_env = pack_dm_env(1, init_payload["welcome"])
             welcome_frame = {
                 "v": 1,
                 "t": "conv.send",
                 "id": "welcome1",
-                "body": {"conv_id": conv_id, "msg_id": "welcome", "env": init_payload["welcome"]},
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(welcome_env),
+                    "env": welcome_env,
+                },
             }
             welcome_resp = await self._post_inbox(ready_initiator["session_token"], welcome_frame)
             self.assertEqual(welcome_resp.status, 200)
@@ -228,16 +251,28 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(evt_type_join, "conv.event")
             self.assertEqual(welcome_evt_init["body"]["seq"], expected_seq)
             self.assertEqual(welcome_evt_join["body"]["seq"], expected_seq)
+            self.assertEqual(
+                welcome_evt_init["body"]["msg_id"], msg_id_for_env(welcome_evt_init["body"]["env"])
+            )
+            self.assertEqual(
+                welcome_evt_join["body"]["msg_id"], msg_id_for_env(welcome_evt_join["body"]["env"])
+            )
+            _, welcome_payload = unpack_dm_env(welcome_evt_join["body"]["env"])
             await self._run_harness(
-                env, "dm-join", "--state-dir", join_dir, "--welcome", welcome_evt_join["body"]["env"]
+                env, "dm-join", "--state-dir", join_dir, "--welcome", welcome_payload
             )
 
             expected_seq += 1
+            commit_env = pack_dm_env(2, init_payload["commit"])
             commit_frame = {
                 "v": 1,
                 "t": "conv.send",
                 "id": "commit1",
-                "body": {"conv_id": conv_id, "msg_id": "commit", "env": init_payload["commit"]},
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(commit_env),
+                    "env": commit_env,
+                },
             }
             commit_resp = await self._post_inbox(ready_initiator["session_token"], commit_frame)
             self.assertEqual(commit_resp.status, 200)
@@ -255,11 +290,29 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(evt_type_join_commit, "conv.event")
             self.assertEqual(commit_evt_init["body"]["seq"], expected_seq)
             self.assertEqual(commit_evt_join["body"]["seq"], expected_seq)
+            self.assertEqual(
+                commit_evt_init["body"]["msg_id"], msg_id_for_env(commit_evt_init["body"]["env"])
+            )
+            self.assertEqual(
+                commit_evt_join["body"]["msg_id"], msg_id_for_env(commit_evt_join["body"]["env"])
+            )
+            _, join_commit_payload = unpack_dm_env(commit_evt_join["body"]["env"])
+            _, init_commit_payload = unpack_dm_env(commit_evt_init["body"]["env"])
             await self._run_harness(
-                env, "dm-commit-apply", "--state-dir", join_dir, "--commit", commit_evt_join["body"]["env"]
+                env,
+                "dm-commit-apply",
+                "--state-dir",
+                join_dir,
+                "--commit",
+                join_commit_payload,
             )
             await self._run_harness(
-                env, "dm-commit-apply", "--state-dir", init_dir, "--commit", commit_evt_init["body"]["env"]
+                env,
+                "dm-commit-apply",
+                "--state-dir",
+                init_dir,
+                "--commit",
+                init_commit_payload,
             )
 
             with self.assertRaises(asyncio.TimeoutError):
@@ -270,11 +323,16 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             retry_cipher = await self._run_harness(
                 env, "dm-encrypt", "--state-dir", init_dir, "--plaintext", retry_plaintext
             )
+            retry_env = pack_dm_env(3, retry_cipher)
             retry_frame = {
                 "v": 1,
                 "t": "conv.send",
                 "id": "app-retry",
-                "body": {"conv_id": conv_id, "msg_id": "app-retry", "env": retry_cipher},
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(retry_env),
+                    "env": retry_env,
+                },
             }
             retry_resp1 = await self._post_inbox(ready_initiator["session_token"], retry_frame)
             self.assertEqual(retry_resp1.status, 200)
@@ -291,15 +349,16 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(evt_type_join_retry, "conv.event")
             self.assertEqual(retry_evt_init["body"]["seq"], expected_seq)
             self.assertEqual(retry_evt_join["body"]["seq"], expected_seq)
-            self.assertEqual(retry_evt_init["body"]["msg_id"], "app-retry")
-            self.assertEqual(retry_evt_join["body"]["msg_id"], "app-retry")
+            self.assertEqual(retry_evt_init["body"]["msg_id"], msg_id_for_env(retry_evt_init["body"]["env"]))
+            self.assertEqual(retry_evt_join["body"]["msg_id"], msg_id_for_env(retry_evt_join["body"]["env"]))
+            _, retry_payload = unpack_dm_env(retry_evt_join["body"]["env"])
             decrypted_retry = await self._run_harness(
                 env,
                 "dm-decrypt",
                 "--state-dir",
                 join_dir,
                 "--ciphertext",
-                retry_evt_join["body"]["env"],
+                retry_payload,
             )
             self.assertEqual(decrypted_retry, retry_plaintext)
 
@@ -319,11 +378,13 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             ):
                 nonlocal expected_seq
                 ct = await self._run_harness(env, "dm-encrypt", "--state-dir", sender_dir, "--plaintext", plaintext)
+                env_b64 = pack_dm_env(3, ct)
+                frame_msg_id = msg_id_for_env(env_b64)
                 frame = {
                     "v": 1,
                     "t": "conv.send",
                     "id": msg_id,
-                    "body": {"conv_id": conv_id, "msg_id": msg_id, "env": ct},
+                    "body": {"conv_id": conv_id, "msg_id": frame_msg_id, "env": env_b64},
                 }
                 resp = await self._post_inbox(sender_env["session_token"], frame)
                 self.assertEqual(resp.status, 200)
@@ -336,15 +397,17 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evt_type_receiver, "conv.event")
                 self.assertEqual(sender_evt["body"]["seq"], expected_seq)
                 self.assertEqual(receiver_evt["body"]["seq"], expected_seq)
-                self.assertEqual(receiver_evt["body"]["msg_id"], msg_id)
+                self.assertEqual(sender_evt["body"]["msg_id"], msg_id_for_env(sender_evt["body"]["env"]))
+                self.assertEqual(receiver_evt["body"]["msg_id"], msg_id_for_env(receiver_evt["body"]["env"]))
 
+                _, receiver_payload = unpack_dm_env(receiver_evt["body"]["env"])
                 decrypted = await self._run_harness(
                     env,
                     "dm-decrypt",
                     "--state-dir",
                     receiver_dir,
                     "--ciphertext",
-                    receiver_evt["body"]["env"],
+                    receiver_payload,
                 )
                 self.assertEqual(decrypted, plaintext)
                 expected_seq += 1
