@@ -62,6 +62,33 @@ binary += String.fromCharCode(value);
 return btoa(binary);
 };
 
+const base64_to_bytes = (payload_b64) => {
+if (payload_b64 === '') {
+return new Uint8Array(0);
+}
+try {
+const binary = atob(payload_b64);
+const bytes = new Uint8Array(binary.length);
+for (let index = 0; index < binary.length; index += 1) {
+bytes[index] = binary.charCodeAt(index);
+}
+return bytes;
+} catch (error) {
+return null;
+}
+};
+
+const pack_dm_env = (kind_byte, payload_b64) => {
+const payload_bytes = base64_to_bytes(payload_b64);
+if (!payload_bytes) {
+return '';
+}
+const env_bytes = new Uint8Array(payload_bytes.length + 1);
+env_bytes[0] = kind_byte;
+env_bytes.set(payload_bytes, 1);
+return bytes_to_base64(env_bytes);
+};
+
 const generate_group_id = () => {
 const bytes = new Uint8Array(32);
 crypto.getRandomValues(bytes);
@@ -245,7 +272,9 @@ alice_participant_b64 = result.participant_b64;
 welcome_b64 = result.welcome_b64;
 commit_b64 = result.commit_b64;
 set_status('init ok');
-log_output('welcome + commit created for bob');
+const welcome_env_b64 = pack_dm_env(1, welcome_b64);
+const commit_env_b64 = pack_dm_env(2, commit_b64);
+log_output(`welcome_env_b64: ${welcome_env_b64}\ncommit_env_b64: ${commit_env_b64}`);
 };
 
 const handle_join = async () => {
@@ -307,6 +336,7 @@ return;
 }
 alice_participant_b64 = enc_result.participant_b64;
 set_ciphertext_output(enc_result.ciphertext_b64);
+const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
 const dec_result = await dm_decrypt(bob_participant_b64, enc_result.ciphertext_b64);
 if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
@@ -317,7 +347,7 @@ return;
 bob_participant_b64 = dec_result.participant_b64;
 set_decrypted_output(dec_result.plaintext);
 set_status('alice -> bob ok');
-log_output('roundtrip ok');
+log_output(`app_env_b64: ${app_env_b64}`);
 };
 
 const handle_encrypt_bob = async () => {
@@ -338,6 +368,7 @@ return;
 }
 bob_participant_b64 = enc_result.participant_b64;
 set_ciphertext_output(enc_result.ciphertext_b64);
+const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
 const dec_result = await dm_decrypt(alice_participant_b64, enc_result.ciphertext_b64);
 if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
@@ -348,7 +379,7 @@ return;
 alice_participant_b64 = dec_result.participant_b64;
 set_decrypted_output(dec_result.plaintext);
 set_status('bob -> alice ok');
-log_output('roundtrip ok');
+log_output(`app_env_b64: ${app_env_b64}`);
 };
 
 const handle_save_state = async () => {
