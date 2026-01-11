@@ -63,6 +63,9 @@ return btoa(binary);
 };
 
 const base64_to_bytes = (payload_b64) => {
+if (typeof payload_b64 !== 'string') {
+return null;
+}
 if (payload_b64 === '') {
 return new Uint8Array(0);
 }
@@ -87,6 +90,24 @@ const env_bytes = new Uint8Array(payload_bytes.length + 1);
 env_bytes[0] = kind_byte;
 env_bytes.set(payload_bytes, 1);
 return bytes_to_base64(env_bytes);
+};
+
+const unpack_dm_env = (env_b64) => {
+const env_bytes = base64_to_bytes(env_b64);
+if (!env_bytes || env_bytes.length < 1) {
+set_status('error');
+log_output('invalid env base64');
+return null;
+}
+const kind = env_bytes[0];
+if (kind !== 1 && kind !== 2 && kind !== 3) {
+set_status('error');
+log_output(`invalid env kind: ${kind}`);
+return null;
+}
+const payload_bytes = env_bytes.slice(1);
+const payload_b64 = bytes_to_base64(payload_bytes);
+return { kind, payload_b64 };
 };
 
 const generate_group_id = () => {
@@ -318,6 +339,80 @@ set_status(`commit applied${suffix}`);
 log_output(`alice commit applied${suffix}`);
 };
 
+const handle_import_welcome_env = () => {
+const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
+const unpacked = unpack_dm_env(env_b64);
+if (!unpacked) {
+return;
+}
+if (unpacked.kind !== 1) {
+set_status('error');
+log_output('expected welcome env (kind=1)');
+return;
+}
+welcome_b64 = unpacked.payload_b64;
+set_status('welcome loaded');
+log_output('welcome env loaded from gateway/cli');
+};
+
+const handle_import_commit_env = () => {
+const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
+const unpacked = unpack_dm_env(env_b64);
+if (!unpacked) {
+return;
+}
+if (unpacked.kind !== 2) {
+set_status('error');
+log_output('expected commit env (kind=2)');
+return;
+}
+commit_b64 = unpacked.payload_b64;
+set_status('commit loaded');
+log_output('commit env loaded; pending apply');
+};
+
+const handle_decrypt_app_env = async (participant_label) => {
+const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
+const unpacked = unpack_dm_env(env_b64);
+if (!unpacked) {
+return;
+}
+if (unpacked.kind !== 3) {
+set_status('error');
+log_output('expected app env (kind=3)');
+return;
+}
+if (participant_label === 'bob' && !bob_participant_b64) {
+set_status('error');
+log_output('need bob participant');
+return;
+}
+if (participant_label === 'alice' && !alice_participant_b64) {
+set_status('error');
+log_output('need alice participant');
+return;
+}
+set_status(`decrypting as ${participant_label}...`);
+log_output('');
+const participant_b64 = participant_label === 'bob' ? bob_participant_b64 : alice_participant_b64;
+const dec_result = await dm_decrypt(participant_b64, unpacked.payload_b64);
+if (!dec_result || !dec_result.ok) {
+const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
+set_status('error');
+log_output(`decrypt failed: ${error_text}`);
+return;
+}
+if (participant_label === 'bob') {
+bob_participant_b64 = dec_result.participant_b64;
+} else {
+alice_participant_b64 = dec_result.participant_b64;
+}
+set_ciphertext_output(unpacked.payload_b64);
+set_decrypted_output(dec_result.plaintext);
+set_status(`app env decrypted as ${participant_label}`);
+log_output(`app env decrypted as ${participant_label}`);
+};
+
 const handle_encrypt_alice = async () => {
 if (!alice_participant_b64 || !bob_participant_b64) {
 set_status('error');
@@ -450,6 +545,64 @@ if (reset_state_btn) {
 reset_state_btn.addEventListener('click', () => {
 reset_state();
 });
+}
+
+const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
+let incoming_env_input = null;
+if (dm_fieldset) {
+const import_container = document.createElement('div');
+import_container.className = 'dm_import_env';
+
+const import_label = document.createElement('label');
+import_label.textContent = 'incoming_env_b64';
+incoming_env_input = document.createElement('textarea');
+incoming_env_input.rows = 3;
+incoming_env_input.cols = 64;
+import_label.appendChild(incoming_env_input);
+import_container.appendChild(import_label);
+
+const import_buttons = document.createElement('div');
+import_buttons.className = 'button-row';
+
+const load_welcome_btn = document.createElement('button');
+load_welcome_btn.type = 'button';
+load_welcome_btn.textContent = 'Load welcome env';
+load_welcome_btn.addEventListener('click', () => {
+handle_import_welcome_env();
+});
+
+const load_commit_btn = document.createElement('button');
+load_commit_btn.type = 'button';
+load_commit_btn.textContent = 'Load commit env';
+load_commit_btn.addEventListener('click', () => {
+handle_import_commit_env();
+});
+
+const decrypt_bob_btn = document.createElement('button');
+decrypt_bob_btn.type = 'button';
+decrypt_bob_btn.textContent = 'Decrypt app env as Bob';
+decrypt_bob_btn.addEventListener('click', () => {
+handle_decrypt_app_env('bob');
+});
+
+const decrypt_alice_btn = document.createElement('button');
+decrypt_alice_btn.type = 'button';
+decrypt_alice_btn.textContent = 'Decrypt app env as Alice';
+decrypt_alice_btn.addEventListener('click', () => {
+handle_decrypt_app_env('alice');
+});
+
+import_buttons.appendChild(load_welcome_btn);
+import_buttons.appendChild(load_commit_btn);
+import_buttons.appendChild(decrypt_bob_btn);
+import_buttons.appendChild(decrypt_alice_btn);
+import_container.appendChild(import_buttons);
+
+if (dm_output && dm_output.parentNode) {
+dm_output.parentNode.insertBefore(import_container, dm_output);
+} else {
+dm_fieldset.appendChild(import_container);
+}
 }
 
 set_status('idle');
