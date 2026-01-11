@@ -131,6 +131,22 @@
     });
   };
 
+  const cursor_key = (conv_id) => `cursor:${conv_id}`;
+
+  const read_cursor = async (conv_id) => {
+    if (!conv_id) {
+      return null;
+    }
+    const stored_value = await read_setting(cursor_key(conv_id));
+    if (stored_value && typeof stored_value === 'object' && typeof stored_value.next_seq === 'number') {
+      return stored_value.next_seq;
+    }
+    if (typeof stored_value === 'number' && !Number.isNaN(stored_value)) {
+      return stored_value;
+    }
+    return null;
+  };
+
   const write_setting = async (key, value) => {
     const db = await open_db();
     return new Promise((resolve, reject) => {
@@ -142,6 +158,29 @@
       tx.oncomplete = () => db.close();
       tx.onerror = () => db.close();
     });
+  };
+
+  const write_cursor = async (conv_id, next_seq) => {
+    if (!conv_id) {
+      return;
+    }
+    if (typeof next_seq !== 'number' || Number.isNaN(next_seq)) {
+      return;
+    }
+    await write_setting(cursor_key(conv_id), next_seq);
+  };
+
+  const advance_cursor = async (conv_id, observed_seq) => {
+    if (!conv_id) {
+      return;
+    }
+    if (typeof observed_seq !== 'number' || Number.isNaN(observed_seq)) {
+      return;
+    }
+    const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
+    const candidate_next_seq = observed_seq + 1;
+    const next_seq = Math.max(stored_next_seq, candidate_next_seq, 1);
+    await write_cursor(conv_id, next_seq);
   };
 
   class GatewayWsClient {
@@ -297,10 +336,16 @@
       }
       if (message.t === 'conv.event') {
         render_event(body);
+        advance_cursor(body.conv_id, body.seq).catch((err) =>
+          append_log(`failed to persist conv.event cursor: ${err.message}`)
+        );
         return;
       }
       if (message.t === 'conv.acked') {
         append_log(`conv.acked ${JSON.stringify(body)}`);
+        advance_cursor(body.conv_id, body.seq).catch((err) =>
+          append_log(`failed to persist conv.acked cursor: ${err.message}`)
+        );
         return;
       }
       if (message.t === 'error') {
@@ -354,9 +399,25 @@
     client.resume_session(resume_token);
   });
 
-  subscribe_btn.addEventListener('click', () => {
-    const from_seq_value = from_seq_input.value === '' ? undefined : Number(from_seq_input.value);
-    client.subscribe(conv_id_input.value.trim(), from_seq_value);
+  const prefill_from_seq = async () => {
+    const conv_id = conv_id_input.value.trim();
+    if (!conv_id) {
+      from_seq_input.value = '';
+      return;
+    }
+    const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
+    from_seq_input.value = String(stored_next_seq);
+  };
+
+  subscribe_btn.addEventListener('click', async () => {
+    const conv_id = conv_id_input.value.trim();
+    if (from_seq_input.value === '') {
+      const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
+      client.subscribe(conv_id, stored_next_seq);
+      return;
+    }
+    const from_seq_value = Number(from_seq_input.value);
+    client.subscribe(conv_id, from_seq_value);
   });
 
   ack_btn.addEventListener('click', () => {
@@ -383,6 +444,14 @@
   clear_log_btn.addEventListener('click', () => {
     debug_log.value = '';
     event_log.innerHTML = '';
+  });
+
+  conv_id_input.addEventListener('change', () => {
+    prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+  });
+
+  conv_id_input.addEventListener('blur', () => {
+    prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
   });
 
   hydrate_inputs();
