@@ -89,20 +89,20 @@ DM_INIT_JSON=$(python -m cli_app.mls_poc dm-init \
   --group-id "${GROUP_ID}" \
   --seed "${DM_SEED}")
 
-WELCOME_ENV_B64=$(python - <<'PY'
+WELCOME_ENV_B64=$(printf '%s' "${DM_INIT_JSON}" | python - <<'PY'
 import json
-import os
+import sys
 from cli_app import dm_envelope
-payload = json.loads(os.environ["DM_INIT_JSON"])
+payload = json.loads(sys.stdin.read())
 print(dm_envelope.pack(0x01, payload["welcome"]))
 PY
 )
 
-COMMIT_ENV_B64=$(python - <<'PY'
+COMMIT_ENV_B64=$(printf '%s' "${DM_INIT_JSON}" | python - <<'PY'
 import json
-import os
+import sys
 from cli_app import dm_envelope
-payload = json.loads(os.environ["DM_INIT_JSON"])
+payload = json.loads(sys.stdin.read())
 print(dm_envelope.pack(0x02, payload["commit"]))
 PY
 )
@@ -113,10 +113,10 @@ CIPHERTEXT_B64=$(python -m cli_app.mls_poc dm-encrypt \
   --state-dir "${STATE_BASE}/alice_app_env" \
   --plaintext "${PLAINTEXT}" | head -n 1)
 
-APP_ENV_B64=$(python - <<'PY'
-import os
+APP_ENV_B64=$(printf '%s' "${CIPHERTEXT_B64}" | python - <<'PY'
+import sys
 from cli_app import dm_envelope
-print(dm_envelope.pack(0x03, os.environ["CIPHERTEXT_B64"]))
+print(dm_envelope.pack(0x03, sys.stdin.read().strip()))
 PY
 )
 
