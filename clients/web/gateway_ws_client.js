@@ -20,6 +20,15 @@
   let social_fetch_btn = null;
   let social_log_pre = null;
   let social_list = null;
+  let dm_bridge_last_env_text = null;
+  let dm_bridge_copy_btn = null;
+  let dm_bridge_cli_block_input = null;
+  let dm_bridge_parse_btn = null;
+  let dm_bridge_send_btn = null;
+  let dm_bridge_status = null;
+  let dm_bridge_expected_plaintext_pre = null;
+  let dm_import_env_input = null;
+  let dm_expected_plaintext_input = null;
 
   const connect_start_btn = document.getElementById('connect_start');
   const connect_resume_btn = document.getElementById('connect_resume');
@@ -36,6 +45,9 @@
     2: 'commit',
     3: 'app_ciphertext',
   };
+  const cli_block_keys = ['welcome_env_b64', 'commit_env_b64', 'app_env_b64', 'expected_plaintext'];
+  let last_conv_env_b64 = '';
+  let parsed_app_env_b64 = '';
 
   const bytes_to_hex = (bytes) =>
     Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -64,6 +76,21 @@
   const sha256_hex = async (bytes) => {
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return bytes_to_hex(new Uint8Array(digest));
+  };
+
+  const describe_dm_env = (env_b64) => {
+    if (typeof env_b64 !== 'string') {
+      return null;
+    }
+    const env_bytes = base64_to_bytes(env_b64);
+    if (!env_bytes || env_bytes.length < 1) {
+      return null;
+    }
+    const kind = env_bytes[0];
+    const payload_bytes = env_bytes.slice(1);
+    const kind_label = dm_kind_labels[kind] || `unknown(0x${kind.toString(16).padStart(2, '0')})`;
+    const payload_b64 = bytes_to_base64(payload_bytes);
+    return { kind_label, payload_len: payload_bytes.length, payload_b64 };
   };
 
   const append_log = (line) => {
@@ -217,16 +244,12 @@
     }
     let env_display = typeof body.env !== 'undefined' ? JSON.stringify(body.env) : '';
     if (typeof body.env === 'string') {
-      const env_bytes = base64_to_bytes(body.env);
-      if (env_bytes && env_bytes.length >= 1) {
-        const kind = env_bytes[0];
-        const payload_bytes = env_bytes.slice(1);
-        const payload_b64 = bytes_to_base64(payload_bytes);
-        const kind_label = dm_kind_labels[kind] || `unknown(0x${kind.toString(16).padStart(2, '0')})`;
-        const payload_prefix = payload_b64.slice(0, 32);
-        const payload_suffix = payload_b64.length > payload_prefix.length ? '...' : '';
+      const env_details = describe_dm_env(body.env);
+      if (env_details) {
+        const payload_prefix = env_details.payload_b64.slice(0, 32);
+        const payload_suffix = env_details.payload_b64.length > payload_prefix.length ? '...' : '';
         env_display =
-          `dm_env(kind=${kind_label} payload_len=${payload_bytes.length}` +
+          `dm_env(kind=${env_details.kind_label} payload_len=${env_details.payload_len}` +
           ` payload_b64_prefix=${payload_prefix}${payload_suffix})`;
       }
     }
@@ -312,6 +335,117 @@
     const candidate_next_seq = observed_seq + 1;
     const next_seq = Math.max(stored_next_seq, candidate_next_seq, 1);
     await write_cursor(conv_id, next_seq);
+  };
+
+  const find_dm_import_input = (label_text) => {
+    const labels = Array.from(document.querySelectorAll('label'));
+    for (const label of labels) {
+      const label_value = label.textContent ? label.textContent.trim() : '';
+      if (!label_value.startsWith(label_text)) {
+        continue;
+      }
+      const input = label.querySelector('textarea, input');
+      if (input) {
+        return input;
+      }
+    }
+    return null;
+  };
+
+  const hydrate_dm_import_inputs = () => {
+    if (!dm_import_env_input) {
+      dm_import_env_input = find_dm_import_input('incoming_env_b64');
+    }
+    if (!dm_expected_plaintext_input) {
+      dm_expected_plaintext_input = find_dm_import_input('expected_plaintext');
+    }
+  };
+
+  const update_dm_bridge_last_env = () => {
+    if (!dm_bridge_last_env_text) {
+      return;
+    }
+    if (!last_conv_env_b64) {
+      dm_bridge_last_env_text.textContent = 'last env: none received yet';
+      return;
+    }
+    const env_details = describe_dm_env(last_conv_env_b64);
+    if (!env_details) {
+      dm_bridge_last_env_text.textContent = 'last env: invalid base64';
+      return;
+    }
+    dm_bridge_last_env_text.textContent =
+      `last env: kind=${env_details.kind_label} payload_len=${env_details.payload_len}`;
+  };
+
+  const parse_cli_block = (block_text) => {
+    const parsed = {
+      welcome_env_b64: '',
+      commit_env_b64: '',
+      app_env_b64: '',
+      expected_plaintext: '',
+    };
+    const lines = block_text.split(/\r?\n/);
+    for (const raw_line of lines) {
+      const line = raw_line.trim();
+      if (!line) {
+        continue;
+      }
+      const eq_index = line.indexOf('=');
+      if (eq_index < 0) {
+        continue;
+      }
+      const key = line.slice(0, eq_index).trim();
+      if (!cli_block_keys.includes(key)) {
+        continue;
+      }
+      const value = line.slice(eq_index + 1).trim();
+      if (value) {
+        parsed[key] = value;
+      }
+    }
+    const found_keys = cli_block_keys.filter((key) => parsed[key]);
+    return { parsed, found_keys };
+  };
+
+  const set_dm_expected_plaintext = (value) => {
+    hydrate_dm_import_inputs();
+    if (dm_expected_plaintext_input) {
+      dm_expected_plaintext_input.value = value;
+    } else if (dm_bridge_expected_plaintext_pre) {
+      dm_bridge_expected_plaintext_pre.textContent = value ? `expected_plaintext: ${value}` : '';
+    }
+  };
+
+  const set_dm_incoming_env = (value) => {
+    hydrate_dm_import_inputs();
+    if (dm_import_env_input) {
+      dm_import_env_input.value = value;
+      return true;
+    }
+    return false;
+  };
+
+  const send_ciphertext_with_deterministic_id = async (conv_id, ciphertext) => {
+    if (!conv_id) {
+      append_log('missing conv_id');
+      return;
+    }
+    if (!ciphertext) {
+      append_log('missing ciphertext');
+      return;
+    }
+    let msg_id = msg_id_input.value.trim();
+    if (!msg_id) {
+      const env_bytes = base64_to_bytes(ciphertext);
+      if (!env_bytes) {
+        append_log('invalid base64 ciphertext');
+        return;
+      }
+      msg_id = await sha256_hex(env_bytes);
+      msg_id_input.value = msg_id;
+    }
+    client.send_ciphertext(conv_id, msg_id, ciphertext);
   };
 
   class GatewayWsClient {
@@ -466,6 +600,10 @@
         return;
       }
       if (message.t === 'conv.event') {
+        if (typeof body.env === 'string') {
+          last_conv_env_b64 = body.env;
+          update_dm_bridge_last_env();
+        }
         render_event(body);
         advance_cursor(body.conv_id, body.seq).catch((err) =>
           append_log(`failed to persist conv.event cursor: ${err.message}`)
@@ -488,6 +626,73 @@
   }
 
   const client = new GatewayWsClient();
+
+  const build_dm_bridge_panel = () => {
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = 'DM Bridge';
+    fieldset.appendChild(legend);
+
+    const summary = document.createElement('p');
+    summary.textContent = 'last env: none received yet';
+    fieldset.appendChild(summary);
+
+    const copy_row = document.createElement('div');
+    copy_row.className = 'button-row';
+    const copy_btn = document.createElement('button');
+    copy_btn.type = 'button';
+    copy_btn.textContent = 'Copy last env to DM import';
+    copy_row.appendChild(copy_btn);
+    fieldset.appendChild(copy_row);
+
+    const cli_label = document.createElement('label');
+    cli_label.textContent = 'Paste CLI block';
+    const cli_block_input = document.createElement('textarea');
+    cli_block_input.rows = 6;
+    cli_block_input.cols = 64;
+    cli_label.appendChild(cli_block_input);
+    fieldset.appendChild(cli_label);
+
+    const parse_row = document.createElement('div');
+    parse_row.className = 'button-row';
+    const parse_btn = document.createElement('button');
+    parse_btn.type = 'button';
+    parse_btn.textContent = 'Parse';
+    parse_row.appendChild(parse_btn);
+    fieldset.appendChild(parse_row);
+
+    const send_row = document.createElement('div');
+    send_row.className = 'button-row';
+    const send_btn = document.createElement('button');
+    send_btn.type = 'button';
+    send_btn.textContent = 'Send app_env to gateway';
+    send_row.appendChild(send_btn);
+    fieldset.appendChild(send_row);
+
+    const status = document.createElement('p');
+    status.textContent = 'status: idle';
+    fieldset.appendChild(status);
+
+    const expected_plaintext_pre = document.createElement('pre');
+    expected_plaintext_pre.textContent = '';
+    fieldset.appendChild(expected_plaintext_pre);
+
+    const dm_status = document.getElementById('dm_status');
+    const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
+    if (dm_fieldset && dm_fieldset.parentNode) {
+      dm_fieldset.parentNode.insertBefore(fieldset, dm_fieldset);
+    } else {
+      document.body.appendChild(fieldset);
+    }
+
+    dm_bridge_last_env_text = summary;
+    dm_bridge_copy_btn = copy_btn;
+    dm_bridge_cli_block_input = cli_block_input;
+    dm_bridge_parse_btn = parse_btn;
+    dm_bridge_send_btn = send_btn;
+    dm_bridge_status = status;
+    dm_bridge_expected_plaintext_pre = expected_plaintext_pre;
+  };
 
   const build_social_panel = () => {
     const fieldset = document.createElement('fieldset');
@@ -646,17 +851,7 @@
   send_btn.addEventListener('click', async () => {
     const conv_id = conv_id_input.value.trim();
     const ciphertext = ciphertext_input.value.trim();
-    let msg_id = msg_id_input.value.trim();
-    if (!msg_id) {
-      const env_bytes = base64_to_bytes(ciphertext);
-      if (!env_bytes) {
-        append_log('invalid base64 ciphertext');
-        return;
-      }
-      msg_id = await sha256_hex(env_bytes);
-      msg_id_input.value = msg_id;
-    }
-    client.send_ciphertext(conv_id, msg_id, ciphertext);
+    await send_ciphertext_with_deterministic_id(conv_id, ciphertext);
   });
 
   clear_log_btn.addEventListener('click', () => {
@@ -671,6 +866,63 @@
   conv_id_input.addEventListener('blur', () => {
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
   });
+
+  build_dm_bridge_panel();
+  if (dm_bridge_copy_btn) {
+    dm_bridge_copy_btn.addEventListener('click', () => {
+      if (!last_conv_env_b64) {
+        append_log('no conv.event env to copy');
+        return;
+      }
+      const did_set = set_dm_incoming_env(last_conv_env_b64);
+      if (!did_set) {
+        append_log('dm_ui incoming_env_b64 input not found');
+        return;
+      }
+      append_log('copied last env to dm_ui');
+    });
+  }
+  if (dm_bridge_parse_btn) {
+    dm_bridge_parse_btn.addEventListener('click', () => {
+      const block_text = dm_bridge_cli_block_input ? dm_bridge_cli_block_input.value : '';
+      if (!block_text || !block_text.trim()) {
+        dm_bridge_status.textContent = 'status: error (paste CLI block)';
+        return;
+      }
+      const { parsed, found_keys } = parse_cli_block(block_text);
+      if (!found_keys.length) {
+        dm_bridge_status.textContent = 'status: error (no CLI fields found)';
+        return;
+      }
+      if (parsed.welcome_env_b64) {
+        set_dm_incoming_env(parsed.welcome_env_b64);
+      }
+      if (parsed.expected_plaintext !== '') {
+        set_dm_expected_plaintext(parsed.expected_plaintext);
+      } else if (dm_bridge_expected_plaintext_pre) {
+        dm_bridge_expected_plaintext_pre.textContent = '';
+      }
+      if (parsed.app_env_b64) {
+        parsed_app_env_b64 = parsed.app_env_b64;
+        ciphertext_input.value = parsed.app_env_b64;
+        msg_id_input.value = '';
+      }
+      const missing_keys = cli_block_keys.filter((key) => !parsed[key]);
+      const missing_summary = missing_keys.length ? `; missing: ${missing_keys.join(', ')}` : '';
+      dm_bridge_status.textContent = `status: parsed (${found_keys.join(', ')})${missing_summary}`;
+    });
+  }
+  if (dm_bridge_send_btn) {
+    dm_bridge_send_btn.addEventListener('click', async () => {
+      const conv_id = conv_id_input.value.trim();
+      const app_env_b64 = parsed_app_env_b64 || ciphertext_input.value.trim();
+      if (!app_env_b64) {
+        append_log('missing app_env_b64 for send');
+        return;
+      }
+      await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
+    });
+  }
 
   build_social_panel();
   if (social_fetch_btn) {
