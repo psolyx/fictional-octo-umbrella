@@ -33,6 +33,10 @@ let bob_keypackage_b64 = '';
 let group_id_b64 = '';
 let welcome_b64 = '';
 let commit_b64 = '';
+let expected_plaintext = '';
+let parsed_welcome_env_b64 = '';
+let parsed_commit_env_b64 = '';
+let parsed_app_env_b64 = '';
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -40,6 +44,12 @@ const seed_init = 3003;
 
 const db_name = 'mls_dm_state';
 const store_name = 'records';
+const cli_block_keys = [
+'welcome_env_b64',
+'commit_env_b64',
+'app_env_b64',
+'expected_plaintext',
+];
 
 const set_status = (message) => {
 if (dm_status) {
@@ -190,7 +200,20 @@ decrypted_output.value = plaintext || '';
 }
 };
 
+const set_expected_plaintext_input = () => {
+if (expected_plaintext_input) {
+expected_plaintext_input.value = expected_plaintext || '';
+}
+};
+
+const set_incoming_env_input = (payload_b64) => {
+if (incoming_env_input) {
+incoming_env_input.value = payload_b64 || '';
+}
+};
+
 const save_state = async () => {
+expected_plaintext = expected_plaintext_input ? expected_plaintext_input.value : expected_plaintext;
 const entries = [
 ['alice', alice_participant_b64],
 ['bob', bob_participant_b64],
@@ -199,6 +222,8 @@ const entries = [
 ['group_id', group_id_b64],
 ['welcome', welcome_b64],
 ['commit', commit_b64],
+['expected_plaintext', expected_plaintext],
+['parsed_app_env_b64', parsed_app_env_b64],
 ];
 for (const [key, value] of entries) {
 if (value) {
@@ -217,7 +242,13 @@ bob_keypackage_b64 = await db_get('bob_keypackage');
 group_id_b64 = await db_get('group_id');
 welcome_b64 = await db_get('welcome');
 commit_b64 = await db_get('commit');
+expected_plaintext = await db_get('expected_plaintext');
+parsed_app_env_b64 = await db_get('parsed_app_env_b64');
 set_group_id_input();
+set_expected_plaintext_input();
+if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
+incoming_env_input.value = parsed_app_env_b64;
+}
 set_status('loaded');
 log_output('loaded state from IndexedDB');
 };
@@ -230,9 +261,15 @@ bob_keypackage_b64 = '';
 group_id_b64 = '';
 welcome_b64 = '';
 commit_b64 = '';
+expected_plaintext = '';
+parsed_welcome_env_b64 = '';
+parsed_commit_env_b64 = '';
+parsed_app_env_b64 = '';
 set_group_id_input();
 set_ciphertext_output('');
 set_decrypted_output('');
+set_expected_plaintext_input();
+set_incoming_env_input('');
 await db_clear();
 set_status('reset');
 log_output('cleared local state');
@@ -477,6 +514,95 @@ set_status('bob -> alice ok');
 log_output(`app_env_b64: ${app_env_b64}`);
 };
 
+const parse_cli_block = (block_text) => {
+const parsed = {
+welcome_env_b64: '',
+commit_env_b64: '',
+app_env_b64: '',
+expected_plaintext: '',
+};
+const lines = block_text.split(/\r?\n/);
+for (const raw_line of lines) {
+const line = raw_line.trim();
+if (!line) {
+continue;
+}
+const eq_index = line.indexOf('=');
+if (eq_index < 0) {
+continue;
+}
+const key = line.slice(0, eq_index).trim();
+if (!cli_block_keys.includes(key)) {
+continue;
+}
+const value = line.slice(eq_index + 1).trim();
+if (value) {
+parsed[key] = value;
+}
+}
+const found_keys = cli_block_keys.filter((key) => parsed[key]);
+return { parsed, found_keys };
+};
+
+const truncate_text = (value, max_len) => {
+if (value.length <= max_len) {
+return value;
+}
+return `${value.slice(0, max_len)}…`;
+};
+
+const handle_parse_cli_block = () => {
+const block_text = cli_block_input ? cli_block_input.value : '';
+if (!block_text || !block_text.trim()) {
+set_status('error');
+log_output('paste CLI output block');
+return;
+}
+const { parsed, found_keys } = parse_cli_block(block_text);
+if (!found_keys.length) {
+set_status('error');
+log_output('no import fields found in block');
+return;
+}
+if (parsed.welcome_env_b64) {
+parsed_welcome_env_b64 = parsed.welcome_env_b64;
+set_incoming_env_input(parsed.welcome_env_b64);
+}
+if (parsed.commit_env_b64) {
+parsed_commit_env_b64 = parsed.commit_env_b64;
+}
+if (parsed.app_env_b64) {
+parsed_app_env_b64 = parsed.app_env_b64;
+}
+if (parsed.expected_plaintext !== '') {
+expected_plaintext = parsed.expected_plaintext;
+set_expected_plaintext_input();
+}
+const missing_keys = cli_block_keys.filter((key) => !parsed[key]);
+const missing_summary = missing_keys.length ? `; missing: ${missing_keys.join(', ')}` : '';
+set_status('parsed block');
+log_output(`parsed block: ${found_keys.join(', ')}${missing_summary}`);
+};
+
+const handle_verify_expected = () => {
+const expected = expected_plaintext_input ? expected_plaintext_input.value : '';
+const actual = decrypted_output ? decrypted_output.value : '';
+if (!expected) {
+set_status('error');
+log_output('expected_plaintext is empty');
+return;
+}
+if (actual === expected) {
+set_status('verify ok');
+log_output('verify ok');
+return;
+}
+const expected_short = truncate_text(expected, 120);
+const actual_short = truncate_text(actual, 120);
+set_status('verify failed');
+log_output(`verify failed: expected="${expected_short}" actual="${actual_short}"`);
+};
+
 const handle_save_state = async () => {
 await save_state();
 set_status('saved');
@@ -549,9 +675,30 @@ reset_state();
 
 const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
 let incoming_env_input = null;
+let expected_plaintext_input = null;
+let cli_block_input = null;
 if (dm_fieldset) {
 const import_container = document.createElement('div');
 import_container.className = 'dm_import_env';
+
+const cli_block_label = document.createElement('label');
+cli_block_label.textContent = 'cli_output_block';
+cli_block_input = document.createElement('textarea');
+cli_block_input.rows = 6;
+cli_block_input.cols = 64;
+cli_block_label.appendChild(cli_block_input);
+import_container.appendChild(cli_block_label);
+
+const parse_buttons = document.createElement('div');
+parse_buttons.className = 'button-row';
+const parse_block_btn = document.createElement('button');
+parse_block_btn.type = 'button';
+parse_block_btn.textContent = 'Parse block';
+parse_block_btn.addEventListener('click', () => {
+handle_parse_cli_block();
+});
+parse_buttons.appendChild(parse_block_btn);
+import_container.appendChild(parse_buttons);
 
 const import_label = document.createElement('label');
 import_label.textContent = 'incoming_env_b64';
@@ -560,6 +707,14 @@ incoming_env_input.rows = 3;
 incoming_env_input.cols = 64;
 import_label.appendChild(incoming_env_input);
 import_container.appendChild(import_label);
+
+const expected_label = document.createElement('label');
+expected_label.textContent = 'expected_plaintext';
+expected_plaintext_input = document.createElement('input');
+expected_plaintext_input.type = 'text';
+expected_plaintext_input.size = 64;
+expected_label.appendChild(expected_plaintext_input);
+import_container.appendChild(expected_label);
 
 const import_buttons = document.createElement('div');
 import_buttons.className = 'button-row';
@@ -592,10 +747,18 @@ decrypt_alice_btn.addEventListener('click', () => {
 handle_decrypt_app_env('alice');
 });
 
+const verify_expected_btn = document.createElement('button');
+verify_expected_btn.type = 'button';
+verify_expected_btn.textContent = 'Verify decrypted == expected';
+verify_expected_btn.addEventListener('click', () => {
+handle_verify_expected();
+});
+
 import_buttons.appendChild(load_welcome_btn);
 import_buttons.appendChild(load_commit_btn);
 import_buttons.appendChild(decrypt_bob_btn);
 import_buttons.appendChild(decrypt_alice_btn);
+import_buttons.appendChild(verify_expected_btn);
 import_container.appendChild(import_buttons);
 
 if (dm_output && dm_output.parentNode) {
