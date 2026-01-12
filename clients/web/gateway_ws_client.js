@@ -38,7 +38,10 @@
   const clear_log_btn = document.getElementById('clear_log');
 
   const db_name = 'gateway_web_demo';
+  const db_version = 2;
   const store_name = 'settings';
+  const transcripts_store_name = 'transcripts';
+  const transcript_max_records = 200;
   const next_id = () => `msg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const dm_kind_labels = {
     1: 'welcome',
@@ -48,6 +51,12 @@
   const cli_block_keys = ['welcome_env_b64', 'commit_env_b64', 'app_env_b64', 'expected_plaintext'];
   let last_conv_env_b64 = '';
   let parsed_app_env_b64 = '';
+  let transcript_status_text = null;
+  let transcript_export_btn = null;
+  let transcript_import_input = null;
+  let transcript_replay_btn = null;
+  let transcript_last_import = null;
+  const last_from_seq_by_conv_id = {};
 
   const bytes_to_hex = (bytes) =>
     Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -224,7 +233,7 @@
     );
   };
 
-  const render_event = (body) => {
+  const render_event = (body, prefer_append = false) => {
     const entry = document.createElement('div');
     const parts = [];
     if (body.conv_id) {
@@ -254,16 +263,29 @@
       }
     }
     entry.textContent = `${parts.join(' ')} env=${env_display}`;
-    event_log.prepend(entry);
+    if (prefer_append) {
+      event_log.appendChild(entry);
+    } else {
+      event_log.prepend(entry);
+    }
   };
 
   const open_db = () =>
     new Promise((resolve, reject) => {
-      const request = indexedDB.open(db_name, 1);
+      const request = indexedDB.open(db_name, db_version);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(store_name)) {
           db.createObjectStore(store_name, { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains(transcripts_store_name)) {
+          const transcripts_store = db.createObjectStore(transcripts_store_name, { keyPath: 'key' });
+          transcripts_store.createIndex('by_conv_id', 'conv_id', { unique: false });
+        } else {
+          const transcripts_store = request.transaction.objectStore(transcripts_store_name);
+          if (!transcripts_store.indexNames.contains('by_conv_id')) {
+            transcripts_store.createIndex('by_conv_id', 'conv_id', { unique: false });
+          }
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -335,6 +357,119 @@
     const candidate_next_seq = observed_seq + 1;
     const next_seq = Math.max(stored_next_seq, candidate_next_seq, 1);
     await write_cursor(conv_id, next_seq);
+  };
+
+  const transcript_key = (conv_id, seq) => `${conv_id}:${seq}`;
+
+  const record_transcript_event = async (conv_id, seq, msg_id, env) => {
+    if (!conv_id) {
+      return;
+    }
+    if (typeof seq !== 'number' || Number.isNaN(seq)) {
+      return;
+    }
+    if (typeof env !== 'string') {
+      return;
+    }
+    const db = await open_db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(transcripts_store_name, 'readwrite');
+      const store = tx.objectStore(transcripts_store_name);
+      const record = { key: transcript_key(conv_id, seq), conv_id, seq, msg_id, env };
+      store.put(record);
+      if (store.indexNames.contains('by_conv_id')) {
+        const index = store.index('by_conv_id');
+        const range = IDBKeyRange.only(conv_id);
+        const get_request = index.getAll(range);
+        get_request.onsuccess = () => {
+          const entries = Array.isArray(get_request.result) ? get_request.result : [];
+          entries.sort((a, b) => a.seq - b.seq);
+          if (entries.length > transcript_max_records) {
+            const excess = entries.length - transcript_max_records;
+            for (let offset = 0; offset < excess; offset += 1) {
+              const entry = entries[offset];
+              if (entry && entry.key) {
+                store.delete(entry.key);
+              }
+            }
+          }
+        };
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error('indexeddb transcript write failed'));
+      };
+    });
+  };
+
+  const read_transcripts = async (conv_id) => {
+    if (!conv_id) {
+      return [];
+    }
+    const db = await open_db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(transcripts_store_name, 'readonly');
+      const store = tx.objectStore(transcripts_store_name);
+      let get_request;
+      if (store.indexNames.contains('by_conv_id')) {
+        const index = store.index('by_conv_id');
+        get_request = index.getAll(IDBKeyRange.only(conv_id));
+      } else {
+        get_request = store.getAll();
+      }
+      get_request.onsuccess = () => {
+        let entries = Array.isArray(get_request.result) ? get_request.result : [];
+        if (!store.indexNames.contains('by_conv_id')) {
+          entries = entries.filter((entry) => entry && entry.conv_id === conv_id);
+        }
+        entries.sort((a, b) => a.seq - b.seq);
+        resolve(entries);
+      };
+      get_request.onerror = () => reject(get_request.error || new Error('indexeddb transcript read failed'));
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    });
+  };
+
+  const set_transcript_status = (message) => {
+    if (transcript_status_text) {
+      transcript_status_text.textContent = message;
+    }
+  };
+
+  const render_transcript_events = (conv_id, events) => {
+    event_log.innerHTML = '';
+    if (!Array.isArray(events) || events.length === 0) {
+      return;
+    }
+    events.forEach((event) => {
+      render_event(
+        {
+          conv_id,
+          seq: event.seq,
+          msg_id: event.msg_id,
+          env: event.env,
+        },
+        true
+      );
+    });
+  };
+
+  const latest_transcript_env = (events) => {
+    if (!Array.isArray(events) || events.length === 0) {
+      return null;
+    }
+    const sorted = [...events].filter((event) => event && typeof event.seq === 'number');
+    sorted.sort((a, b) => a.seq - b.seq);
+    const last_event = sorted[sorted.length - 1];
+    if (last_event && typeof last_event.env === 'string') {
+      return last_event.env;
+    }
+    return null;
   };
 
   const find_dm_import_input = (label_text) => {
@@ -605,6 +740,9 @@
           update_dm_bridge_last_env();
         }
         render_event(body);
+        record_transcript_event(body.conv_id, body.seq, body.msg_id, body.env).catch((err) =>
+          append_log(`failed to persist transcript: ${err.message}`)
+        );
         advance_cursor(body.conv_id, body.seq).catch((err) =>
           append_log(`failed to persist conv.event cursor: ${err.message}`)
         );
@@ -692,6 +830,53 @@
     dm_bridge_send_btn = send_btn;
     dm_bridge_status = status;
     dm_bridge_expected_plaintext_pre = expected_plaintext_pre;
+  };
+
+  const build_transcript_panel = () => {
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = 'Transcript';
+    fieldset.appendChild(legend);
+
+    const export_row = document.createElement('div');
+    export_row.className = 'button-row';
+    const export_btn = document.createElement('button');
+    export_btn.type = 'button';
+    export_btn.textContent = 'Export transcript';
+    export_row.appendChild(export_btn);
+    fieldset.appendChild(export_row);
+
+    const import_label = document.createElement('label');
+    import_label.textContent = 'Import transcript';
+    const import_input = document.createElement('input');
+    import_input.type = 'file';
+    import_input.accept = 'application/json';
+    import_label.appendChild(import_input);
+    fieldset.appendChild(import_label);
+
+    const replay_row = document.createElement('div');
+    replay_row.className = 'button-row';
+    const replay_btn = document.createElement('button');
+    replay_btn.type = 'button';
+    replay_btn.textContent = 'Replay to DM Bridge';
+    replay_row.appendChild(replay_btn);
+    fieldset.appendChild(replay_row);
+
+    const status = document.createElement('p');
+    status.textContent = 'status: idle';
+    fieldset.appendChild(status);
+
+    const dm_fieldset = dm_bridge_last_env_text ? dm_bridge_last_env_text.closest('fieldset') : null;
+    if (dm_fieldset && dm_fieldset.parentNode) {
+      dm_fieldset.parentNode.insertBefore(fieldset, dm_fieldset.nextSibling);
+    } else {
+      document.body.appendChild(fieldset);
+    }
+
+    transcript_status_text = status;
+    transcript_export_btn = export_btn;
+    transcript_import_input = import_input;
+    transcript_replay_btn = replay_btn;
   };
 
   const build_social_panel = () => {
@@ -836,10 +1021,12 @@
     const conv_id = conv_id_input.value.trim();
     if (from_seq_input.value === '') {
       const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
+      last_from_seq_by_conv_id[conv_id] = stored_next_seq;
       client.subscribe(conv_id, stored_next_seq);
       return;
     }
     const from_seq_value = Number(from_seq_input.value);
+    last_from_seq_by_conv_id[conv_id] = from_seq_value;
     client.subscribe(conv_id, from_seq_value);
   });
 
@@ -868,6 +1055,7 @@
   });
 
   build_dm_bridge_panel();
+  build_transcript_panel();
   if (dm_bridge_copy_btn) {
     dm_bridge_copy_btn.addEventListener('click', () => {
       if (!last_conv_env_b64) {
@@ -921,6 +1109,119 @@
         return;
       }
       await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
+    });
+  }
+
+  if (transcript_export_btn) {
+    transcript_export_btn.addEventListener('click', () => {
+      const conv_id = conv_id_input.value.trim();
+      if (!conv_id) {
+        set_transcript_status('status: error (conv_id required)');
+        return;
+      }
+      read_transcripts(conv_id)
+        .then((entries) => {
+          if (!entries.length) {
+            set_transcript_status('status: no transcripts found');
+            return;
+          }
+          const from_seq_value = last_from_seq_by_conv_id[conv_id];
+          const payload = {
+            conv_id,
+            from_seq: typeof from_seq_value === 'number' && !Number.isNaN(from_seq_value) ? from_seq_value : null,
+            events: entries.map((entry) => ({
+              seq: entry.seq,
+              msg_id: entry.msg_id,
+              env_b64: entry.env,
+            })),
+          };
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `transcript-${conv_id}-${Date.now()}.json`;
+          link.click();
+          URL.revokeObjectURL(url);
+          set_transcript_status(`status: exported ${entries.length} events`);
+        })
+        .catch((err) => set_transcript_status(`status: error (${err.message})`));
+    });
+  }
+
+  if (transcript_import_input) {
+    transcript_import_input.addEventListener('change', () => {
+      const file = transcript_import_input.files ? transcript_import_input.files[0] : null;
+      if (!file) {
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const payload = JSON.parse(reader.result);
+          const conv_id_value =
+            payload && typeof payload.conv_id === 'string' ? payload.conv_id : conv_id_input.value.trim();
+          const raw_events = payload && Array.isArray(payload.events) ? payload.events : [];
+          const normalized = raw_events
+            .map((event) => {
+              if (!event || typeof event !== 'object') {
+                return null;
+              }
+              const seq = typeof event.seq === 'number' ? event.seq : Number(event.seq);
+              const env = typeof event.env === 'string' ? event.env : event.env_b64;
+              if (typeof seq !== 'number' || Number.isNaN(seq) || typeof env !== 'string') {
+                return null;
+              }
+              const msg_id = typeof event.msg_id === 'string' ? event.msg_id : '';
+              return { seq, msg_id, env };
+            })
+            .filter((event) => event !== null);
+          normalized.sort((a, b) => a.seq - b.seq);
+          transcript_last_import = {
+            conv_id: conv_id_value,
+            from_seq: payload && typeof payload.from_seq === 'number' ? payload.from_seq : null,
+            events: normalized,
+          };
+          render_transcript_events(conv_id_value, normalized);
+          set_transcript_status(`status: imported ${normalized.length} events`);
+        } catch (err) {
+          set_transcript_status(`status: error (${err.message || 'invalid json'})`);
+        }
+      };
+      reader.readAsText(file);
+      transcript_import_input.value = '';
+    });
+  }
+
+  if (transcript_replay_btn) {
+    transcript_replay_btn.addEventListener('click', () => {
+      const conv_id = conv_id_input.value.trim();
+      const imported_events =
+        transcript_last_import && Array.isArray(transcript_last_import.events) ? transcript_last_import.events : [];
+      if (imported_events.length && (!conv_id || transcript_last_import.conv_id === conv_id)) {
+        const latest_env = latest_transcript_env(imported_events);
+        if (latest_env) {
+          last_conv_env_b64 = latest_env;
+          update_dm_bridge_last_env();
+          set_transcript_status('status: replayed imported transcript');
+          return;
+        }
+      }
+      if (!conv_id) {
+        set_transcript_status('status: error (conv_id required)');
+        return;
+      }
+      read_transcripts(conv_id)
+        .then((entries) => {
+          const latest_env = latest_transcript_env(entries);
+          if (!latest_env) {
+            set_transcript_status('status: no transcript env found');
+            return;
+          }
+          last_conv_env_b64 = latest_env;
+          update_dm_bridge_last_env();
+          set_transcript_status('status: replayed recorded transcript');
+        })
+        .catch((err) => set_transcript_status(`status: error (${err.message})`));
     });
   }
 
