@@ -125,11 +125,84 @@ python -m cli_app.mls_poc --profile alice gw-dm-send \
   --state-dir "${STATE_BASE}/alice" \
   --plaintext "${PLAINTEXT}" >/dev/null
 
+TRANSCRIPT_PATH=$(python - <<'PY'
+import base64
+import hashlib
+import json
+import os
+import time
+from pathlib import Path
+
+from cli_app import gateway_client, gateway_store, identity_store, profile_paths
+
+conv_id = os.environ["CONV_ID"]
+profile = "alice"
+timeout_s = 10.0
+
+paths = profile_paths.resolve_profile_paths(profile)
+identity_store.load_or_create_identity(paths.identity_path)
+session = gateway_store.load_session(paths.session_path)
+if session is None:
+    raise SystemExit("No gateway session found for transcript fetch.")
+
+base_url = os.environ.get("GW_BASE_URL", session["base_url"])
+events = []
+start = time.monotonic()
+
+for event in gateway_client.sse_tail(
+    base_url,
+    session["session_token"],
+    conv_id,
+    1,
+    idle_timeout_s=timeout_s,
+):
+    if time.monotonic() - start > timeout_s:
+        break
+    if not isinstance(event, dict) or event.get("t") != "conv.event":
+        continue
+    body = event.get("body", {})
+    if not isinstance(body, dict):
+        continue
+    seq = body.get("seq")
+    env = body.get("env")
+    msg_id = body.get("msg_id") if isinstance(body.get("msg_id"), str) else None
+    if not isinstance(seq, int) or not isinstance(env, str):
+        continue
+    events.append({"seq": seq, "msg_id": msg_id, "env": env})
+    if len(events) >= 3:
+        break
+
+events.sort(key=lambda entry: entry["seq"])
+canonical_events = [
+    {"seq": entry["seq"], "msg_id": entry["msg_id"], "env": entry["env"]}
+    for entry in events
+]
+canonical_payload = {
+    "schema_version": 1,
+    "conv_id": conv_id,
+    "from_seq": 1,
+    "next_seq": None,
+    "events": canonical_events,
+}
+canonical_json = json.dumps(canonical_payload, separators=(",", ":"), ensure_ascii=False)
+digest = hashlib.sha256(canonical_json.encode("utf-8")).digest()
+digest_b64 = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+payload = dict(canonical_payload)
+payload["digest_sha256_b64"] = digest_b64
+
+profile_home = Path(os.environ["HOME"])
+transcript_path = profile_home / "transcript.json"
+transcript_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+print(str(transcript_path.resolve()))
+PY
+)
+
 cat <<OUTPUT
 === WEB IMPORT (paste into DM UI) ===
 welcome_env_b64=${WELCOME_ENV_B64}
 commit_env_b64=${COMMIT_ENV_B64}
 app_env_b64=${APP_ENV_B64}
 expected_plaintext=${PLAINTEXT}
+transcript_path=${TRANSCRIPT_PATH}
 ====================================
 OUTPUT
