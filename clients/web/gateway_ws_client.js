@@ -54,7 +54,13 @@
   let transcript_status_text = null;
   let transcript_export_btn = null;
   let transcript_import_input = null;
+  let transcript_paste_input = null;
+  let transcript_paste_import_btn = null;
   let transcript_replay_btn = null;
+  let transcript_summary_pre = null;
+  let transcript_load_welcome_btn = null;
+  let transcript_load_commit_btn = null;
+  let transcript_load_app_btn = null;
   let transcript_last_import = null;
   const last_from_seq_by_conv_id = {};
 
@@ -474,6 +480,28 @@
     }
   };
 
+  const set_transcript_summary = (summary) => {
+    if (!transcript_summary_pre) {
+      return;
+    }
+    if (!summary) {
+      transcript_summary_pre.textContent = 'digest: missing\nevents: 0\nkinds: welcome=0 commit=0 app=0 unknown=0';
+      return;
+    }
+    const digest_status = summary.digest_status || 'missing';
+    const digest_value = summary.digest_value || 'none';
+    const event_count = typeof summary.event_count === 'number' ? summary.event_count : 0;
+    const kind_counts = summary.kind_counts || {};
+    const welcome_count = kind_counts.welcome || 0;
+    const commit_count = kind_counts.commit || 0;
+    const app_count = kind_counts.app || 0;
+    const unknown_count = kind_counts.unknown || 0;
+    transcript_summary_pre.textContent =
+      `digest: ${digest_status} (${digest_value})\n` +
+      `events: ${event_count}\n` +
+      `kinds: welcome=${welcome_count} commit=${commit_count} app=${app_count} unknown=${unknown_count}`;
+  };
+
   const render_transcript_events = (conv_id, events) => {
     event_log.innerHTML = '';
     if (!Array.isArray(events) || events.length === 0) {
@@ -503,6 +531,168 @@
       return last_event.env;
     }
     return null;
+  };
+
+  const classify_env_kind = (env_b64) => {
+    if (typeof env_b64 !== 'string') {
+      return { kind: null, kind_label: 'unknown', valid: false };
+    }
+    const env_bytes = base64_to_bytes(env_b64);
+    if (!env_bytes || env_bytes.length < 1) {
+      return { kind: null, kind_label: 'unknown', valid: false };
+    }
+    const kind = env_bytes[0];
+    if (kind === 1) {
+      return { kind, kind_label: 'welcome', valid: true };
+    }
+    if (kind === 2) {
+      return { kind, kind_label: 'commit', valid: true };
+    }
+    if (kind === 3) {
+      return { kind, kind_label: 'app', valid: true };
+    }
+    return { kind, kind_label: 'unknown', valid: true };
+  };
+
+  const summarize_transcript = (events) => {
+    const summary = {
+      kind_counts: {
+        welcome: 0,
+        commit: 0,
+        app: 0,
+        unknown: 0,
+      },
+      selected_envs: {
+        welcome_env_b64: null,
+        commit_env_b64: null,
+        app_env_b64: null,
+      },
+    };
+    if (!Array.isArray(events) || events.length === 0) {
+      return summary;
+    }
+    const sorted = [...events].sort((a, b) => a.seq - b.seq);
+    for (const event of sorted) {
+      const result = classify_env_kind(event.env);
+      if (!result.valid) {
+        summary.kind_counts.unknown += 1;
+        continue;
+      }
+      if (result.kind === 1) {
+        summary.kind_counts.welcome += 1;
+        if (!summary.selected_envs.welcome_env_b64) {
+          summary.selected_envs.welcome_env_b64 = event.env;
+        }
+        continue;
+      }
+      if (result.kind === 2) {
+        summary.kind_counts.commit += 1;
+        if (!summary.selected_envs.commit_env_b64) {
+          summary.selected_envs.commit_env_b64 = event.env;
+        }
+        continue;
+      }
+      if (result.kind === 3) {
+        summary.kind_counts.app += 1;
+        summary.selected_envs.app_env_b64 = event.env;
+        continue;
+      }
+      summary.kind_counts.unknown += 1;
+    }
+    return summary;
+  };
+
+  const validate_transcript_payload = (payload) => {
+    if (has_uppercase_key(payload)) {
+      return { error: 'camelCase keys not allowed' };
+    }
+    const conv_id_value = payload && typeof payload.conv_id === 'string' ? payload.conv_id : null;
+    if (!conv_id_value) {
+      return { error: 'conv_id required' };
+    }
+    const raw_events = payload && Array.isArray(payload.events) ? payload.events : null;
+    if (!raw_events) {
+      return { error: 'events required' };
+    }
+    const seen_seq = new Set();
+    const normalized = [];
+    for (const event of raw_events) {
+      if (!event || typeof event !== 'object') {
+        continue;
+      }
+      if (has_uppercase_key(event)) {
+        return { error: 'camelCase keys not allowed' };
+      }
+      const seq = typeof event.seq === 'number' ? event.seq : Number(event.seq);
+      if (typeof seq !== 'number' || Number.isNaN(seq) || seq < 1 || !Number.isInteger(seq)) {
+        return { error: 'invalid seq' };
+      }
+      if (seen_seq.has(seq)) {
+        return { error: 'duplicate seq' };
+      }
+      seen_seq.add(seq);
+      const env = typeof event.env === 'string' ? event.env : typeof event.env_b64 === 'string' ? event.env_b64 : null;
+      if (typeof env !== 'string') {
+        return { error: 'invalid env' };
+      }
+      const msg_id = typeof event.msg_id === 'string' && event.msg_id ? event.msg_id : null;
+      normalized.push({ seq, msg_id, env });
+    }
+    normalized.sort((a, b) => a.seq - b.seq);
+    const from_seq_value = payload && typeof payload.from_seq === 'number' ? payload.from_seq : null;
+    const next_seq_value = payload && typeof payload.next_seq === 'number' ? payload.next_seq : null;
+    const digest_value = payload && typeof payload.digest_sha256_b64 === 'string' ? payload.digest_sha256_b64 : null;
+    const expected_plaintext =
+      payload && typeof payload.expected_plaintext === 'string' ? payload.expected_plaintext : null;
+    return {
+      conv_id: conv_id_value,
+      from_seq: from_seq_value,
+      next_seq: next_seq_value,
+      events: normalized,
+      digest_sha256_b64: digest_value,
+      expected_plaintext,
+    };
+  };
+
+  const import_transcript_payload = async (payload) => {
+    const validated = validate_transcript_payload(payload);
+    if (validated.error) {
+      set_transcript_status(`status: error (${validated.error})`);
+      set_transcript_summary(null);
+      return;
+    }
+    const digest_payload = {
+      conv_id: validated.conv_id,
+      from_seq: validated.from_seq,
+      next_seq: validated.next_seq,
+      events: validated.events,
+    };
+    let digest_status = 'missing';
+    let digest_value = validated.digest_sha256_b64;
+    if (digest_value) {
+      const computed_digest = await compute_transcript_digest(digest_payload);
+      digest_status = computed_digest === digest_value ? 'ok' : 'mismatch';
+    } else {
+      digest_value = null;
+    }
+    const summary = summarize_transcript(validated.events);
+    summary.digest_status = digest_status;
+    summary.digest_value = digest_value;
+    summary.event_count = validated.events.length;
+    transcript_last_import = {
+      conv_id: validated.conv_id,
+      from_seq: validated.from_seq,
+      next_seq: validated.next_seq,
+      events: validated.events,
+      digest_sha256_b64: validated.digest_sha256_b64,
+      expected_plaintext: validated.expected_plaintext,
+      selected_envs: summary.selected_envs,
+    };
+    render_transcript_events(validated.conv_id, validated.events);
+    set_transcript_summary(summary);
+    const digest_note =
+      digest_status === 'missing' ? '' : `; digest ${digest_status}: ${digest_value || 'none'}`;
+    set_transcript_status(`status: imported ${validated.events.length} events${digest_note}`);
   };
 
   const find_dm_import_input = (label_text) => {
@@ -887,6 +1077,22 @@
     import_label.appendChild(import_input);
     fieldset.appendChild(import_label);
 
+    const paste_label = document.createElement('label');
+    paste_label.textContent = 'Paste transcript JSON';
+    const paste_input = document.createElement('textarea');
+    paste_input.rows = 6;
+    paste_input.cols = 64;
+    paste_label.appendChild(paste_input);
+    fieldset.appendChild(paste_label);
+
+    const paste_row = document.createElement('div');
+    paste_row.className = 'button-row';
+    const paste_import_btn = document.createElement('button');
+    paste_import_btn.type = 'button';
+    paste_import_btn.textContent = 'Import pasted transcript';
+    paste_row.appendChild(paste_import_btn);
+    fieldset.appendChild(paste_row);
+
     const replay_row = document.createElement('div');
     replay_row.className = 'button-row';
     const replay_btn = document.createElement('button');
@@ -895,9 +1101,29 @@
     replay_row.appendChild(replay_btn);
     fieldset.appendChild(replay_row);
 
+    const load_row = document.createElement('div');
+    load_row.className = 'button-row';
+    const load_welcome_btn = document.createElement('button');
+    load_welcome_btn.type = 'button';
+    load_welcome_btn.textContent = 'Load welcome into DM UI';
+    const load_commit_btn = document.createElement('button');
+    load_commit_btn.type = 'button';
+    load_commit_btn.textContent = 'Load commit into DM UI';
+    const load_app_btn = document.createElement('button');
+    load_app_btn.type = 'button';
+    load_app_btn.textContent = 'Load app into DM UI';
+    load_row.appendChild(load_welcome_btn);
+    load_row.appendChild(load_commit_btn);
+    load_row.appendChild(load_app_btn);
+    fieldset.appendChild(load_row);
+
     const status = document.createElement('p');
     status.textContent = 'status: idle';
     fieldset.appendChild(status);
+
+    const summary_pre = document.createElement('pre');
+    summary_pre.textContent = 'digest: missing\nevents: 0\nkinds: welcome=0 commit=0 app=0 unknown=0';
+    fieldset.appendChild(summary_pre);
 
     const dm_fieldset = dm_bridge_last_env_text ? dm_bridge_last_env_text.closest('fieldset') : null;
     if (dm_fieldset && dm_fieldset.parentNode) {
@@ -909,7 +1135,13 @@
     transcript_status_text = status;
     transcript_export_btn = export_btn;
     transcript_import_input = import_input;
+    transcript_paste_input = paste_input;
+    transcript_paste_import_btn = paste_import_btn;
     transcript_replay_btn = replay_btn;
+    transcript_summary_pre = summary_pre;
+    transcript_load_welcome_btn = load_welcome_btn;
+    transcript_load_commit_btn = load_commit_btn;
+    transcript_load_app_btn = load_app_btn;
   };
 
   const build_social_panel = () => {
@@ -1200,79 +1432,77 @@
       reader.onload = async () => {
         try {
           const payload = JSON.parse(reader.result);
-          if (has_uppercase_key(payload)) {
-            set_transcript_status('status: error (camelCase keys not allowed)');
-            return;
-          }
-          const conv_id_value = payload && typeof payload.conv_id === 'string' ? payload.conv_id : null;
-          if (!conv_id_value) {
-            set_transcript_status('status: error (conv_id required)');
-            return;
-          }
-          const raw_events = payload && Array.isArray(payload.events) ? payload.events : null;
-          if (!raw_events) {
-            set_transcript_status('status: error (events required)');
-            return;
-          }
-          const seen_seq = new Set();
-          const normalized = [];
-          for (const event of raw_events) {
-            if (!event || typeof event !== 'object') {
-              continue;
-            }
-            if (has_uppercase_key(event)) {
-              set_transcript_status('status: error (camelCase keys not allowed)');
-              return;
-            }
-            const seq = typeof event.seq === 'number' ? event.seq : Number(event.seq);
-            if (typeof seq !== 'number' || Number.isNaN(seq) || seq < 1) {
-              set_transcript_status('status: error (invalid seq)');
-              return;
-            }
-            if (seen_seq.has(seq)) {
-              set_transcript_status('status: error (duplicate seq)');
-              return;
-            }
-            seen_seq.add(seq);
-            const env = typeof event.env === 'string' ? event.env : event.env_b64;
-            if (typeof env !== 'string') {
-              set_transcript_status('status: error (invalid env)');
-              return;
-            }
-            const msg_id = typeof event.msg_id === 'string' && event.msg_id ? event.msg_id : null;
-            normalized.push({ seq, msg_id, env });
-          }
-          normalized.sort((a, b) => a.seq - b.seq);
-          const from_seq_value = payload && typeof payload.from_seq === 'number' ? payload.from_seq : null;
-          const next_seq_value = payload && typeof payload.next_seq === 'number' ? payload.next_seq : null;
-          const digest_value = payload && typeof payload.digest_sha256_b64 === 'string' ? payload.digest_sha256_b64 : null;
-          const digest_payload = {
-            conv_id: conv_id_value,
-            from_seq: from_seq_value,
-            next_seq: next_seq_value,
-            events: normalized,
-          };
-          let digest_note = '';
-          if (digest_value) {
-            const computed_digest = await compute_transcript_digest(digest_payload);
-            digest_note =
-              computed_digest === digest_value ? `; digest ok: ${digest_value}` : `; digest mismatch: ${digest_value}`;
-          }
-          transcript_last_import = {
-            conv_id: conv_id_value,
-            from_seq: from_seq_value,
-            next_seq: next_seq_value,
-            events: normalized,
-            digest_sha256_b64: digest_value,
-          };
-          render_transcript_events(conv_id_value, normalized);
-          set_transcript_status(`status: imported ${normalized.length} events${digest_note}`);
+          await import_transcript_payload(payload);
         } catch (err) {
           set_transcript_status(`status: error (${err.message || 'invalid json'})`);
+          set_transcript_summary(null);
         }
       };
       reader.readAsText(file);
       transcript_import_input.value = '';
+    });
+  }
+
+  if (transcript_paste_import_btn) {
+    transcript_paste_import_btn.addEventListener('click', async () => {
+      const paste_value = transcript_paste_input ? transcript_paste_input.value.trim() : '';
+      if (!paste_value) {
+        set_transcript_status('status: error (paste transcript json)');
+        set_transcript_summary(null);
+        return;
+      }
+      try {
+        const payload = JSON.parse(paste_value);
+        await import_transcript_payload(payload);
+      } catch (err) {
+        set_transcript_status(`status: error (${err.message || 'invalid json'})`);
+        set_transcript_summary(null);
+      }
+    });
+  }
+
+  const load_transcript_env_to_dm = (kind_label) => {
+    if (!transcript_last_import || !transcript_last_import.selected_envs) {
+      set_transcript_status(`status: error (no imported transcript to load ${kind_label})`);
+      return;
+    }
+    const selected_envs = transcript_last_import.selected_envs;
+    let env_b64 = null;
+    if (kind_label === 'welcome') {
+      env_b64 = selected_envs.welcome_env_b64;
+    } else if (kind_label === 'commit') {
+      env_b64 = selected_envs.commit_env_b64;
+    } else if (kind_label === 'app') {
+      env_b64 = selected_envs.app_env_b64;
+    }
+    if (!env_b64) {
+      set_transcript_status(`status: error (no ${kind_label} env found)`);
+      return;
+    }
+    const did_set = set_dm_incoming_env(env_b64);
+    if (!did_set) {
+      set_transcript_status('status: error (dm_ui incoming_env_b64 input not found)');
+      return;
+    }
+    if (transcript_last_import.expected_plaintext) {
+      set_dm_expected_plaintext(transcript_last_import.expected_plaintext);
+    }
+    set_transcript_status(`status: loaded ${kind_label} into dm_ui`);
+  };
+
+  if (transcript_load_welcome_btn) {
+    transcript_load_welcome_btn.addEventListener('click', () => {
+      load_transcript_env_to_dm('welcome');
+    });
+  }
+  if (transcript_load_commit_btn) {
+    transcript_load_commit_btn.addEventListener('click', () => {
+      load_transcript_env_to_dm('commit');
+    });
+  }
+  if (transcript_load_app_btn) {
+    transcript_load_app_btn.addEventListener('click', () => {
+      load_transcript_env_to_dm('app');
     });
   }
 
