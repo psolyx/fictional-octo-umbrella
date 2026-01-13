@@ -120,12 +120,30 @@ print(dm_envelope.pack(0x03, sys.stdin.read().strip()))
 PY
 )
 
+EXPECTED_APP_MSG_ID_HEX=$(printf '%s' "${APP_ENV_B64}" | python - <<'PY'
+import base64
+import hashlib
+import sys
+
+env_b64 = sys.stdin.read().strip()
+padding = "=" * (-len(env_b64) % 4)
+env_bytes = base64.urlsafe_b64decode(env_b64 + padding)
+print(hashlib.sha256(env_bytes).hexdigest())
+PY
+)
+
 python -m cli_app.mls_poc --profile alice gw-dm-send \
   --conv-id "${CONV_ID}" \
   --state-dir "${STATE_BASE}/alice" \
   --plaintext "${PLAINTEXT}" >/dev/null
 
-TRANSCRIPT_PATH=$(python - <<'PY'
+readarray -t transcript_info < <(
+  APP_ENV_B64="${APP_ENV_B64}" \
+  COMMIT_ENV_B64="${COMMIT_ENV_B64}" \
+  EXPECTED_APP_MSG_ID_HEX="${EXPECTED_APP_MSG_ID_HEX}" \
+  PLAINTEXT="${PLAINTEXT}" \
+  WELCOME_ENV_B64="${WELCOME_ENV_B64}" \
+  python - <<'PY'
 import base64
 import hashlib
 import json
@@ -137,7 +155,13 @@ from cli_app import gateway_client, gateway_store, identity_store, profile_paths
 
 conv_id = os.environ["CONV_ID"]
 profile = "alice"
-timeout_s = 10.0
+timeout_s = 15.0
+max_events = 50
+expected_plaintext = os.environ["PLAINTEXT"]
+expected_app_msg_id_hex = os.environ["EXPECTED_APP_MSG_ID_HEX"]
+welcome_env_b64 = os.environ["WELCOME_ENV_B64"]
+commit_env_b64 = os.environ["COMMIT_ENV_B64"]
+app_env_b64 = os.environ["APP_ENV_B64"]
 
 paths = profile_paths.resolve_profile_paths(profile)
 identity_store.load_or_create_identity(paths.identity_path)
@@ -146,8 +170,24 @@ if session is None:
     raise SystemExit("No gateway session found for transcript fetch.")
 
 base_url = os.environ.get("GW_BASE_URL", session["base_url"])
-events = []
+events_by_seq = {}
+seen_welcome = False
+seen_commit = False
+seen_app = False
+matched_app_msg = False
 start = time.monotonic()
+
+from typing import Optional
+
+def decode_env_kind(env_b64: str) -> Optional[int]:
+    try:
+        padding = "=" * (-len(env_b64) % 4)
+        env_bytes = base64.urlsafe_b64decode(env_b64 + padding)
+    except Exception:
+        return None
+    if not env_bytes:
+        return None
+    return env_bytes[0]
 
 for event in gateway_client.sse_tail(
     base_url,
@@ -168,10 +208,37 @@ for event in gateway_client.sse_tail(
     msg_id = body.get("msg_id") if isinstance(body.get("msg_id"), str) else None
     if not isinstance(seq, int) or not isinstance(env, str):
         continue
-    events.append({"seq": seq, "msg_id": msg_id, "env": env})
-    if len(events) >= 3:
+    events_by_seq.setdefault(seq, {"seq": seq, "msg_id": msg_id, "env": env})
+    kind = decode_env_kind(env)
+    if kind == 0x01:
+        seen_welcome = True
+    elif kind == 0x02:
+        seen_commit = True
+    elif kind == 0x03:
+        seen_app = True
+        if msg_id is None:
+            raise SystemExit(
+                "Replay app envelope missing msg_id; cannot validate deterministic msg_id."
+            )
+        if msg_id == expected_app_msg_id_hex:
+            matched_app_msg = True
+    if len(events_by_seq) >= max_events:
+        break
+    if seen_welcome and seen_commit and matched_app_msg:
         break
 
+if not seen_welcome:
+    raise SystemExit("Replay did not include a welcome (kind=1) envelope before timeout.")
+if not seen_commit:
+    raise SystemExit("Replay did not include a commit (kind=2) envelope before timeout.")
+if not seen_app:
+    raise SystemExit("Replay did not include an app (kind=3) envelope before timeout.")
+if not matched_app_msg:
+    raise SystemExit(
+        "Replay did not include app envelope with expected msg_id; verify the send or increase timeout."
+    )
+
+events = list(events_by_seq.values())
 events.sort(key=lambda entry: entry["seq"])
 canonical_events = [
     {"seq": entry["seq"], "msg_id": entry["msg_id"], "env": entry["env"]}
@@ -189,13 +256,21 @@ digest = hashlib.sha256(canonical_json.encode("utf-8")).digest()
 digest_b64 = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 payload = dict(canonical_payload)
 payload["digest_sha256_b64"] = digest_b64
+payload["expected_plaintext"] = expected_plaintext
+payload["expected_app_msg_id_hex"] = expected_app_msg_id_hex
+payload["welcome_env_b64"] = welcome_env_b64
+payload["commit_env_b64"] = commit_env_b64
+payload["app_env_b64"] = app_env_b64
 
 profile_home = Path(os.environ["HOME"])
 transcript_path = profile_home / "transcript.json"
 transcript_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 print(str(transcript_path.resolve()))
+print(digest_b64)
 PY
 )
+TRANSCRIPT_PATH=${transcript_info[0]}
+TRANSCRIPT_DIGEST_SHA256_B64=${transcript_info[1]}
 
 cat <<OUTPUT
 === WEB IMPORT (paste into DM UI) ===
@@ -203,6 +278,8 @@ welcome_env_b64=${WELCOME_ENV_B64}
 commit_env_b64=${COMMIT_ENV_B64}
 app_env_b64=${APP_ENV_B64}
 expected_plaintext=${PLAINTEXT}
+expected_app_msg_id_hex=${EXPECTED_APP_MSG_ID_HEX}
+transcript_digest_sha256_b64=${TRANSCRIPT_DIGEST_SHA256_B64}
 transcript_path=${TRANSCRIPT_PATH}
 ====================================
 OUTPUT
