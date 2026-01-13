@@ -69,6 +69,8 @@
     return btoa(binary);
   };
 
+  const bytes_to_base64url = (bytes) => bytes_to_base64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
   const base64_to_bytes = (value) => {
     try {
       const binary = atob(value);
@@ -85,6 +87,37 @@
   const sha256_hex = async (bytes) => {
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return bytes_to_hex(new Uint8Array(digest));
+  };
+
+  const build_canonical_transcript = (payload) => {
+    const events = Array.isArray(payload.events) ? [...payload.events] : [];
+    events.sort((a, b) => a.seq - b.seq);
+    const canonical_events = events.map((event) => ({
+      seq: event.seq,
+      msg_id: typeof event.msg_id === 'string' ? event.msg_id : null,
+      env: event.env,
+    }));
+    return {
+      schema_version: 1,
+      conv_id: payload.conv_id,
+      from_seq: payload.from_seq === null ? null : payload.from_seq,
+      next_seq: payload.next_seq === null ? null : payload.next_seq,
+      events: canonical_events,
+    };
+  };
+
+  const compute_transcript_digest = async (payload) => {
+    const canonical_payload = build_canonical_transcript(payload);
+    const canonical_json = JSON.stringify(canonical_payload);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical_json));
+    return bytes_to_base64url(new Uint8Array(digest));
+  };
+
+  const has_uppercase_key = (value) => {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    return Object.keys(value).some((key) => /[A-Z]/.test(key));
   };
 
   const describe_dm_env = (env_b64) => {
@@ -1113,38 +1146,47 @@
   }
 
   if (transcript_export_btn) {
-    transcript_export_btn.addEventListener('click', () => {
+    transcript_export_btn.addEventListener('click', async () => {
       const conv_id = conv_id_input.value.trim();
       if (!conv_id) {
         set_transcript_status('status: error (conv_id required)');
         return;
       }
-      read_transcripts(conv_id)
-        .then((entries) => {
-          if (!entries.length) {
-            set_transcript_status('status: no transcripts found');
-            return;
-          }
-          const from_seq_value = last_from_seq_by_conv_id[conv_id];
-          const payload = {
-            conv_id,
-            from_seq: typeof from_seq_value === 'number' && !Number.isNaN(from_seq_value) ? from_seq_value : null,
-            events: entries.map((entry) => ({
-              seq: entry.seq,
-              msg_id: entry.msg_id,
-              env_b64: entry.env,
-            })),
-          };
-          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = `transcript-${conv_id}-${Date.now()}.json`;
-          link.click();
-          URL.revokeObjectURL(url);
-          set_transcript_status(`status: exported ${entries.length} events`);
-        })
-        .catch((err) => set_transcript_status(`status: error (${err.message})`));
+      try {
+        const entries = await read_transcripts(conv_id);
+        if (!entries.length) {
+          set_transcript_status('status: no transcripts found');
+          return;
+        }
+        const from_seq_value = last_from_seq_by_conv_id[conv_id];
+        const next_seq_value = await read_cursor(conv_id);
+        const payload = {
+          schema_version: 1,
+          conv_id,
+          from_seq: typeof from_seq_value === 'number' && !Number.isNaN(from_seq_value) ? from_seq_value : null,
+          next_seq: typeof next_seq_value === 'number' && !Number.isNaN(next_seq_value) ? next_seq_value : null,
+          events: entries.map((entry) => ({
+            seq: entry.seq,
+            msg_id: typeof entry.msg_id === 'string' && entry.msg_id ? entry.msg_id : null,
+            env: entry.env,
+          })),
+        };
+        const digest_sha256_b64 = await compute_transcript_digest(payload);
+        const export_payload = {
+          ...payload,
+          digest_sha256_b64,
+        };
+        const blob = new Blob([JSON.stringify(export_payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `transcript-${conv_id}-${Date.now()}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        set_transcript_status(`status: exported ${entries.length} events; digest: ${digest_sha256_b64}`);
+      } catch (err) {
+        set_transcript_status(`status: error (${err.message})`);
+      }
     });
   }
 
@@ -1155,34 +1197,76 @@
         return;
       }
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const payload = JSON.parse(reader.result);
-          const conv_id_value =
-            payload && typeof payload.conv_id === 'string' ? payload.conv_id : conv_id_input.value.trim();
-          const raw_events = payload && Array.isArray(payload.events) ? payload.events : [];
-          const normalized = raw_events
-            .map((event) => {
-              if (!event || typeof event !== 'object') {
-                return null;
-              }
-              const seq = typeof event.seq === 'number' ? event.seq : Number(event.seq);
-              const env = typeof event.env === 'string' ? event.env : event.env_b64;
-              if (typeof seq !== 'number' || Number.isNaN(seq) || typeof env !== 'string') {
-                return null;
-              }
-              const msg_id = typeof event.msg_id === 'string' ? event.msg_id : '';
-              return { seq, msg_id, env };
-            })
-            .filter((event) => event !== null);
+          if (has_uppercase_key(payload)) {
+            set_transcript_status('status: error (camelCase keys not allowed)');
+            return;
+          }
+          const conv_id_value = payload && typeof payload.conv_id === 'string' ? payload.conv_id : null;
+          if (!conv_id_value) {
+            set_transcript_status('status: error (conv_id required)');
+            return;
+          }
+          const raw_events = payload && Array.isArray(payload.events) ? payload.events : null;
+          if (!raw_events) {
+            set_transcript_status('status: error (events required)');
+            return;
+          }
+          const seen_seq = new Set();
+          const normalized = [];
+          for (const event of raw_events) {
+            if (!event || typeof event !== 'object') {
+              continue;
+            }
+            if (has_uppercase_key(event)) {
+              set_transcript_status('status: error (camelCase keys not allowed)');
+              return;
+            }
+            const seq = typeof event.seq === 'number' ? event.seq : Number(event.seq);
+            if (typeof seq !== 'number' || Number.isNaN(seq) || seq < 1) {
+              set_transcript_status('status: error (invalid seq)');
+              return;
+            }
+            if (seen_seq.has(seq)) {
+              set_transcript_status('status: error (duplicate seq)');
+              return;
+            }
+            seen_seq.add(seq);
+            const env = typeof event.env === 'string' ? event.env : event.env_b64;
+            if (typeof env !== 'string') {
+              set_transcript_status('status: error (invalid env)');
+              return;
+            }
+            const msg_id = typeof event.msg_id === 'string' && event.msg_id ? event.msg_id : null;
+            normalized.push({ seq, msg_id, env });
+          }
           normalized.sort((a, b) => a.seq - b.seq);
-          transcript_last_import = {
+          const from_seq_value = payload && typeof payload.from_seq === 'number' ? payload.from_seq : null;
+          const next_seq_value = payload && typeof payload.next_seq === 'number' ? payload.next_seq : null;
+          const digest_value = payload && typeof payload.digest_sha256_b64 === 'string' ? payload.digest_sha256_b64 : null;
+          const digest_payload = {
             conv_id: conv_id_value,
-            from_seq: payload && typeof payload.from_seq === 'number' ? payload.from_seq : null,
+            from_seq: from_seq_value,
+            next_seq: next_seq_value,
             events: normalized,
           };
+          let digest_note = '';
+          if (digest_value) {
+            const computed_digest = await compute_transcript_digest(digest_payload);
+            digest_note =
+              computed_digest === digest_value ? `; digest ok: ${digest_value}` : `; digest mismatch: ${digest_value}`;
+          }
+          transcript_last_import = {
+            conv_id: conv_id_value,
+            from_seq: from_seq_value,
+            next_seq: next_seq_value,
+            events: normalized,
+            digest_sha256_b64: digest_value,
+          };
           render_transcript_events(conv_id_value, normalized);
-          set_transcript_status(`status: imported ${normalized.length} events`);
+          set_transcript_status(`status: imported ${normalized.length} events${digest_note}`);
         } catch (err) {
           set_transcript_status(`status: error (${err.message || 'invalid json'})`);
         }
