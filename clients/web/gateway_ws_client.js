@@ -26,7 +26,12 @@
   let dm_bridge_parse_btn = null;
   let dm_bridge_send_btn = null;
   let dm_bridge_status = null;
+  let dm_bridge_autofill_status = null;
   let dm_bridge_expected_plaintext_pre = null;
+  let dm_bridge_autofill_enabled_input = null;
+  let dm_bridge_autofill_welcome_input = null;
+  let dm_bridge_autofill_commit_input = null;
+  let dm_bridge_autofill_app_input = null;
   let dm_import_env_input = null;
   let dm_expected_plaintext_input = null;
 
@@ -49,6 +54,12 @@
     3: 'app_ciphertext',
   };
   const cli_block_keys = ['welcome_env_b64', 'commit_env_b64', 'app_env_b64', 'expected_plaintext'];
+  const dm_autofill_setting_keys = {
+    enabled: 'dm_autofill_enabled',
+    welcome: 'dm_autofill_welcome',
+    commit: 'dm_autofill_commit',
+    app: 'dm_autofill_app',
+  };
   let last_conv_env_b64 = '';
   let parsed_app_env_b64 = '';
   let transcript_status_text = null;
@@ -784,6 +795,104 @@
     return false;
   };
 
+  const update_dm_autofill_status = (summary) => {
+    if (!dm_bridge_autofill_status) {
+      return;
+    }
+    if (!summary) {
+      dm_bridge_autofill_status.textContent = 'auto-fill: idle';
+      return;
+    }
+    dm_bridge_autofill_status.textContent = summary;
+  };
+
+  const set_dm_autofill_controls_enabled = (enabled) => {
+    const control_inputs = [
+      dm_bridge_autofill_welcome_input,
+      dm_bridge_autofill_commit_input,
+      dm_bridge_autofill_app_input,
+    ];
+    control_inputs.forEach((input) => {
+      if (input) {
+        input.disabled = !enabled;
+      }
+    });
+    if (!enabled) {
+      update_dm_autofill_status(null);
+    }
+  };
+
+  const persist_dm_autofill_settings = () => {
+    const enabled = dm_bridge_autofill_enabled_input ? dm_bridge_autofill_enabled_input.checked : false;
+    const welcome_enabled = dm_bridge_autofill_welcome_input ? dm_bridge_autofill_welcome_input.checked : false;
+    const commit_enabled = dm_bridge_autofill_commit_input ? dm_bridge_autofill_commit_input.checked : false;
+    const app_enabled = dm_bridge_autofill_app_input ? dm_bridge_autofill_app_input.checked : false;
+    write_setting(dm_autofill_setting_keys.enabled, enabled).catch((err) =>
+      append_log(`failed to persist dm_autofill_enabled: ${err.message}`)
+    );
+    write_setting(dm_autofill_setting_keys.welcome, welcome_enabled).catch((err) =>
+      append_log(`failed to persist dm_autofill_welcome: ${err.message}`)
+    );
+    write_setting(dm_autofill_setting_keys.commit, commit_enabled).catch((err) =>
+      append_log(`failed to persist dm_autofill_commit: ${err.message}`)
+    );
+    write_setting(dm_autofill_setting_keys.app, app_enabled).catch((err) =>
+      append_log(`failed to persist dm_autofill_app: ${err.message}`)
+    );
+  };
+
+  const handle_dm_autofill_toggle = () => {
+    const enabled = dm_bridge_autofill_enabled_input ? dm_bridge_autofill_enabled_input.checked : false;
+    set_dm_autofill_controls_enabled(enabled);
+    persist_dm_autofill_settings();
+  };
+
+  const handle_dm_autofill_kind_toggle = () => {
+    persist_dm_autofill_settings();
+  };
+
+  const maybe_autofill_dm_env = (body) => {
+    if (!body || typeof body !== 'object') {
+      return;
+    }
+    if (!dm_bridge_autofill_enabled_input || !dm_bridge_autofill_enabled_input.checked) {
+      return;
+    }
+    const conv_id = typeof body.conv_id === 'string' ? body.conv_id : '';
+    const target_conv_id = conv_id_input.value.trim();
+    if (!conv_id || !target_conv_id || conv_id !== target_conv_id) {
+      return;
+    }
+    if (typeof body.env !== 'string') {
+      return;
+    }
+    const env_bytes = base64_to_bytes(body.env);
+    if (!env_bytes || env_bytes.length < 1) {
+      return;
+    }
+    const kind = env_bytes[0];
+    const kind_label = dm_kind_labels[kind];
+    if (!kind_label) {
+      return;
+    }
+    const kind_allowed =
+      (kind === 1 && dm_bridge_autofill_welcome_input && dm_bridge_autofill_welcome_input.checked) ||
+      (kind === 2 && dm_bridge_autofill_commit_input && dm_bridge_autofill_commit_input.checked) ||
+      (kind === 3 && dm_bridge_autofill_app_input && dm_bridge_autofill_app_input.checked);
+    if (!kind_allowed) {
+      return;
+    }
+    const did_set = set_dm_incoming_env(body.env);
+    if (!did_set) {
+      update_dm_autofill_status('auto-fill: idle');
+      return;
+    }
+    const seq_value = typeof body.seq === 'number' && !Number.isNaN(body.seq) ? body.seq : '?';
+    update_dm_autofill_status(
+      `auto-fill: ${kind_label} env (seq=${seq_value} conv_id=${conv_id}) — click "Load ${kind_label} env" in DM UI`
+    );
+  };
+
   const send_ciphertext_with_deterministic_id = async (conv_id, ciphertext) => {
     if (!conv_id) {
       append_log('missing conv_id');
@@ -961,6 +1070,7 @@
         if (typeof body.env === 'string') {
           last_conv_env_b64 = body.env;
           update_dm_bridge_last_env();
+          maybe_autofill_dm_env(body);
         }
         render_event(body);
         record_transcript_event(body.conv_id, body.seq, body.msg_id, body.env).catch((err) =>
@@ -1034,6 +1144,48 @@
     status.textContent = 'status: idle';
     fieldset.appendChild(status);
 
+    const autofill_row = document.createElement('div');
+    autofill_row.className = 'button-row';
+    const autofill_label = document.createElement('label');
+    const autofill_input = document.createElement('input');
+    autofill_input.type = 'checkbox';
+    autofill_label.appendChild(autofill_input);
+    autofill_label.appendChild(document.createTextNode(' Auto-fill DM UI from live events'));
+    autofill_row.appendChild(autofill_label);
+    fieldset.appendChild(autofill_row);
+
+    const autofill_kind_row = document.createElement('div');
+    autofill_kind_row.className = 'button-row';
+    const welcome_label = document.createElement('label');
+    const welcome_input = document.createElement('input');
+    welcome_input.type = 'checkbox';
+    welcome_input.checked = true;
+    welcome_input.disabled = true;
+    welcome_label.appendChild(welcome_input);
+    welcome_label.appendChild(document.createTextNode(' welcome (kind=1)'));
+    const commit_label = document.createElement('label');
+    const commit_input = document.createElement('input');
+    commit_input.type = 'checkbox';
+    commit_input.checked = true;
+    commit_input.disabled = true;
+    commit_label.appendChild(commit_input);
+    commit_label.appendChild(document.createTextNode(' commit (kind=2)'));
+    const app_label = document.createElement('label');
+    const app_input = document.createElement('input');
+    app_input.type = 'checkbox';
+    app_input.checked = true;
+    app_input.disabled = true;
+    app_label.appendChild(app_input);
+    app_label.appendChild(document.createTextNode(' app (kind=3)'));
+    autofill_kind_row.appendChild(welcome_label);
+    autofill_kind_row.appendChild(commit_label);
+    autofill_kind_row.appendChild(app_label);
+    fieldset.appendChild(autofill_kind_row);
+
+    const autofill_status = document.createElement('p');
+    autofill_status.textContent = 'auto-fill: idle';
+    fieldset.appendChild(autofill_status);
+
     const expected_plaintext_pre = document.createElement('pre');
     expected_plaintext_pre.textContent = '';
     fieldset.appendChild(expected_plaintext_pre);
@@ -1052,7 +1204,12 @@
     dm_bridge_parse_btn = parse_btn;
     dm_bridge_send_btn = send_btn;
     dm_bridge_status = status;
+    dm_bridge_autofill_status = autofill_status;
     dm_bridge_expected_plaintext_pre = expected_plaintext_pre;
+    dm_bridge_autofill_enabled_input = autofill_input;
+    dm_bridge_autofill_welcome_input = welcome_input;
+    dm_bridge_autofill_commit_input = commit_input;
+    dm_bridge_autofill_app_input = app_input;
   };
 
   const build_transcript_panel = () => {
@@ -1241,6 +1398,25 @@
           social_after_hash_input.value = saved_after_hash;
         }
       }
+      if (dm_bridge_autofill_enabled_input) {
+        const saved_autofill_enabled = await read_setting(dm_autofill_setting_keys.enabled);
+        dm_bridge_autofill_enabled_input.checked = saved_autofill_enabled === true;
+      }
+      if (dm_bridge_autofill_welcome_input) {
+        const saved_autofill_welcome = await read_setting(dm_autofill_setting_keys.welcome);
+        dm_bridge_autofill_welcome_input.checked = saved_autofill_welcome !== false;
+      }
+      if (dm_bridge_autofill_commit_input) {
+        const saved_autofill_commit = await read_setting(dm_autofill_setting_keys.commit);
+        dm_bridge_autofill_commit_input.checked = saved_autofill_commit !== false;
+      }
+      if (dm_bridge_autofill_app_input) {
+        const saved_autofill_app = await read_setting(dm_autofill_setting_keys.app);
+        dm_bridge_autofill_app_input.checked = saved_autofill_app !== false;
+      }
+      set_dm_autofill_controls_enabled(
+        dm_bridge_autofill_enabled_input ? dm_bridge_autofill_enabled_input.checked : false
+      );
     } catch (err) {
       append_log(`failed to hydrate inputs: ${err.message}`);
     }
@@ -1374,6 +1550,26 @@
         return;
       }
       await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
+    });
+  }
+  if (dm_bridge_autofill_enabled_input) {
+    dm_bridge_autofill_enabled_input.addEventListener('change', () => {
+      handle_dm_autofill_toggle();
+    });
+  }
+  if (dm_bridge_autofill_welcome_input) {
+    dm_bridge_autofill_welcome_input.addEventListener('change', () => {
+      handle_dm_autofill_kind_toggle();
+    });
+  }
+  if (dm_bridge_autofill_commit_input) {
+    dm_bridge_autofill_commit_input.addEventListener('change', () => {
+      handle_dm_autofill_kind_toggle();
+    });
+  }
+  if (dm_bridge_autofill_app_input) {
+    dm_bridge_autofill_app_input.addEventListener('change', () => {
+      handle_dm_autofill_kind_toggle();
     });
   }
 
