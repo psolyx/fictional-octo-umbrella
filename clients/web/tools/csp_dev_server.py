@@ -2,8 +2,11 @@
 import argparse
 import http.server
 import html.parser
+import mimetypes
 import pathlib
+import subprocess
 import sys
+import traceback
 
 
 class csp_meta_parser(html.parser.HTMLParser):
@@ -106,6 +109,7 @@ def run_server(index_path: pathlib.Path, host: str, port: int) -> int:
         return 1
     csp_header = ensure_frame_ancestors(csp_value)
     web_root = index_path.parent
+    mimetypes.add_type("application/wasm", ".wasm")
 
     class csp_dev_handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -131,6 +135,80 @@ def run_server(index_path: pathlib.Path, host: str, port: int) -> int:
     return 0
 
 
+def wasm_paths(repo_root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    wasm_path = repo_root / "clients" / "web" / "vendor" / "mls_harness.wasm"
+    wasm_exec_path = repo_root / "clients" / "web" / "vendor" / "wasm_exec.js"
+    return wasm_path, wasm_exec_path
+
+
+def report_build_failure(message: str, verbose: bool) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    if verbose:
+        traceback.print_exc()
+
+
+def ensure_wasm(
+    repo_root: pathlib.Path,
+    *,
+    build_wasm: bool,
+    build_wasm_if_missing: bool,
+    require_wasm: bool,
+    verbose: bool,
+) -> int:
+    wasm_path, wasm_exec_path = wasm_paths(repo_root)
+    wasm_missing = not wasm_path.exists()
+    wasm_exec_missing = not wasm_exec_path.exists()
+    if require_wasm and (wasm_missing or wasm_exec_missing):
+        missing = []
+        if wasm_missing:
+            missing.append(str(wasm_path))
+        if wasm_exec_missing:
+            missing.append(str(wasm_exec_path))
+        print(
+            "error: required WASM artifacts missing: " + ", ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+
+    should_build = build_wasm or (
+        build_wasm_if_missing and (wasm_missing or wasm_exec_missing)
+    )
+    if not should_build:
+        return 0
+
+    build_script = repo_root / "tools" / "mls_harness" / "build_wasm.sh"
+    if not build_script.exists():
+        print(f"error: build script missing: {build_script}", file=sys.stderr)
+        return 1
+    try:
+        subprocess.run([str(build_script)], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        report_build_failure(
+            "failed to build MLS WASM harness; ensure Go is installed and "
+            "tools/mls_harness/build_wasm.sh is executable",
+            verbose,
+        )
+        if verbose:
+            print(f"details: {exc}", file=sys.stderr)
+        return 1
+
+    wasm_missing = not wasm_path.exists()
+    wasm_exec_missing = not wasm_exec_path.exists()
+    if wasm_missing or wasm_exec_missing:
+        missing = []
+        if wasm_missing:
+            missing.append(str(wasm_path))
+        if wasm_exec_missing:
+            missing.append(str(wasm_exec_path))
+        print(
+            "error: build completed but expected artifacts are missing: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate and serve clients/web with CSP response headers."
@@ -138,8 +216,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--check", action="store_true", help="validate CSP and exit")
     mode_group.add_argument("--serve", action="store_true", help="serve clients/web")
+    parser.add_argument(
+        "--build-wasm",
+        action="store_true",
+        help="build MLS WASM harness before serving or checking",
+    )
+    parser.add_argument(
+        "--build-wasm-if-missing",
+        action="store_true",
+        help="build MLS WASM harness only when artifacts are missing",
+    )
+    parser.add_argument(
+        "--require-wasm",
+        action="store_true",
+        help="exit non-zero if MLS WASM artifacts are missing",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="bind host (serve mode)")
     parser.add_argument("--port", default=8081, type=int, help="bind port (serve mode)")
+    parser.add_argument("--verbose", action="store_true", help="show error details")
     return parser
 
 
@@ -148,6 +242,15 @@ def main() -> int:
     args = parser.parse_args()
     repo_root = pathlib.Path(__file__).resolve().parents[3]
     index_path = repo_root / "clients" / "web" / "index.html"
+    wasm_status = ensure_wasm(
+        repo_root,
+        build_wasm=args.build_wasm,
+        build_wasm_if_missing=args.build_wasm_if_missing,
+        require_wasm=args.require_wasm,
+        verbose=args.verbose,
+    )
+    if wasm_status != 0:
+        return wasm_status
     if args.serve:
         return run_server(index_path, args.host, args.port)
     return run_check(index_path)
