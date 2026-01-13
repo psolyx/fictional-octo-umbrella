@@ -37,6 +37,9 @@ let expected_plaintext = '';
 let parsed_welcome_env_b64 = '';
 let parsed_commit_env_b64 = '';
 let parsed_app_env_b64 = '';
+let transcript_file_input = null;
+let transcript_textarea = null;
+let transcript_status_line = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -54,6 +57,12 @@ const cli_block_keys = [
 const set_status = (message) => {
 if (dm_status) {
 dm_status.textContent = message;
+}
+};
+
+const set_transcript_status = (message) => {
+if (transcript_status_line) {
+transcript_status_line.textContent = message;
 }
 };
 
@@ -551,6 +560,138 @@ return value;
 return `${value.slice(0, max_len)}…`;
 };
 
+const bytes_to_base64url = (bytes) => {
+const base64 = bytes_to_base64(bytes);
+return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+};
+
+const normalize_msg_id = (value) => {
+if (value === null || value === undefined) {
+return null;
+}
+return String(value);
+};
+
+const canonicalize_transcript = (transcript) => {
+const events_sorted = [...transcript.events].sort((left, right) => left.seq - right.seq);
+const canonical_events = events_sorted.map((event) => ({
+seq: event.seq,
+msg_id: normalize_msg_id(event.msg_id),
+env: event.env,
+}));
+return {
+schema_version: transcript.schema_version,
+conv_id: transcript.conv_id,
+from_seq: transcript.from_seq,
+next_seq: transcript.next_seq,
+events: canonical_events,
+};
+};
+
+const compute_transcript_digest = async (transcript) => {
+const canonical = canonicalize_transcript(transcript);
+const payload = JSON.stringify(canonical);
+const text_encoder = new TextEncoder();
+const payload_bytes = text_encoder.encode(payload);
+const digest_bytes = await crypto.subtle.digest('SHA-256', payload_bytes);
+return bytes_to_base64url(new Uint8Array(digest_bytes));
+};
+
+const parse_transcript_json = (payload_text) => {
+if (!payload_text || !payload_text.trim()) {
+return { ok: false, error: 'transcript input is empty' };
+}
+try {
+const parsed = JSON.parse(payload_text);
+return { ok: true, transcript: parsed };
+} catch (error) {
+return { ok: false, error: 'invalid transcript json' };
+}
+};
+
+const validate_transcript = (transcript) => {
+if (!transcript || typeof transcript !== 'object') {
+return { ok: false, error: 'transcript must be an object' };
+}
+const conv_id = typeof transcript.conv_id === 'string' ? transcript.conv_id : '';
+if (!conv_id) {
+return { ok: false, error: 'conv_id must be a string' };
+}
+const events = Array.isArray(transcript.events) ? transcript.events : null;
+if (!events) {
+return { ok: false, error: 'events must be an array' };
+}
+const seen_seq = new Set();
+for (const event of events) {
+const seq = event ? event.seq : null;
+if (!Number.isInteger(seq) || seq < 1) {
+return { ok: false, error: 'event seq must be int >= 1' };
+}
+if (seen_seq.has(seq)) {
+return { ok: false, error: `duplicate seq: ${seq}` };
+}
+seen_seq.add(seq);
+if (!event || typeof event.env !== 'string') {
+return { ok: false, error: `event env missing for seq ${seq}` };
+}
+}
+return {
+ok: true,
+transcript: {
+schema_version: transcript.schema_version,
+conv_id: transcript.conv_id,
+from_seq: transcript.from_seq,
+next_seq: transcript.next_seq,
+events,
+digest_sha256_b64: transcript.digest_sha256_b64,
+},
+};
+};
+
+const extract_transcript_envs = (events) => {
+let welcome_env_b64 = '';
+let welcome_seq = null;
+let commit_env_b64 = '';
+let commit_seq = null;
+let app_env_b64 = '';
+let app_seq = null;
+let app_count = 0;
+for (const event of events) {
+const seq = event.seq;
+const env_bytes = base64_to_bytes(event.env);
+if (!env_bytes || env_bytes.length < 1) {
+continue;
+}
+const kind = env_bytes[0];
+if (kind === 1) {
+if (welcome_seq === null || seq < welcome_seq) {
+welcome_seq = seq;
+welcome_env_b64 = event.env;
+}
+} else if (kind === 2) {
+if (commit_seq === null || seq < commit_seq) {
+commit_seq = seq;
+commit_env_b64 = event.env;
+}
+} else if (kind === 3) {
+app_count += 1;
+if (app_seq === null || seq > app_seq) {
+app_seq = seq;
+app_env_b64 = event.env;
+}
+}
+}
+return {
+welcome_env_b64,
+welcome_seq,
+commit_env_b64,
+commit_seq,
+app_env_b64,
+app_seq,
+app_count,
+};
+};
+
 const handle_parse_cli_block = () => {
 const block_text = cli_block_input ? cli_block_input.value : '';
 if (!block_text || !block_text.trim()) {
@@ -601,6 +742,69 @@ const expected_short = truncate_text(expected, 120);
 const actual_short = truncate_text(actual, 120);
 set_status('verify failed');
 log_output(`verify failed: expected="${expected_short}" actual="${actual_short}"`);
+};
+
+const handle_import_transcript = async () => {
+const pasted_text = transcript_textarea ? transcript_textarea.value.trim() : '';
+let transcript_text = pasted_text;
+if (!transcript_text) {
+const file = transcript_file_input && transcript_file_input.files ? transcript_file_input.files[0] : null;
+if (!file) {
+set_transcript_status('no transcript input');
+set_status('error');
+return;
+}
+try {
+transcript_text = await file.text();
+} catch (error) {
+set_transcript_status('failed reading transcript file');
+set_status('error');
+return;
+}
+}
+const parsed = parse_transcript_json(transcript_text);
+if (!parsed.ok) {
+set_transcript_status(parsed.error);
+set_status('error');
+return;
+}
+const validated = validate_transcript(parsed.transcript);
+if (!validated.ok) {
+set_transcript_status(validated.error);
+set_status('error');
+return;
+}
+const transcript = validated.transcript;
+let digest_note = 'no digest';
+if (transcript.digest_sha256_b64) {
+const computed_digest = await compute_transcript_digest(transcript);
+if (computed_digest === transcript.digest_sha256_b64) {
+digest_note = 'digest ok';
+} else {
+digest_note = 'digest mismatch';
+}
+}
+const extracted = extract_transcript_envs(transcript.events);
+parsed_welcome_env_b64 = extracted.welcome_env_b64;
+parsed_commit_env_b64 = extracted.commit_env_b64;
+parsed_app_env_b64 = extracted.app_env_b64;
+if (parsed_welcome_env_b64) {
+set_incoming_env_input(parsed_welcome_env_b64);
+}
+const env_status = [];
+if (extracted.welcome_seq !== null) {
+env_status.push(`welcome seq=${extracted.welcome_seq}`);
+}
+if (extracted.commit_seq !== null) {
+env_status.push(`commit seq=${extracted.commit_seq}`);
+}
+if (extracted.app_seq !== null) {
+const app_note = extracted.app_count > 1 ? `app seq=${extracted.app_seq} (highest of ${extracted.app_count})` : `app seq=${extracted.app_seq}`;
+env_status.push(app_note);
+}
+const env_summary = env_status.length ? `; ${env_status.join(', ')}` : '';
+set_transcript_status(`imported; ${digest_note}${env_summary}`);
+set_status('transcript imported');
 };
 
 const handle_save_state = async () => {
@@ -680,6 +884,43 @@ let cli_block_input = null;
 if (dm_fieldset) {
 const import_container = document.createElement('div');
 import_container.className = 'dm_import_env';
+
+const transcript_group = document.createElement('div');
+transcript_group.className = 'dm_transcript_import';
+
+const transcript_file_label = document.createElement('label');
+transcript_file_label.textContent = 'transcript_file';
+transcript_file_input = document.createElement('input');
+transcript_file_input.type = 'file';
+transcript_file_input.accept = '.json';
+transcript_file_label.appendChild(transcript_file_input);
+transcript_group.appendChild(transcript_file_label);
+
+const transcript_paste_label = document.createElement('label');
+transcript_paste_label.textContent = 'transcript_json';
+transcript_textarea = document.createElement('textarea');
+transcript_textarea.rows = 6;
+transcript_textarea.cols = 64;
+transcript_paste_label.appendChild(transcript_textarea);
+transcript_group.appendChild(transcript_paste_label);
+
+const transcript_buttons = document.createElement('div');
+transcript_buttons.className = 'button-row';
+const transcript_import_btn = document.createElement('button');
+transcript_import_btn.type = 'button';
+transcript_import_btn.textContent = 'Import transcript';
+transcript_import_btn.addEventListener('click', () => {
+handle_import_transcript();
+});
+transcript_buttons.appendChild(transcript_import_btn);
+transcript_group.appendChild(transcript_buttons);
+
+transcript_status_line = document.createElement('div');
+transcript_status_line.className = 'dm_transcript_status';
+transcript_status_line.textContent = 'transcript idle';
+transcript_group.appendChild(transcript_status_line);
+
+import_container.appendChild(transcript_group);
 
 const cli_block_label = document.createElement('label');
 cli_block_label.textContent = 'cli_output_block';
