@@ -26,6 +26,20 @@ def _emit(output: TextIO | None, message: str) -> None:
         stream.write(str(message) + "\n")
 
 
+def _normalize_social_args(args_list: list[str]) -> list[str]:
+    normalized: list[str] = []
+    idx = 0
+    while idx < len(args_list):
+        arg = args_list[idx]
+        if arg == "--user_id" and idx + 1 < len(args_list):
+            normalized.append(f"--user_id={args_list[idx + 1]}")
+            idx += 2
+            continue
+        normalized.append(arg)
+        idx += 1
+    return normalized
+
+
 def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
     args_list = argv if argv is not None else sys.argv[1:]
     if not args_list or args_list[0] != "social":
@@ -64,7 +78,7 @@ def main(argv: list[str] | None = None, output: TextIO | None = None) -> int:
         help="path to persisted identity",
     )
 
-    args = parser.parse_args(args_list[1:])
+    args = parser.parse_args(_normalize_social_args(args_list[1:]))
 
     try:
         if args.command == "publish":
