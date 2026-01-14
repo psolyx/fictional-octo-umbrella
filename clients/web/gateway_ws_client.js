@@ -65,6 +65,9 @@
   };
   let last_conv_env_b64 = '';
   let parsed_app_env_b64 = '';
+  let dm_outbox_welcome_env_b64 = '';
+  let dm_outbox_commit_env_b64 = '';
+  let dm_outbox_app_env_b64 = '';
   let transcript_status_text = null;
   let transcript_export_btn = null;
   let transcript_import_input = null;
@@ -787,6 +790,12 @@
     dm_bridge_status.textContent = message;
   };
 
+  const get_dm_outbox_envs = () => ({
+    welcome_env_b64: dm_outbox_welcome_env_b64 || '',
+    commit_env_b64: dm_outbox_commit_env_b64 || '',
+    app_env_b64: dm_outbox_app_env_b64 || '',
+  });
+
   const read_dm_ui_envs = () => {
     const output_pre = document.getElementById('dm_output');
     if (!output_pre) {
@@ -825,6 +834,19 @@
     return { envs, found_keys };
   };
 
+  const read_dm_bridge_envs = () => {
+    const outbox_envs = get_dm_outbox_envs();
+    const outbox_keys = Object.keys(outbox_envs).filter((key) => outbox_envs[key]);
+    if (outbox_keys.length > 0) {
+      return { envs: outbox_envs, found_keys: outbox_keys, source: 'outbox' };
+    }
+    const fallback = read_dm_ui_envs();
+    if (fallback.error) {
+      return fallback;
+    }
+    return { envs: fallback.envs, found_keys: fallback.found_keys, source: 'dm_output' };
+  };
+
   const maybe_dispatch_dm_commit_echo = (body) => {
     if (!body || typeof body !== 'object') {
       return;
@@ -844,7 +866,7 @@
     if (env_bytes[0] !== 2) {
       return;
     }
-    const output = read_dm_ui_envs();
+    const output = read_dm_bridge_envs();
     if (output.error) {
       append_log(`dm commit echo check skipped: ${output.error}`);
       return;
@@ -1654,6 +1676,19 @@
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
   });
 
+  window.addEventListener('dm.outbox.updated', (event) => {
+    const detail = event && event.detail ? event.detail : null;
+    if (!detail || typeof detail !== 'object') {
+      return;
+    }
+    dm_outbox_welcome_env_b64 =
+      typeof detail.welcome_env_b64 === 'string' ? detail.welcome_env_b64 : '';
+    dm_outbox_commit_env_b64 =
+      typeof detail.commit_env_b64 === 'string' ? detail.commit_env_b64 : '';
+    dm_outbox_app_env_b64 =
+      typeof detail.app_env_b64 === 'string' ? detail.app_env_b64 : '';
+  });
+
   build_dm_bridge_panel();
   build_transcript_panel();
   if (dm_bridge_copy_btn) {
@@ -1713,7 +1748,7 @@
   }
   if (dm_bridge_use_last_app_btn) {
     dm_bridge_use_last_app_btn.addEventListener('click', () => {
-      const output = read_dm_ui_envs();
+      const output = read_dm_bridge_envs();
       if (output.error) {
         set_dm_bridge_status(`status: error (${output.error})`);
         return;
@@ -1727,7 +1762,8 @@
       parsed_app_env_b64 = app_env_b64;
       ciphertext_input.value = app_env_b64;
       msg_id_input.value = '';
-      set_dm_bridge_status('status: loaded app_env from dm_output');
+      const source_label = output.source === 'outbox' ? 'outbox' : 'dm_output';
+      set_dm_bridge_status(`status: loaded app_env from ${source_label}`);
     });
   }
   if (dm_bridge_send_last_app_btn) {
@@ -1737,7 +1773,7 @@
         set_dm_bridge_status('status: error (conv_id required)');
         return;
       }
-      const output = read_dm_ui_envs();
+      const output = read_dm_bridge_envs();
       if (output.error) {
         set_dm_bridge_status(`status: error (${output.error})`);
         return;
@@ -1749,7 +1785,8 @@
         return;
       }
       await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
-      set_dm_bridge_status('status: sent app_env from dm_output');
+      const source_label = output.source === 'outbox' ? 'outbox' : 'dm_output';
+      set_dm_bridge_status(`status: sent app_env from ${source_label}`);
     });
   }
   if (dm_bridge_send_init_btn) {
@@ -1759,7 +1796,7 @@
         set_dm_bridge_status('status: error (conv_id required)');
         return;
       }
-      const output = read_dm_ui_envs();
+      const output = read_dm_bridge_envs();
       if (output.error) {
         set_dm_bridge_status(`status: error (${output.error})`);
         return;
@@ -1778,7 +1815,8 @@
       }
       await send_ciphertext_with_deterministic_id(conv_id, welcome_env_b64);
       await send_ciphertext_with_deterministic_id(conv_id, commit_env_b64);
-      set_dm_bridge_status('status: sent dm_ui init envs');
+      const source_label = output.source === 'outbox' ? 'outbox' : 'dm_output';
+      set_dm_bridge_status(`status: sent dm_ui init envs from ${source_label}`);
     });
   }
   if (dm_bridge_autofill_enabled_input) {
