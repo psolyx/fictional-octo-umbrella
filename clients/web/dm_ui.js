@@ -1886,5 +1886,6 @@ return;
 save_active_conv_state();
 active_conv_id = next_conv_id;
 apply_conv_state(get_conv_state(active_conv_id));
+set_status('idle');
 update_conv_status_label();
 });

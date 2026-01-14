@@ -1697,6 +1697,10 @@
     maybe_dispatch_conv_selected(conv_id_input.value);
   });
 
+  conv_id_input.addEventListener('input', () => {
+    maybe_dispatch_conv_selected(conv_id_input.value);
+  });
+
   conv_id_input.addEventListener('blur', () => {
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
     maybe_dispatch_conv_selected(conv_id_input.value);
