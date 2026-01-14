@@ -25,6 +25,9 @@
   let dm_bridge_cli_block_input = null;
   let dm_bridge_parse_btn = null;
   let dm_bridge_send_btn = null;
+  let dm_bridge_use_last_app_btn = null;
+  let dm_bridge_send_last_app_btn = null;
+  let dm_bridge_send_init_btn = null;
   let dm_bridge_status = null;
   let dm_bridge_autofill_status = null;
   let dm_bridge_expected_plaintext_pre = null;
@@ -777,6 +780,63 @@
     return { parsed, found_keys };
   };
 
+  const set_dm_bridge_status = (message) => {
+    if (!dm_bridge_status) {
+      return;
+    }
+    dm_bridge_status.textContent = message;
+  };
+
+  const read_dm_ui_envs = () => {
+    const output_pre = document.getElementById('dm_output');
+    if (!output_pre) {
+      return { error: 'dm_output missing' };
+    }
+    const output_text = output_pre.textContent || '';
+    if (!output_text.trim()) {
+      return { error: 'dm_output empty' };
+    }
+    const envs = {
+      welcome_env_b64: '',
+      commit_env_b64: '',
+      app_env_b64: '',
+    };
+    const env_regex = /^(welcome_env_b64|commit_env_b64|app_env_b64):\s*(\S+)/;
+    const lines = output_text.split(/\r?\n/);
+    for (const raw_line of lines) {
+      const line = raw_line.trim();
+      if (!line) {
+        continue;
+      }
+      const match = line.match(env_regex);
+      if (!match) {
+        continue;
+      }
+      const key = match[1];
+      const value = match[2];
+      if (value) {
+        envs[key] = value;
+      }
+    }
+    const found_keys = Object.keys(envs).filter((key) => envs[key]);
+    if (!found_keys.length) {
+      return { error: 'no dm_ui envs found' };
+    }
+    return { envs, found_keys };
+  };
+
+  const validate_env_b64_for_send = (env_b64, label) => {
+    if (!env_b64) {
+      return { ok: false, reason: `missing ${label}` };
+    }
+    const env_bytes = base64_to_bytes(env_b64);
+    if (!env_bytes || env_bytes.length < 1) {
+      append_log(`invalid base64 for ${label}`);
+      return { ok: false, reason: `invalid base64 for ${label}` };
+    }
+    return { ok: true, env_bytes };
+  };
+
   const set_dm_expected_plaintext = (value) => {
     hydrate_dm_import_inputs();
     if (dm_expected_plaintext_input) {
@@ -1140,6 +1200,22 @@
     send_row.appendChild(send_btn);
     fieldset.appendChild(send_row);
 
+    const dm_ui_row = document.createElement('div');
+    dm_ui_row.className = 'button-row';
+    const use_last_app_btn = document.createElement('button');
+    use_last_app_btn.type = 'button';
+    use_last_app_btn.textContent = 'Use last DM UI app_env';
+    const send_last_app_btn = document.createElement('button');
+    send_last_app_btn.type = 'button';
+    send_last_app_btn.textContent = 'Send last DM UI app_env to gateway';
+    const send_init_btn = document.createElement('button');
+    send_init_btn.type = 'button';
+    send_init_btn.textContent = 'Send DM UI init envs (welcome then commit)';
+    dm_ui_row.appendChild(use_last_app_btn);
+    dm_ui_row.appendChild(send_last_app_btn);
+    dm_ui_row.appendChild(send_init_btn);
+    fieldset.appendChild(dm_ui_row);
+
     const status = document.createElement('p');
     status.textContent = 'status: idle';
     fieldset.appendChild(status);
@@ -1203,6 +1279,9 @@
     dm_bridge_cli_block_input = cli_block_input;
     dm_bridge_parse_btn = parse_btn;
     dm_bridge_send_btn = send_btn;
+    dm_bridge_use_last_app_btn = use_last_app_btn;
+    dm_bridge_send_last_app_btn = send_last_app_btn;
+    dm_bridge_send_init_btn = send_init_btn;
     dm_bridge_status = status;
     dm_bridge_autofill_status = autofill_status;
     dm_bridge_expected_plaintext_pre = expected_plaintext_pre;
@@ -1515,12 +1594,12 @@
     dm_bridge_parse_btn.addEventListener('click', () => {
       const block_text = dm_bridge_cli_block_input ? dm_bridge_cli_block_input.value : '';
       if (!block_text || !block_text.trim()) {
-        dm_bridge_status.textContent = 'status: error (paste CLI block)';
+        set_dm_bridge_status('status: error (paste CLI block)');
         return;
       }
       const { parsed, found_keys } = parse_cli_block(block_text);
       if (!found_keys.length) {
-        dm_bridge_status.textContent = 'status: error (no CLI fields found)';
+        set_dm_bridge_status('status: error (no CLI fields found)');
         return;
       }
       if (parsed.welcome_env_b64) {
@@ -1538,7 +1617,7 @@
       }
       const missing_keys = cli_block_keys.filter((key) => !parsed[key]);
       const missing_summary = missing_keys.length ? `; missing: ${missing_keys.join(', ')}` : '';
-      dm_bridge_status.textContent = `status: parsed (${found_keys.join(', ')})${missing_summary}`;
+      set_dm_bridge_status(`status: parsed (${found_keys.join(', ')})${missing_summary}`);
     });
   }
   if (dm_bridge_send_btn) {
@@ -1550,6 +1629,76 @@
         return;
       }
       await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
+    });
+  }
+  if (dm_bridge_use_last_app_btn) {
+    dm_bridge_use_last_app_btn.addEventListener('click', () => {
+      const output = read_dm_ui_envs();
+      if (output.error) {
+        set_dm_bridge_status(`status: error (${output.error})`);
+        return;
+      }
+      const app_env_b64 = output.envs.app_env_b64;
+      const validation = validate_env_b64_for_send(app_env_b64, 'app_env_b64');
+      if (!validation.ok) {
+        set_dm_bridge_status(`status: error (${validation.reason})`);
+        return;
+      }
+      parsed_app_env_b64 = app_env_b64;
+      ciphertext_input.value = app_env_b64;
+      msg_id_input.value = '';
+      set_dm_bridge_status('status: loaded app_env from dm_output');
+    });
+  }
+  if (dm_bridge_send_last_app_btn) {
+    dm_bridge_send_last_app_btn.addEventListener('click', async () => {
+      const conv_id = conv_id_input.value.trim();
+      if (!conv_id) {
+        set_dm_bridge_status('status: error (conv_id required)');
+        return;
+      }
+      const output = read_dm_ui_envs();
+      if (output.error) {
+        set_dm_bridge_status(`status: error (${output.error})`);
+        return;
+      }
+      const app_env_b64 = output.envs.app_env_b64;
+      const validation = validate_env_b64_for_send(app_env_b64, 'app_env_b64');
+      if (!validation.ok) {
+        set_dm_bridge_status(`status: error (${validation.reason})`);
+        return;
+      }
+      await send_ciphertext_with_deterministic_id(conv_id, app_env_b64);
+      set_dm_bridge_status('status: sent app_env from dm_output');
+    });
+  }
+  if (dm_bridge_send_init_btn) {
+    dm_bridge_send_init_btn.addEventListener('click', async () => {
+      const conv_id = conv_id_input.value.trim();
+      if (!conv_id) {
+        set_dm_bridge_status('status: error (conv_id required)');
+        return;
+      }
+      const output = read_dm_ui_envs();
+      if (output.error) {
+        set_dm_bridge_status(`status: error (${output.error})`);
+        return;
+      }
+      const welcome_env_b64 = output.envs.welcome_env_b64;
+      const commit_env_b64 = output.envs.commit_env_b64;
+      const welcome_validation = validate_env_b64_for_send(welcome_env_b64, 'welcome_env_b64');
+      if (!welcome_validation.ok) {
+        set_dm_bridge_status(`status: error (${welcome_validation.reason})`);
+        return;
+      }
+      const commit_validation = validate_env_b64_for_send(commit_env_b64, 'commit_env_b64');
+      if (!commit_validation.ok) {
+        set_dm_bridge_status(`status: error (${commit_validation.reason})`);
+        return;
+      }
+      await send_ciphertext_with_deterministic_id(conv_id, welcome_env_b64);
+      await send_ciphertext_with_deterministic_id(conv_id, commit_env_b64);
+      set_dm_bridge_status('status: sent dm_ui init envs');
     });
   }
   if (dm_bridge_autofill_enabled_input) {
