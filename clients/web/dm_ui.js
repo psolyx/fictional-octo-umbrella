@@ -51,6 +51,9 @@ let outbox_welcome_textarea = null;
 let outbox_commit_textarea = null;
 let outbox_app_textarea = null;
 let outbox_copy_btn = null;
+let outbox_send_init_btn = null;
+let outbox_send_app_btn = null;
+let outbox_status_line = null;
 let live_inbox_by_seq = new Map();
 let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
@@ -294,6 +297,31 @@ outbox_commit_textarea.value = outbox_commit_env_b64;
 if (outbox_app_textarea) {
 outbox_app_textarea.value = outbox_app_env_b64;
 }
+};
+
+const set_outbox_status = (message) => {
+if (outbox_status_line) {
+outbox_status_line.textContent = message;
+}
+};
+
+const get_active_conv_id_for_send = () => {
+const normalized = normalize_conv_id(active_conv_id);
+if (!normalized || normalized === '(none)') {
+return '';
+}
+return normalized;
+};
+
+const dispatch_gateway_send_env = (conv_id, env_b64) => {
+window.dispatchEvent(
+new CustomEvent('gateway.send_env', {
+detail: {
+conv_id,
+env_b64,
+},
+})
+);
 };
 
 const dispatch_outbox_update = () => {
@@ -1648,7 +1676,51 @@ outbox_copy_btn.addEventListener('click', () => {
 copy_outbox_block();
 });
 outbox_buttons.appendChild(outbox_copy_btn);
+outbox_send_init_btn = document.createElement('button');
+outbox_send_init_btn.type = 'button';
+outbox_send_init_btn.textContent = 'Send init (welcome then commit)';
+outbox_send_init_btn.addEventListener('click', () => {
+const conv_id = get_active_conv_id_for_send();
+if (!conv_id) {
+set_outbox_status('outbox: select conv_id before sending');
+return;
+}
+if (!outbox_welcome_env_b64 || !outbox_commit_env_b64) {
+set_outbox_status('outbox: init requires welcome+commit in outbox');
+return;
+}
+set_outbox_status('outbox: sending init (welcome)');
+dispatch_gateway_send_env(conv_id, outbox_welcome_env_b64);
+set_outbox_status('outbox: sending init (commit)');
+dispatch_gateway_send_env(conv_id, outbox_commit_env_b64);
+last_local_commit_env_b64 = outbox_commit_env_b64;
+set_commit_echo_state('waiting', null);
+set_outbox_status('outbox: init sent (waiting for commit echo)');
+});
+outbox_buttons.appendChild(outbox_send_init_btn);
+outbox_send_app_btn = document.createElement('button');
+outbox_send_app_btn.type = 'button';
+outbox_send_app_btn.textContent = 'Send app env';
+outbox_send_app_btn.addEventListener('click', () => {
+const conv_id = get_active_conv_id_for_send();
+if (!conv_id) {
+set_outbox_status('outbox: select conv_id before sending');
+return;
+}
+if (!outbox_app_env_b64) {
+set_outbox_status('outbox: app env missing in outbox');
+return;
+}
+set_outbox_status('outbox: sending app env');
+dispatch_gateway_send_env(conv_id, outbox_app_env_b64);
+set_outbox_status('outbox: app env sent');
+});
+outbox_buttons.appendChild(outbox_send_app_btn);
 outbox_container.appendChild(outbox_buttons);
+outbox_status_line = document.createElement('div');
+outbox_status_line.className = 'dm_outbox_status';
+outbox_status_line.textContent = 'outbox: idle';
+outbox_container.appendChild(outbox_status_line);
 
 if (storage_container.parentNode) {
 if (storage_container.nextSibling) {
