@@ -869,6 +869,40 @@
     );
   };
 
+  const maybe_dispatch_conv_event_received = (body) => {
+    if (!body || typeof body !== 'object') {
+      return;
+    }
+    const selected_conv_id = conv_id_input ? conv_id_input.value.trim() : '';
+    if (!selected_conv_id || body.conv_id !== selected_conv_id) {
+      return;
+    }
+    if (typeof body.conv_id !== 'string' || !body.conv_id) {
+      return;
+    }
+    if (typeof body.env !== 'string' || typeof body.msg_id !== 'string') {
+      return;
+    }
+    const seq_value = Number.isInteger(body.seq) ? body.seq : null;
+    if (!seq_value || seq_value < 1) {
+      return;
+    }
+    const env_bytes = base64_to_bytes(body.env);
+    if (!env_bytes || env_bytes.length < 1) {
+      return;
+    }
+    window.dispatchEvent(
+      new CustomEvent('conv.event.received', {
+        detail: {
+          conv_id: body.conv_id,
+          seq: seq_value,
+          msg_id: body.msg_id,
+          env: body.env,
+        },
+      })
+    );
+  };
+
   const validate_env_b64_for_send = (env_b64, label) => {
     if (!env_b64) {
       return { ok: false, reason: `missing ${label}` };
@@ -1177,6 +1211,7 @@
           maybe_autofill_dm_env(body);
         }
         maybe_dispatch_dm_commit_echo(body);
+        maybe_dispatch_conv_event_received(body);
         render_event(body);
         record_transcript_event(body.conv_id, body.seq, body.msg_id, body.env).catch((err) =>
           append_log(`failed to persist transcript: ${err.message}`)

@@ -44,6 +44,14 @@ let commit_echo_status_line = null;
 let transcript_file_input = null;
 let transcript_textarea = null;
 let transcript_status_line = null;
+let live_inbox_by_seq = new Map();
+let live_inbox_expected_seq = 1;
+let live_inbox_last_ingested_seq = null;
+let live_inbox_enabled_input = null;
+let live_inbox_auto_input = null;
+let live_inbox_expected_input = null;
+let live_inbox_ingest_btn = null;
+let live_inbox_status_line = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -129,6 +137,43 @@ commit_echo_state = state;
 commit_echo_seq = typeof seq === 'number' ? seq : null;
 update_commit_echo_status_line();
 update_commit_apply_state();
+};
+
+const get_live_inbox_enabled = () =>
+Boolean(live_inbox_enabled_input && live_inbox_enabled_input.checked);
+
+const normalize_live_inbox_expected_seq = (value) => {
+const parsed = Number.parseInt(value, 10);
+if (!Number.isInteger(parsed) || parsed < 1) {
+return 1;
+}
+return parsed;
+};
+
+const set_live_inbox_expected_seq = (value) => {
+live_inbox_expected_seq = normalize_live_inbox_expected_seq(value);
+if (live_inbox_expected_input) {
+live_inbox_expected_input.value = String(live_inbox_expected_seq);
+}
+update_live_inbox_status();
+};
+
+const update_live_inbox_status = (note) => {
+if (!live_inbox_status_line) {
+return;
+}
+const queued_count = live_inbox_by_seq.size;
+const last_seq_text =
+live_inbox_last_ingested_seq === null ? 'none' : String(live_inbox_last_ingested_seq);
+const parts = [
+`queued=${queued_count}`,
+`expected_seq=${live_inbox_expected_seq}`,
+`last_ingested_seq=${last_seq_text}`,
+];
+if (note) {
+parts.push(note);
+}
+live_inbox_status_line.textContent = parts.join(' | ');
 };
 
 const log_output = (message) => {
@@ -689,6 +734,89 @@ set_status('commit loaded');
 log_output('commit env loaded; pending apply');
 };
 
+const parse_live_inbox_env = (env_b64) => {
+const env_bytes = base64_to_bytes(env_b64);
+if (!env_bytes || env_bytes.length < 1) {
+return null;
+}
+const kind = env_bytes[0];
+if (kind !== 1 && kind !== 2 && kind !== 3) {
+return null;
+}
+return { kind };
+};
+
+const update_live_inbox_controls = () => {
+const enabled = get_live_inbox_enabled();
+if (live_inbox_ingest_btn) {
+live_inbox_ingest_btn.disabled = !enabled;
+}
+if (live_inbox_auto_input) {
+live_inbox_auto_input.disabled = !enabled;
+}
+};
+
+const ingest_live_inbox_seq = (seq) => {
+if (!get_live_inbox_enabled()) {
+update_live_inbox_status('live inbox disabled');
+return false;
+}
+if (!live_inbox_by_seq.has(seq)) {
+update_live_inbox_status(`missing seq=${seq}`);
+return false;
+}
+const env_b64 = live_inbox_by_seq.get(seq);
+const env_meta = parse_live_inbox_env(env_b64);
+if (!env_meta) {
+update_live_inbox_status(`invalid env at seq=${seq}`);
+return false;
+}
+set_incoming_env_input(env_b64);
+if (env_meta.kind === 1) {
+handle_import_welcome_env();
+} else if (env_meta.kind === 2) {
+if (env_b64 === last_local_commit_env_b64 && last_local_commit_env_b64) {
+set_commit_echo_state('received', seq);
+set_status(`commit echo received (seq=${seq})`);
+log_output(`commit echo received at seq=${seq}`);
+} else {
+handle_import_commit_env();
+}
+} else {
+set_status(`app env staged (seq=${seq})`);
+log_output(`app env staged from inbox (seq=${seq})`);
+}
+live_inbox_by_seq.delete(seq);
+live_inbox_last_ingested_seq = seq;
+set_live_inbox_expected_seq(seq + 1);
+update_live_inbox_status();
+return true;
+};
+
+const run_live_inbox_auto_ingest = () => {
+if (!get_live_inbox_enabled()) {
+return;
+}
+if (!live_inbox_auto_input || !live_inbox_auto_input.checked) {
+return;
+}
+let steps = 0;
+while (steps < 50) {
+const seq = live_inbox_expected_seq;
+if (!live_inbox_by_seq.has(seq)) {
+break;
+}
+const ok = ingest_live_inbox_seq(seq);
+if (!ok) {
+break;
+}
+steps += 1;
+}
+if (steps >= 50) {
+update_live_inbox_status('auto-ingest cap reached');
+}
+};
+
 const handle_decrypt_app_env = async (participant_label) => {
 const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
 const unpacked = unpack_dm_env(env_b64);
@@ -1170,6 +1298,30 @@ return;
 set_commit_echo_state('received', detail.seq);
 });
 
+window.addEventListener('conv.event.received', (event) => {
+const detail = event && event.detail ? event.detail : null;
+if (!detail || typeof detail.env !== 'string') {
+return;
+}
+const seq_value =
+typeof detail.seq === 'number' ? detail.seq : Number.parseInt(detail.seq, 10);
+if (!Number.isInteger(seq_value) || seq_value < 1) {
+return;
+}
+const env_meta = parse_live_inbox_env(detail.env);
+if (!env_meta) {
+return;
+}
+if (!live_inbox_by_seq.has(seq_value)) {
+live_inbox_by_seq.set(seq_value, detail.env);
+}
+update_live_inbox_status();
+if (!get_live_inbox_enabled()) {
+return;
+}
+run_live_inbox_auto_ingest();
+});
+
 const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
 let incoming_env_input = null;
 let expected_plaintext_input = null;
@@ -1344,6 +1496,75 @@ import_buttons.appendChild(decrypt_bob_btn);
 import_buttons.appendChild(decrypt_alice_btn);
 import_buttons.appendChild(verify_expected_btn);
 import_container.appendChild(import_buttons);
+
+const live_inbox_container = document.createElement('div');
+live_inbox_container.className = 'dm_live_inbox';
+
+const live_inbox_title = document.createElement('div');
+live_inbox_title.textContent = 'Live inbox';
+live_inbox_container.appendChild(live_inbox_title);
+
+const live_inbox_enable_label = document.createElement('label');
+live_inbox_enabled_input = document.createElement('input');
+live_inbox_enabled_input.type = 'checkbox';
+live_inbox_enabled_input.addEventListener('change', () => {
+update_live_inbox_controls();
+update_live_inbox_status();
+if (get_live_inbox_enabled()) {
+run_live_inbox_auto_ingest();
+}
+});
+live_inbox_enable_label.appendChild(live_inbox_enabled_input);
+live_inbox_enable_label.appendChild(document.createTextNode(' Enable live inbox'));
+live_inbox_container.appendChild(live_inbox_enable_label);
+
+const live_inbox_auto_label = document.createElement('label');
+live_inbox_auto_input = document.createElement('input');
+live_inbox_auto_input.type = 'checkbox';
+live_inbox_auto_input.addEventListener('change', () => {
+update_live_inbox_controls();
+update_live_inbox_status();
+if (get_live_inbox_enabled()) {
+run_live_inbox_auto_ingest();
+}
+});
+live_inbox_auto_label.appendChild(live_inbox_auto_input);
+live_inbox_auto_label.appendChild(document.createTextNode(' Auto-ingest in order'));
+live_inbox_container.appendChild(live_inbox_auto_label);
+
+const live_inbox_expected_label = document.createElement('label');
+live_inbox_expected_label.textContent = 'expected_seq';
+live_inbox_expected_input = document.createElement('input');
+live_inbox_expected_input.type = 'number';
+live_inbox_expected_input.min = '1';
+live_inbox_expected_input.value = String(live_inbox_expected_seq);
+live_inbox_expected_input.addEventListener('change', () => {
+set_live_inbox_expected_seq(live_inbox_expected_input.value);
+if (get_live_inbox_enabled()) {
+run_live_inbox_auto_ingest();
+}
+});
+live_inbox_expected_label.appendChild(live_inbox_expected_input);
+live_inbox_container.appendChild(live_inbox_expected_label);
+
+const live_inbox_buttons = document.createElement('div');
+live_inbox_buttons.className = 'button-row';
+live_inbox_ingest_btn = document.createElement('button');
+live_inbox_ingest_btn.type = 'button';
+live_inbox_ingest_btn.textContent = 'Ingest next';
+live_inbox_ingest_btn.addEventListener('click', () => {
+ingest_live_inbox_seq(live_inbox_expected_seq);
+});
+live_inbox_buttons.appendChild(live_inbox_ingest_btn);
+live_inbox_container.appendChild(live_inbox_buttons);
+
+live_inbox_status_line = document.createElement('div');
+live_inbox_status_line.className = 'dm_live_inbox_status';
+live_inbox_container.appendChild(live_inbox_status_line);
+update_live_inbox_controls();
+update_live_inbox_status();
+
+import_container.appendChild(live_inbox_container);
 
 if (dm_output && dm_output.parentNode) {
 dm_output.parentNode.insertBefore(import_container, dm_output);
