@@ -825,6 +825,50 @@
     return { envs, found_keys };
   };
 
+  const maybe_dispatch_dm_commit_echo = (body) => {
+    if (!body || typeof body !== 'object') {
+      return;
+    }
+    const selected_conv_id = conv_id_input ? conv_id_input.value.trim() : '';
+    if (!selected_conv_id || body.conv_id !== selected_conv_id) {
+      return;
+    }
+    if (typeof body.env !== 'string') {
+      return;
+    }
+    const env_bytes = base64_to_bytes(body.env);
+    if (!env_bytes || env_bytes.length < 1) {
+      append_log('dm commit echo check skipped: invalid env');
+      return;
+    }
+    if (env_bytes[0] !== 2) {
+      return;
+    }
+    const output = read_dm_ui_envs();
+    if (output.error) {
+      append_log(`dm commit echo check skipped: ${output.error}`);
+      return;
+    }
+    const commit_env_b64 = output.envs.commit_env_b64;
+    if (!commit_env_b64) {
+      append_log('dm commit echo check skipped: commit_env_b64 missing');
+      return;
+    }
+    if (body.env !== commit_env_b64) {
+      return;
+    }
+    const seq_value = typeof body.seq === 'number' ? body.seq : null;
+    window.dispatchEvent(
+      new CustomEvent('dm.commit.echoed', {
+        detail: {
+          conv_id: body.conv_id,
+          env_b64: body.env,
+          seq: seq_value,
+        },
+      })
+    );
+  };
+
   const validate_env_b64_for_send = (env_b64, label) => {
     if (!env_b64) {
       return { ok: false, reason: `missing ${label}` };
@@ -1132,6 +1176,7 @@
           update_dm_bridge_last_env();
           maybe_autofill_dm_env(body);
         }
+        maybe_dispatch_dm_commit_echo(body);
         render_event(body);
         record_transcript_event(body.conv_id, body.seq, body.msg_id, body.env).catch((err) =>
           append_log(`failed to persist transcript: ${err.message}`)
