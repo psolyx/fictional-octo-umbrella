@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "conv_id": "conv_test_dm_smoke_v1",
+  "from_seq": 1,
+  "next_seq": 4,
+  "events": [
+    {
+      "seq": 1,
+      "env": "AQ==",
+      "msg_id": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+    },
+    {
+      "seq": 2,
+      "env": "AgABAgP/",
+      "msg_id": "2d24137c6e004c092e2f83656f77180ee1c38ac9379b7d3c78064b7ac5bf9bed"
+    },
+    {
+      "seq": 3,
+      "env": "A2hlbGxvLCB3b3JsZA==",
+      "msg_id": "279906f48ff704cb11417bf5d4e6546a0492894135bb6f173d8d433e6cbbcf93"
+    }
+  ],
+  "digest_sha256_b64": "AGTmhYEnPb2l-QXSjgPGvI8w_GIvxAiEqni-eyo_H_A"
+}
