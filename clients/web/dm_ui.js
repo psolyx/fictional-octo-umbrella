@@ -47,6 +47,21 @@ const seed_init = 3003;
 
 const db_name = 'mls_dm_state';
 const store_name = 'records';
+const sealed_state_key = 'sealed_state_v1';
+const pbkdf2_iterations = 200000;
+const pbkdf2_salt_len = 16;
+const aes_gcm_iv_len = 12;
+const legacy_state_keys = [
+'alice',
+'bob',
+'alice_keypackage',
+'bob_keypackage',
+'group_id',
+'welcome',
+'commit',
+'expected_plaintext',
+'parsed_app_env_b64',
+];
 const cli_block_keys = [
 'welcome_env_b64',
 'commit_env_b64',
@@ -63,6 +78,12 @@ dm_status.textContent = message;
 const set_transcript_status = (message) => {
 if (transcript_status_line) {
 transcript_status_line.textContent = message;
+}
+};
+
+const set_storage_status = (message) => {
+if (storage_status_line) {
+storage_status_line.textContent = message;
 }
 };
 
@@ -191,6 +212,174 @@ request.onerror = () => reject(request.error);
 });
 };
 
+const get_passphrase = () => (storage_passphrase_input ? storage_passphrase_input.value : '');
+
+const update_encrypt_checkbox_default = () => {
+if (!storage_encrypt_checkbox || !storage_passphrase_input) {
+return;
+}
+const passphrase = storage_passphrase_input.value;
+if (!passphrase) {
+storage_encrypt_checkbox.checked = false;
+encrypt_checkbox_touched = false;
+return;
+}
+if (!encrypt_checkbox_touched) {
+storage_encrypt_checkbox.checked = true;
+}
+};
+
+const normalize_state_value = (value) => (typeof value === 'string' ? value : '');
+
+const build_state_snapshot = () => {
+expected_plaintext = expected_plaintext_input ? expected_plaintext_input.value : expected_plaintext;
+const state = {
+alice: alice_participant_b64,
+bob: bob_participant_b64,
+alice_keypackage: alice_keypackage_b64,
+bob_keypackage: bob_keypackage_b64,
+group_id: group_id_b64,
+welcome: welcome_b64,
+commit: commit_b64,
+expected_plaintext,
+parsed_app_env_b64,
+};
+if (parsed_welcome_env_b64) {
+state.parsed_welcome_env_b64 = parsed_welcome_env_b64;
+}
+if (parsed_commit_env_b64) {
+state.parsed_commit_env_b64 = parsed_commit_env_b64;
+}
+return state;
+};
+
+const apply_state_snapshot = (state) => {
+alice_participant_b64 = normalize_state_value(state.alice);
+bob_participant_b64 = normalize_state_value(state.bob);
+alice_keypackage_b64 = normalize_state_value(state.alice_keypackage);
+bob_keypackage_b64 = normalize_state_value(state.bob_keypackage);
+group_id_b64 = normalize_state_value(state.group_id);
+welcome_b64 = normalize_state_value(state.welcome);
+commit_b64 = normalize_state_value(state.commit);
+expected_plaintext = normalize_state_value(state.expected_plaintext);
+parsed_app_env_b64 = normalize_state_value(state.parsed_app_env_b64);
+parsed_welcome_env_b64 = normalize_state_value(state.parsed_welcome_env_b64);
+parsed_commit_env_b64 = normalize_state_value(state.parsed_commit_env_b64);
+set_group_id_input();
+set_expected_plaintext_input();
+if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
+incoming_env_input.value = parsed_app_env_b64;
+}
+};
+
+const derive_storage_key = async (passphrase, salt_bytes) => {
+const encoder = new TextEncoder();
+const passphrase_bytes = encoder.encode(passphrase);
+const key_material = await crypto.subtle.importKey('raw', passphrase_bytes, 'PBKDF2', false, ['deriveKey']);
+return crypto.subtle.deriveKey(
+{
+name: 'PBKDF2',
+salt: salt_bytes,
+iterations: pbkdf2_iterations,
+hash: 'SHA-256',
+},
+key_material,
+{ name: 'AES-GCM', length: 256 },
+false,
+['encrypt', 'decrypt'],
+);
+};
+
+const seal_state = async (state, passphrase) => {
+const encoder = new TextEncoder();
+const payload_bytes = encoder.encode(JSON.stringify(state));
+const salt_bytes = new Uint8Array(pbkdf2_salt_len);
+const iv_bytes = new Uint8Array(aes_gcm_iv_len);
+crypto.getRandomValues(salt_bytes);
+crypto.getRandomValues(iv_bytes);
+const key = await derive_storage_key(passphrase, salt_bytes);
+const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv_bytes }, key, payload_bytes);
+const ct_bytes = new Uint8Array(ciphertext);
+return {
+v: 1,
+salt_b64: bytes_to_base64(salt_bytes),
+iv_b64: bytes_to_base64(iv_bytes),
+ct_b64: bytes_to_base64(ct_bytes),
+};
+};
+
+const decode_sealed_state = (sealed_state) => {
+if (!sealed_state || typeof sealed_state !== 'object') {
+return { ok: false, error: 'sealed state missing' };
+}
+if (sealed_state.v !== 1) {
+return { ok: false, error: 'sealed state version unsupported' };
+}
+const salt_bytes = base64_to_bytes(sealed_state.salt_b64);
+if (!salt_bytes || salt_bytes.length !== pbkdf2_salt_len) {
+return { ok: false, error: 'sealed state salt invalid' };
+}
+const iv_bytes = base64_to_bytes(sealed_state.iv_b64);
+if (!iv_bytes || iv_bytes.length !== aes_gcm_iv_len) {
+return { ok: false, error: 'sealed state iv invalid' };
+}
+const ct_bytes = base64_to_bytes(sealed_state.ct_b64);
+if (!ct_bytes || ct_bytes.length < 1) {
+return { ok: false, error: 'sealed state ciphertext invalid' };
+}
+return { ok: true, salt_bytes, iv_bytes, ct_bytes };
+};
+
+const unseal_state = async (sealed_state, passphrase) => {
+const decoded = decode_sealed_state(sealed_state);
+if (!decoded.ok) {
+return decoded;
+}
+let plaintext_bytes = null;
+try {
+const key = await derive_storage_key(passphrase, decoded.salt_bytes);
+const plaintext = await crypto.subtle.decrypt(
+{ name: 'AES-GCM', iv: decoded.iv_bytes },
+key,
+decoded.ct_bytes,
+);
+plaintext_bytes = new Uint8Array(plaintext);
+} catch (error) {
+return { ok: false, error: 'passphrase incorrect or data corrupted' };
+}
+let parsed = null;
+try {
+const decoder = new TextDecoder();
+const payload_text = decoder.decode(plaintext_bytes);
+parsed = JSON.parse(payload_text);
+} catch (error) {
+return { ok: false, error: 'sealed state json invalid' };
+}
+if (!parsed || typeof parsed !== 'object') {
+return { ok: false, error: 'sealed state payload invalid' };
+}
+return { ok: true, state: parsed };
+};
+
+const load_legacy_state = async () => {
+alice_participant_b64 = await db_get('alice');
+bob_participant_b64 = await db_get('bob');
+alice_keypackage_b64 = await db_get('alice_keypackage');
+bob_keypackage_b64 = await db_get('bob_keypackage');
+group_id_b64 = await db_get('group_id');
+welcome_b64 = await db_get('welcome');
+commit_b64 = await db_get('commit');
+expected_plaintext = await db_get('expected_plaintext');
+parsed_app_env_b64 = await db_get('parsed_app_env_b64');
+parsed_welcome_env_b64 = '';
+parsed_commit_env_b64 = '';
+set_group_id_input();
+set_expected_plaintext_input();
+if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
+incoming_env_input.value = parsed_app_env_b64;
+}
+};
+
 const set_group_id_input = () => {
 if (group_id_input) {
 group_id_input.value = group_id_b64 || '';
@@ -222,7 +411,24 @@ incoming_env_input.value = payload_b64 || '';
 };
 
 const save_state = async () => {
-expected_plaintext = expected_plaintext_input ? expected_plaintext_input.value : expected_plaintext;
+const passphrase = get_passphrase();
+const encrypt_enabled = storage_encrypt_checkbox ? storage_encrypt_checkbox.checked : false;
+if (encrypt_enabled) {
+if (!passphrase) {
+set_status('error');
+set_storage_status('passphrase required to encrypt state');
+log_output('passphrase required to encrypt state');
+return { ok: false };
+}
+const snapshot = build_state_snapshot();
+const sealed_state = await seal_state(snapshot, passphrase);
+await db_set(sealed_state_key, sealed_state);
+for (const key of legacy_state_keys) {
+await db_delete(key);
+}
+set_storage_status('saved encrypted state (legacy cleared)');
+return { ok: true, mode: 'encrypted' };
+}
 const entries = [
 ['alice', alice_participant_b64],
 ['bob', bob_participant_b64],
@@ -231,7 +437,7 @@ const entries = [
 ['group_id', group_id_b64],
 ['welcome', welcome_b64],
 ['commit', commit_b64],
-['expected_plaintext', expected_plaintext],
+['expected_plaintext', expected_plaintext_input ? expected_plaintext_input.value : expected_plaintext],
 ['parsed_app_env_b64', parsed_app_env_b64],
 ];
 for (const [key, value] of entries) {
@@ -241,25 +447,38 @@ await db_set(key, value);
 await db_delete(key);
 }
 }
+await db_delete(sealed_state_key);
+set_storage_status('saved legacy plaintext state');
+return { ok: true, mode: 'legacy' };
 };
 
 const load_state = async () => {
-alice_participant_b64 = await db_get('alice');
-bob_participant_b64 = await db_get('bob');
-alice_keypackage_b64 = await db_get('alice_keypackage');
-bob_keypackage_b64 = await db_get('bob_keypackage');
-group_id_b64 = await db_get('group_id');
-welcome_b64 = await db_get('welcome');
-commit_b64 = await db_get('commit');
-expected_plaintext = await db_get('expected_plaintext');
-parsed_app_env_b64 = await db_get('parsed_app_env_b64');
-set_group_id_input();
-set_expected_plaintext_input();
-if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
-incoming_env_input.value = parsed_app_env_b64;
+const sealed_state = await db_get(sealed_state_key);
+if (sealed_state) {
+const passphrase = get_passphrase();
+if (!passphrase) {
+set_status('error');
+set_storage_status('passphrase required to load encrypted state');
+log_output('passphrase required to load encrypted state');
+return;
 }
+const unsealed = await unseal_state(sealed_state, passphrase);
+if (!unsealed.ok) {
+set_status('error');
+set_storage_status(`decrypt failed: ${unsealed.error}`);
+log_output(`decrypt failed: ${unsealed.error}`);
+return;
+}
+apply_state_snapshot(unsealed.state);
 set_status('loaded');
-log_output('loaded state from IndexedDB');
+set_storage_status('loaded encrypted state');
+log_output('loaded encrypted state from IndexedDB');
+return;
+}
+await load_legacy_state();
+set_status('loaded');
+set_storage_status('loaded legacy plaintext state');
+log_output('loaded legacy plaintext state from IndexedDB');
 };
 
 const reset_state = async () => {
@@ -280,6 +499,7 @@ set_decrypted_output('');
 set_expected_plaintext_input();
 set_incoming_env_input('');
 await db_clear();
+set_storage_status('cleared stored state');
 set_status('reset');
 log_output('cleared local state');
 };
@@ -808,9 +1028,16 @@ set_status('transcript imported');
 };
 
 const handle_save_state = async () => {
-await save_state();
+const result = await save_state();
+if (!result || !result.ok) {
+return;
+}
 set_status('saved');
-log_output('state saved to IndexedDB');
+if (result.mode === 'encrypted') {
+log_output('encrypted state saved to IndexedDB');
+} else {
+log_output('legacy state saved to IndexedDB');
+}
 };
 
 const handle_load_state = async () => {
@@ -881,7 +1108,57 @@ const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
 let incoming_env_input = null;
 let expected_plaintext_input = null;
 let cli_block_input = null;
+let storage_passphrase_input = null;
+let storage_encrypt_checkbox = null;
+let storage_status_line = null;
+let encrypt_checkbox_touched = false;
 if (dm_fieldset) {
+const storage_container = document.createElement('div');
+storage_container.className = 'dm_storage';
+
+const storage_title = document.createElement('div');
+storage_title.textContent = 'Storage';
+storage_container.appendChild(storage_title);
+
+const passphrase_label = document.createElement('label');
+passphrase_label.textContent = 'storage_passphrase';
+storage_passphrase_input = document.createElement('input');
+storage_passphrase_input.type = 'password';
+storage_passphrase_input.size = 32;
+storage_passphrase_input.addEventListener('input', () => {
+update_encrypt_checkbox_default();
+});
+passphrase_label.appendChild(storage_passphrase_input);
+storage_container.appendChild(passphrase_label);
+
+const encrypt_label = document.createElement('label');
+storage_encrypt_checkbox = document.createElement('input');
+storage_encrypt_checkbox.type = 'checkbox';
+storage_encrypt_checkbox.addEventListener('change', () => {
+encrypt_checkbox_touched = true;
+});
+encrypt_label.appendChild(storage_encrypt_checkbox);
+encrypt_label.appendChild(document.createTextNode(' Encrypt saved state'));
+storage_container.appendChild(encrypt_label);
+
+storage_status_line = document.createElement('div');
+storage_status_line.className = 'dm_storage_status';
+storage_status_line.textContent = 'storage idle';
+storage_container.appendChild(storage_status_line);
+
+update_encrypt_checkbox_default();
+
+const storage_anchor = save_state_btn ? save_state_btn.closest('div') : null;
+if (storage_anchor && storage_anchor.parentNode) {
+if (storage_anchor.nextSibling) {
+storage_anchor.parentNode.insertBefore(storage_container, storage_anchor.nextSibling);
+} else {
+storage_anchor.parentNode.appendChild(storage_container);
+}
+} else {
+dm_fieldset.appendChild(storage_container);
+}
+
 const import_container = document.createElement('div');
 import_container.className = 'dm_import_env';
 
