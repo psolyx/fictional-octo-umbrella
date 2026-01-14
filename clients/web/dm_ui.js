@@ -37,6 +37,9 @@ let expected_plaintext = '';
 let parsed_welcome_env_b64 = '';
 let parsed_commit_env_b64 = '';
 let parsed_app_env_b64 = '';
+let outbox_welcome_env_b64 = '';
+let outbox_commit_env_b64 = '';
+let outbox_app_env_b64 = '';
 let last_local_commit_env_b64 = '';
 let commit_echo_state = 'idle';
 let commit_echo_seq = null;
@@ -44,6 +47,10 @@ let commit_echo_status_line = null;
 let transcript_file_input = null;
 let transcript_textarea = null;
 let transcript_status_line = null;
+let outbox_welcome_textarea = null;
+let outbox_commit_textarea = null;
+let outbox_app_textarea = null;
+let outbox_copy_btn = null;
 let live_inbox_by_seq = new Map();
 let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
@@ -181,6 +188,95 @@ if (!dm_output) {
 return;
 }
 dm_output.textContent = message;
+};
+
+const update_outbox_ui = () => {
+if (outbox_welcome_textarea) {
+outbox_welcome_textarea.value = outbox_welcome_env_b64;
+}
+if (outbox_commit_textarea) {
+outbox_commit_textarea.value = outbox_commit_env_b64;
+}
+if (outbox_app_textarea) {
+outbox_app_textarea.value = outbox_app_env_b64;
+}
+};
+
+const dispatch_outbox_update = () => {
+window.dispatchEvent(
+new CustomEvent('dm.outbox.updated', {
+detail: {
+welcome_env_b64: outbox_welcome_env_b64 || '',
+commit_env_b64: outbox_commit_env_b64 || '',
+app_env_b64: outbox_app_env_b64 || '',
+},
+})
+);
+};
+
+const set_outbox_envs = (updates) => {
+let updated = false;
+if (Object.prototype.hasOwnProperty.call(updates, 'welcome_env_b64')) {
+const next_value = updates.welcome_env_b64 || '';
+if (next_value !== outbox_welcome_env_b64) {
+outbox_welcome_env_b64 = next_value;
+updated = true;
+}
+}
+if (Object.prototype.hasOwnProperty.call(updates, 'commit_env_b64')) {
+const next_value = updates.commit_env_b64 || '';
+if (next_value !== outbox_commit_env_b64) {
+outbox_commit_env_b64 = next_value;
+updated = true;
+}
+}
+if (Object.prototype.hasOwnProperty.call(updates, 'app_env_b64')) {
+const next_value = updates.app_env_b64 || '';
+if (next_value !== outbox_app_env_b64) {
+outbox_app_env_b64 = next_value;
+updated = true;
+}
+}
+if (updated) {
+update_outbox_ui();
+dispatch_outbox_update();
+}
+};
+
+const build_outbox_block = () => {
+const lines = [];
+if (outbox_welcome_env_b64) {
+lines.push(`welcome_env_b64=${outbox_welcome_env_b64}`);
+}
+if (outbox_commit_env_b64) {
+lines.push(`commit_env_b64=${outbox_commit_env_b64}`);
+}
+if (outbox_app_env_b64) {
+lines.push(`app_env_b64=${outbox_app_env_b64}`);
+}
+return lines.join('\n');
+};
+
+const copy_outbox_block = async () => {
+const block_text = build_outbox_block();
+if (!block_text) {
+set_status('error');
+log_output('outbox empty');
+return;
+}
+if (!navigator.clipboard || !navigator.clipboard.writeText) {
+set_status('error');
+log_output('clipboard unavailable');
+return;
+}
+try {
+await navigator.clipboard.writeText(block_text);
+set_status('outbox copied');
+log_output('outbox copied to clipboard');
+} catch (error) {
+set_status('error');
+log_output('outbox copy failed');
+}
 };
 
 const bytes_to_base64 = (bytes) => {
@@ -584,6 +680,7 @@ expected_plaintext = '';
 parsed_welcome_env_b64 = '';
 parsed_commit_env_b64 = '';
 parsed_app_env_b64 = '';
+set_outbox_envs({ welcome_env_b64: '', commit_env_b64: '', app_env_b64: '' });
 last_local_commit_env_b64 = '';
 set_commit_echo_state('idle', null);
 set_group_id_input();
@@ -654,6 +751,7 @@ commit_b64 = result.commit_b64;
 set_status('init ok');
 const welcome_env_b64 = pack_dm_env(1, welcome_b64);
 const commit_env_b64 = pack_dm_env(2, commit_b64);
+set_outbox_envs({ welcome_env_b64, commit_env_b64 });
 last_local_commit_env_b64 = commit_env_b64;
 set_commit_echo_state('waiting', null);
 log_output(`welcome_env_b64: ${welcome_env_b64}\ncommit_env_b64: ${commit_env_b64}`);
@@ -878,6 +976,7 @@ return;
 alice_participant_b64 = enc_result.participant_b64;
 set_ciphertext_output(enc_result.ciphertext_b64);
 const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
+set_outbox_envs({ app_env_b64 });
 const dec_result = await dm_decrypt(bob_participant_b64, enc_result.ciphertext_b64);
 if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
@@ -910,6 +1009,7 @@ return;
 bob_participant_b64 = enc_result.participant_b64;
 set_ciphertext_output(enc_result.ciphertext_b64);
 const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
+set_outbox_envs({ app_env_b64 });
 const dec_result = await dm_decrypt(alice_participant_b64, enc_result.ciphertext_b64);
 if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
@@ -1188,6 +1288,19 @@ const extracted = extract_transcript_envs(transcript.events);
 parsed_welcome_env_b64 = extracted.welcome_env_b64;
 parsed_commit_env_b64 = extracted.commit_env_b64;
 parsed_app_env_b64 = extracted.app_env_b64;
+const outbox_update = {};
+if (extracted.welcome_env_b64) {
+outbox_update.welcome_env_b64 = extracted.welcome_env_b64;
+}
+if (extracted.commit_env_b64) {
+outbox_update.commit_env_b64 = extracted.commit_env_b64;
+}
+if (extracted.app_env_b64) {
+outbox_update.app_env_b64 = extracted.app_env_b64;
+}
+if (Object.keys(outbox_update).length > 0) {
+set_outbox_envs(outbox_update);
+}
 if (parsed_welcome_env_b64) {
 set_incoming_env_input(parsed_welcome_env_b64);
 }
@@ -1376,6 +1489,62 @@ storage_anchor.parentNode.appendChild(storage_container);
 } else {
 dm_fieldset.appendChild(storage_container);
 }
+
+const outbox_container = document.createElement('div');
+outbox_container.className = 'dm_outbox';
+
+const outbox_title = document.createElement('div');
+outbox_title.textContent = 'DM Outbox';
+outbox_container.appendChild(outbox_title);
+
+const outbox_welcome_label = document.createElement('label');
+outbox_welcome_label.textContent = 'outbox_welcome_env_b64';
+outbox_welcome_textarea = document.createElement('textarea');
+outbox_welcome_textarea.rows = 3;
+outbox_welcome_textarea.cols = 64;
+outbox_welcome_textarea.readOnly = true;
+outbox_welcome_label.appendChild(outbox_welcome_textarea);
+outbox_container.appendChild(outbox_welcome_label);
+
+const outbox_commit_label = document.createElement('label');
+outbox_commit_label.textContent = 'outbox_commit_env_b64';
+outbox_commit_textarea = document.createElement('textarea');
+outbox_commit_textarea.rows = 3;
+outbox_commit_textarea.cols = 64;
+outbox_commit_textarea.readOnly = true;
+outbox_commit_label.appendChild(outbox_commit_textarea);
+outbox_container.appendChild(outbox_commit_label);
+
+const outbox_app_label = document.createElement('label');
+outbox_app_label.textContent = 'outbox_app_env_b64';
+outbox_app_textarea = document.createElement('textarea');
+outbox_app_textarea.rows = 3;
+outbox_app_textarea.cols = 64;
+outbox_app_textarea.readOnly = true;
+outbox_app_label.appendChild(outbox_app_textarea);
+outbox_container.appendChild(outbox_app_label);
+
+const outbox_buttons = document.createElement('div');
+outbox_buttons.className = 'button-row';
+outbox_copy_btn = document.createElement('button');
+outbox_copy_btn.type = 'button';
+outbox_copy_btn.textContent = 'Copy outbox as key=value block';
+outbox_copy_btn.addEventListener('click', () => {
+copy_outbox_block();
+});
+outbox_buttons.appendChild(outbox_copy_btn);
+outbox_container.appendChild(outbox_buttons);
+
+if (storage_container.parentNode) {
+if (storage_container.nextSibling) {
+storage_container.parentNode.insertBefore(outbox_container, storage_container.nextSibling);
+} else {
+storage_container.parentNode.appendChild(outbox_container);
+}
+} else {
+dm_fieldset.appendChild(outbox_container);
+}
+update_outbox_ui();
 
 const import_container = document.createElement('div');
 import_container.className = 'dm_import_env';
