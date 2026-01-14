@@ -59,6 +59,9 @@ let live_inbox_auto_input = null;
 let live_inbox_expected_input = null;
 let live_inbox_ingest_btn = null;
 let live_inbox_status_line = null;
+let dm_conv_status_line = null;
+let active_conv_id = '(none)';
+const conv_state_by_id = new Map();
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -87,6 +90,48 @@ const cli_block_keys = [
 'app_env_b64',
 'expected_plaintext',
 ];
+
+const normalize_conv_id = (value) => {
+if (typeof value !== 'string') {
+return '(none)';
+}
+const trimmed = value.trim();
+return trimmed ? trimmed : '(none)';
+};
+
+const build_conv_state = () => ({
+inbox_by_seq: new Map(),
+expected_seq: 1,
+last_ingested_seq: null,
+outbox_welcome_env_b64: '',
+outbox_commit_env_b64: '',
+outbox_app_env_b64: '',
+last_local_commit_env_b64: '',
+commit_echo_status: 'idle',
+echoed_seq: null,
+staged_incoming_env_b64: '',
+expected_plaintext: '',
+parsed_welcome_env_b64: '',
+parsed_commit_env_b64: '',
+parsed_app_env_b64: '',
+live_inbox_enabled: false,
+live_inbox_auto: false,
+});
+
+const get_conv_state = (conv_id) => {
+const normalized = normalize_conv_id(conv_id);
+if (!conv_state_by_id.has(normalized)) {
+conv_state_by_id.set(normalized, build_conv_state());
+}
+return conv_state_by_id.get(normalized);
+};
+
+const update_conv_status_label = () => {
+if (!dm_conv_status_line) {
+return;
+}
+dm_conv_status_line.textContent = `DM UI bound to conv_id: ${active_conv_id}`;
+};
 
 const set_status = (message) => {
 if (dm_status) {
@@ -144,6 +189,55 @@ commit_echo_state = state;
 commit_echo_seq = typeof seq === 'number' ? seq : null;
 update_commit_echo_status_line();
 update_commit_apply_state();
+};
+
+const save_active_conv_state = () => {
+const state = get_conv_state(active_conv_id);
+state.inbox_by_seq = new Map(live_inbox_by_seq);
+state.expected_seq = live_inbox_expected_seq;
+state.last_ingested_seq = live_inbox_last_ingested_seq;
+state.outbox_welcome_env_b64 = outbox_welcome_env_b64 || '';
+state.outbox_commit_env_b64 = outbox_commit_env_b64 || '';
+state.outbox_app_env_b64 = outbox_app_env_b64 || '';
+state.last_local_commit_env_b64 = last_local_commit_env_b64 || '';
+state.commit_echo_status = commit_echo_state;
+state.echoed_seq = commit_echo_seq;
+state.staged_incoming_env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
+state.expected_plaintext = expected_plaintext_input ? expected_plaintext_input.value : expected_plaintext;
+state.parsed_welcome_env_b64 = parsed_welcome_env_b64 || '';
+state.parsed_commit_env_b64 = parsed_commit_env_b64 || '';
+state.parsed_app_env_b64 = parsed_app_env_b64 || '';
+state.live_inbox_enabled = Boolean(live_inbox_enabled_input && live_inbox_enabled_input.checked);
+state.live_inbox_auto = Boolean(live_inbox_auto_input && live_inbox_auto_input.checked);
+};
+
+const apply_conv_state = (state) => {
+const normalized_state = state || build_conv_state();
+live_inbox_by_seq = new Map(normalized_state.inbox_by_seq || []);
+live_inbox_last_ingested_seq =
+Number.isInteger(normalized_state.last_ingested_seq) ? normalized_state.last_ingested_seq : null;
+set_live_inbox_expected_seq(normalized_state.expected_seq);
+if (live_inbox_enabled_input) {
+live_inbox_enabled_input.checked = Boolean(normalized_state.live_inbox_enabled);
+}
+if (live_inbox_auto_input) {
+live_inbox_auto_input.checked = Boolean(normalized_state.live_inbox_auto);
+}
+update_live_inbox_controls();
+update_live_inbox_status();
+set_outbox_envs({
+welcome_env_b64: normalized_state.outbox_welcome_env_b64 || '',
+commit_env_b64: normalized_state.outbox_commit_env_b64 || '',
+app_env_b64: normalized_state.outbox_app_env_b64 || '',
+});
+last_local_commit_env_b64 = normalized_state.last_local_commit_env_b64 || '';
+set_commit_echo_state(normalized_state.commit_echo_status || 'idle', normalized_state.echoed_seq);
+parsed_welcome_env_b64 = normalize_state_value(normalized_state.parsed_welcome_env_b64);
+parsed_commit_env_b64 = normalize_state_value(normalized_state.parsed_commit_env_b64);
+parsed_app_env_b64 = normalize_state_value(normalized_state.parsed_app_env_b64);
+expected_plaintext = normalize_state_value(normalized_state.expected_plaintext);
+set_expected_plaintext_input();
+set_incoming_env_input(normalized_state.staged_incoming_env_b64 || '');
 };
 
 const get_live_inbox_enabled = () =>
@@ -683,6 +777,9 @@ parsed_app_env_b64 = '';
 set_outbox_envs({ welcome_env_b64: '', commit_env_b64: '', app_env_b64: '' });
 last_local_commit_env_b64 = '';
 set_commit_echo_state('idle', null);
+live_inbox_by_seq = new Map();
+live_inbox_last_ingested_seq = null;
+set_live_inbox_expected_seq(1);
 set_group_id_input();
 set_ciphertext_output('');
 set_decrypted_output('');
@@ -1402,6 +1499,10 @@ const detail = event && event.detail ? event.detail : null;
 if (!detail || typeof detail.env_b64 !== 'string') {
 return;
 }
+const conv_id = typeof detail.conv_id === 'string' ? detail.conv_id : '';
+if (normalize_conv_id(conv_id) !== active_conv_id) {
+return;
+}
 if (!last_local_commit_env_b64) {
 return;
 }
@@ -1414,6 +1515,10 @@ set_commit_echo_state('received', detail.seq);
 window.addEventListener('conv.event.received', (event) => {
 const detail = event && event.detail ? event.detail : null;
 if (!detail || typeof detail.env !== 'string') {
+return;
+}
+const conv_id = typeof detail.conv_id === 'string' ? detail.conv_id : '';
+if (normalize_conv_id(conv_id) !== active_conv_id) {
 return;
 }
 const seq_value =
@@ -1444,6 +1549,16 @@ let storage_encrypt_checkbox = null;
 let storage_status_line = null;
 let encrypt_checkbox_touched = false;
 if (dm_fieldset) {
+if (dm_status && dm_status.parentNode) {
+dm_conv_status_line = document.createElement('div');
+dm_conv_status_line.className = 'dm_conv_status';
+dm_conv_status_line.textContent = `DM UI bound to conv_id: ${active_conv_id}`;
+if (dm_status.nextSibling) {
+dm_status.parentNode.insertBefore(dm_conv_status_line, dm_status.nextSibling);
+} else {
+dm_status.parentNode.appendChild(dm_conv_status_line);
+}
+}
 const storage_container = document.createElement('div');
 storage_container.className = 'dm_storage';
 
@@ -1760,3 +1875,17 @@ set_status('idle');
 set_group_id_input();
 update_commit_apply_state();
 update_commit_echo_status_line();
+update_conv_status_label();
+
+window.addEventListener('conv.selected', (event) => {
+const detail = event && event.detail ? event.detail : null;
+const next_conv_id = normalize_conv_id(detail && typeof detail.conv_id === 'string' ? detail.conv_id : '');
+if (next_conv_id === active_conv_id) {
+return;
+}
+save_active_conv_state();
+active_conv_id = next_conv_id;
+apply_conv_state(get_conv_state(active_conv_id));
+set_status('idle');
+update_conv_status_label();
+});

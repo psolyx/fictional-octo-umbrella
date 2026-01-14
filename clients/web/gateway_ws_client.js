@@ -80,6 +80,7 @@
   let transcript_load_app_btn = null;
   let transcript_last_import = null;
   const last_from_seq_by_conv_id = {};
+  let last_selected_conv_id = null;
 
   const bytes_to_hex = (bytes) =>
     Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -1639,8 +1640,31 @@
     from_seq_input.value = String(stored_next_seq);
   };
 
+  const normalize_conv_id = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    return value.trim();
+  };
+
+  const maybe_dispatch_conv_selected = (value) => {
+    const conv_id = normalize_conv_id(value);
+    if (conv_id === last_selected_conv_id) {
+      return;
+    }
+    last_selected_conv_id = conv_id;
+    window.dispatchEvent(
+      new CustomEvent('conv.selected', {
+        detail: {
+          conv_id,
+        },
+      })
+    );
+  };
+
   subscribe_btn.addEventListener('click', async () => {
     const conv_id = conv_id_input.value.trim();
+    maybe_dispatch_conv_selected(conv_id);
     if (from_seq_input.value === '') {
       const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
       last_from_seq_by_conv_id[conv_id] = stored_next_seq;
@@ -1670,11 +1694,22 @@
 
   conv_id_input.addEventListener('change', () => {
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+    maybe_dispatch_conv_selected(conv_id_input.value);
+  });
+
+  conv_id_input.addEventListener('input', () => {
+    maybe_dispatch_conv_selected(conv_id_input.value);
   });
 
   conv_id_input.addEventListener('blur', () => {
     prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+    maybe_dispatch_conv_selected(conv_id_input.value);
   });
+
+  const initial_conv_id = normalize_conv_id(conv_id_input ? conv_id_input.value : '');
+  if (initial_conv_id) {
+    maybe_dispatch_conv_selected(initial_conv_id);
+  }
 
   window.addEventListener('dm.outbox.updated', (event) => {
     const detail = event && event.detail ? event.detail : null;
