@@ -1076,6 +1076,38 @@
     client.send_ciphertext(conv_id, msg_id, ciphertext);
   };
 
+  const handle_gateway_send_env = async (event) => {
+    try {
+      const detail = event && event.detail ? event.detail : null;
+      if (!detail || typeof detail !== 'object') {
+        append_log('gateway.send_env missing detail');
+        return;
+      }
+      const conv_id = typeof detail.conv_id === 'string' ? detail.conv_id.trim() : '';
+      const env_b64 = typeof detail.env_b64 === 'string' ? detail.env_b64.trim() : '';
+      const msg_id = typeof detail.msg_id === 'string' ? detail.msg_id.trim() : '';
+      if (!conv_id) {
+        append_log('gateway.send_env missing conv_id');
+        return;
+      }
+      if (!env_b64) {
+        append_log('gateway.send_env missing env_b64');
+        return;
+      }
+      const validation = validate_env_b64_for_send(env_b64, 'env_b64');
+      if (!validation.ok) {
+        append_log(`gateway.send_env ${validation.reason}`);
+        return;
+      }
+      conv_id_input.value = conv_id;
+      ciphertext_input.value = env_b64;
+      msg_id_input.value = msg_id;
+      await send_ciphertext_with_deterministic_id(conv_id, env_b64);
+    } catch (err) {
+      append_log(`gateway.send_env failed: ${err.message}`);
+    }
+  };
+
   class GatewayWsClient {
     constructor() {
       this.ws = null;
@@ -1722,6 +1754,10 @@
       typeof detail.commit_env_b64 === 'string' ? detail.commit_env_b64 : '';
     dm_outbox_app_env_b64 =
       typeof detail.app_env_b64 === 'string' ? detail.app_env_b64 : '';
+  });
+
+  window.addEventListener('gateway.send_env', (event) => {
+    handle_gateway_send_env(event);
   });
 
   build_dm_bridge_panel();
