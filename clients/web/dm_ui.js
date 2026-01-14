@@ -37,6 +37,10 @@ let expected_plaintext = '';
 let parsed_welcome_env_b64 = '';
 let parsed_commit_env_b64 = '';
 let parsed_app_env_b64 = '';
+let last_local_commit_env_b64 = '';
+let commit_echo_state = 'idle';
+let commit_echo_seq = null;
+let commit_echo_status_line = null;
 let transcript_file_input = null;
 let transcript_textarea = null;
 let transcript_status_line = null;
@@ -85,6 +89,46 @@ const set_storage_status = (message) => {
 if (storage_status_line) {
 storage_status_line.textContent = message;
 }
+};
+
+const update_commit_echo_status_line = () => {
+if (!commit_echo_status_line) {
+return;
+}
+if (commit_echo_state === 'waiting') {
+commit_echo_status_line.textContent =
+'commit echo: waiting (send commit to gateway, then wait for conv.event)';
+return;
+}
+if (commit_echo_state === 'received') {
+const suffix = commit_echo_seq === null ? '' : ` (seq=${commit_echo_seq})`;
+commit_echo_status_line.textContent = `commit echo: received${suffix}`;
+return;
+}
+commit_echo_status_line.textContent = 'commit echo: idle';
+};
+
+const update_commit_apply_state = () => {
+if (!commit_apply_btn) {
+return;
+}
+const has_commit = Boolean(commit_b64);
+if (!has_commit) {
+commit_apply_btn.disabled = true;
+return;
+}
+if (commit_echo_state === 'waiting') {
+commit_apply_btn.disabled = true;
+return;
+}
+commit_apply_btn.disabled = false;
+};
+
+const set_commit_echo_state = (state, seq) => {
+commit_echo_state = state;
+commit_echo_seq = typeof seq === 'number' ? seq : null;
+update_commit_echo_status_line();
+update_commit_apply_state();
 };
 
 const log_output = (message) => {
@@ -270,6 +314,7 @@ set_expected_plaintext_input();
 if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
 incoming_env_input.value = parsed_app_env_b64;
 }
+update_commit_apply_state();
 };
 
 const derive_storage_key = async (passphrase, salt_bytes) => {
@@ -378,6 +423,7 @@ set_expected_plaintext_input();
 if (incoming_env_input && parsed_app_env_b64 && !incoming_env_input.value.trim()) {
 incoming_env_input.value = parsed_app_env_b64;
 }
+update_commit_apply_state();
 };
 
 const set_group_id_input = () => {
@@ -493,6 +539,8 @@ expected_plaintext = '';
 parsed_welcome_env_b64 = '';
 parsed_commit_env_b64 = '';
 parsed_app_env_b64 = '';
+last_local_commit_env_b64 = '';
+set_commit_echo_state('idle', null);
 set_group_id_input();
 set_ciphertext_output('');
 set_decrypted_output('');
@@ -561,6 +609,8 @@ commit_b64 = result.commit_b64;
 set_status('init ok');
 const welcome_env_b64 = pack_dm_env(1, welcome_b64);
 const commit_env_b64 = pack_dm_env(2, commit_b64);
+last_local_commit_env_b64 = commit_env_b64;
+set_commit_echo_state('waiting', null);
 log_output(`welcome_env_b64: ${welcome_env_b64}\ncommit_env_b64: ${commit_env_b64}`);
 };
 
@@ -633,6 +683,8 @@ log_output('expected commit env (kind=2)');
 return;
 }
 commit_b64 = unpacked.payload_b64;
+last_local_commit_env_b64 = '';
+set_commit_echo_state('idle', null);
 set_status('commit loaded');
 log_output('commit env loaded; pending apply');
 };
@@ -1104,6 +1156,20 @@ reset_state();
 });
 }
 
+window.addEventListener('dm.commit.echoed', (event) => {
+const detail = event && event.detail ? event.detail : null;
+if (!detail || typeof detail.env_b64 !== 'string') {
+return;
+}
+if (!last_local_commit_env_b64) {
+return;
+}
+if (detail.env_b64 !== last_local_commit_env_b64) {
+return;
+}
+set_commit_echo_state('received', detail.seq);
+});
+
 const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
 let incoming_env_input = null;
 let expected_plaintext_input = null;
@@ -1286,5 +1352,21 @@ dm_fieldset.appendChild(import_container);
 }
 }
 
+if (commit_apply_btn) {
+const commit_anchor = commit_apply_btn.closest('div') || commit_apply_btn.parentNode;
+commit_echo_status_line = document.createElement('div');
+commit_echo_status_line.className = 'dm_commit_echo_status';
+commit_echo_status_line.textContent = 'commit echo: idle';
+if (commit_anchor && commit_anchor.parentNode) {
+if (commit_anchor.nextSibling) {
+commit_anchor.parentNode.insertBefore(commit_echo_status_line, commit_anchor.nextSibling);
+} else {
+commit_anchor.parentNode.appendChild(commit_echo_status_line);
+}
+}
+}
+
 set_status('idle');
 set_group_id_input();
+update_commit_apply_state();
+update_commit_echo_status_line();
