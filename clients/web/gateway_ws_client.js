@@ -20,6 +20,14 @@
   let social_fetch_btn = null;
   let social_log_pre = null;
   let social_list = null;
+  let rooms_conv_id_input = null;
+  let rooms_members_input = null;
+  let rooms_create_btn = null;
+  let rooms_invite_btn = null;
+  let rooms_remove_btn = null;
+  let rooms_status_line = null;
+  let rooms_session_token = '';
+  let rooms_http_base_url = '';
   let dm_bridge_last_env_text = null;
   let dm_bridge_copy_btn = null;
   let dm_bridge_cli_block_input = null;
@@ -306,6 +314,87 @@
     write_setting('social_after_hash', after_hash).catch((err) =>
       append_log(`failed to persist social_after_hash: ${err.message}`)
     );
+  };
+
+  const parse_members_input = (value) => {
+    if (typeof value !== 'string') {
+      return [];
+    }
+    return value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry);
+  };
+
+  const set_rooms_status = (message) => {
+    if (rooms_status_line) {
+      rooms_status_line.textContent = message;
+    }
+  };
+
+  const set_rooms_response_status = (response, payload_text) => {
+    const status_label = response ? `${response.status} ${response.statusText}`.trim() : 'unknown';
+    const compact_payload = payload_text ? payload_text : '{}';
+    set_rooms_status(`status: ${status_label} ${compact_payload}`);
+  };
+
+  const request_rooms_action = async (endpoint, action_label) => {
+    if (!rooms_conv_id_input || !rooms_members_input) {
+      return;
+    }
+    const conv_id = rooms_conv_id_input.value.trim();
+    if (!conv_id) {
+      set_rooms_status(`status: error (${action_label}: conv_id required)`);
+      return;
+    }
+    const members = parse_members_input(rooms_members_input.value);
+    if (!members.length) {
+      set_rooms_status(`status: error (${action_label}: members required)`);
+      return;
+    }
+    if (!rooms_session_token) {
+      set_rooms_status(`status: error (${action_label}: session_token required)`);
+      return;
+    }
+    const fallback_base_url = derive_http_base_url(gateway_url_input.value.trim());
+    const base_url = rooms_http_base_url || fallback_base_url;
+    if (!base_url) {
+      set_rooms_status(`status: error (${action_label}: gateway_url must be ws:// or wss://)`);
+      return;
+    }
+    const request_url = new URL(endpoint, base_url);
+    const payload = { conv_id, members };
+    try {
+      const response = await fetch(request_url.toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${rooms_session_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      let response_payload = null;
+      let response_text = '';
+      try {
+        response_payload = await response.json();
+      } catch (err) {
+        response_text = await response.text();
+      }
+      let payload_text = '{}';
+      if (response_payload) {
+        payload_text = JSON.stringify(response_payload);
+      } else if (response_text) {
+        payload_text = JSON.stringify({ message: response_text });
+      }
+      set_rooms_response_status(response, payload_text);
+      if (response.ok && endpoint === '/v1/rooms/create') {
+        conv_id_input.value = conv_id;
+        maybe_dispatch_conv_selected(conv_id);
+        prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+      }
+    } catch (err) {
+      set_rooms_status(`status: error (${action_label}: ${err.message || 'request failed'})`);
+    }
   };
 
   const render_event = (body, prefer_append = false) => {
@@ -1610,6 +1699,65 @@
     social_list = list;
   };
 
+  const build_rooms_panel = () => {
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = 'Rooms v1';
+    fieldset.appendChild(legend);
+
+    const conv_label = document.createElement('label');
+    conv_label.textContent = 'conv_id';
+    const conv_input = document.createElement('input');
+    conv_input.type = 'text';
+    conv_input.id = 'rooms_conv_id';
+    conv_input.size = 32;
+    conv_label.appendChild(conv_input);
+    fieldset.appendChild(conv_label);
+
+    const members_label = document.createElement('label');
+    members_label.textContent = 'members (comma-separated user_ids)';
+    const members_input = document.createElement('input');
+    members_input.type = 'text';
+    members_input.id = 'rooms_members';
+    members_input.size = 48;
+    members_label.appendChild(members_input);
+    fieldset.appendChild(members_label);
+
+    const button_row = document.createElement('div');
+    button_row.className = 'button-row';
+    const create_btn = document.createElement('button');
+    create_btn.type = 'button';
+    create_btn.textContent = 'Create room';
+    const invite_btn = document.createElement('button');
+    invite_btn.type = 'button';
+    invite_btn.textContent = 'Invite members';
+    const remove_btn = document.createElement('button');
+    remove_btn.type = 'button';
+    remove_btn.textContent = 'Remove members';
+    button_row.appendChild(create_btn);
+    button_row.appendChild(invite_btn);
+    button_row.appendChild(remove_btn);
+    fieldset.appendChild(button_row);
+
+    const status_line = document.createElement('p');
+    status_line.textContent = 'status: idle';
+    fieldset.appendChild(status_line);
+
+    const event_fieldset = event_log.closest('fieldset');
+    if (event_fieldset && event_fieldset.parentNode) {
+      event_fieldset.parentNode.insertBefore(fieldset, event_fieldset);
+    } else {
+      document.body.appendChild(fieldset);
+    }
+
+    rooms_conv_id_input = conv_input;
+    rooms_members_input = members_input;
+    rooms_create_btn = create_btn;
+    rooms_invite_btn = invite_btn;
+    rooms_remove_btn = remove_btn;
+    rooms_status_line = status_line;
+  };
+
   const hydrate_inputs = async () => {
     try {
       const saved_url = await read_setting('gateway_url');
@@ -1784,6 +1932,19 @@
 
   window.addEventListener('gateway.send_env', (event) => {
     handle_gateway_send_env(event);
+  });
+
+  window.addEventListener('gateway.session.ready', (event) => {
+    const detail = event && event.detail ? event.detail : {};
+    rooms_session_token = typeof detail.session_token === 'string' ? detail.session_token : '';
+    rooms_http_base_url = typeof detail.http_base_url === 'string' ? detail.http_base_url : '';
+    if (!rooms_session_token) {
+      set_rooms_status('status: session_token missing');
+    } else if (rooms_http_base_url) {
+      set_rooms_status(`status: ready (${rooms_http_base_url})`);
+    } else {
+      set_rooms_status('status: ready');
+    }
   });
 
   build_dm_bridge_panel();
@@ -2096,6 +2257,29 @@
           set_transcript_status('status: replayed recorded transcript');
         })
         .catch((err) => set_transcript_status(`status: error (${err.message})`));
+    });
+  }
+
+  build_rooms_panel();
+  if (rooms_create_btn) {
+    rooms_create_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/create', 'create').catch((err) =>
+        set_rooms_status(`status: error (create: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_invite_btn) {
+    rooms_invite_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/invite', 'invite').catch((err) =>
+        set_rooms_status(`status: error (invite: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_remove_btn) {
+    rooms_remove_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/remove', 'remove').catch((err) =>
+        set_rooms_status(`status: error (remove: ${err.message || 'request failed'})`)
+      );
     });
   }
 
