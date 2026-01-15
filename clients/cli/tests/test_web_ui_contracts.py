@@ -4,10 +4,29 @@ import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+WEB_ROOT = REPO_ROOT / "clients" / "web"
+WEB_TEXT_EXTENSIONS = {".html", ".js", ".md", ".css"}
 
 
 def read_repo_text(*parts):
     path = REPO_ROOT.joinpath(*parts)
+    return path.read_text(encoding="utf-8")
+
+
+def iter_web_text_files():
+    for path in WEB_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in WEB_TEXT_EXTENSIONS:
+            continue
+        if path.name == "mls_harness.wasm":
+            continue
+        if path.name == "README.md":
+            continue
+        yield path
+
+
+def read_web_text(path):
     return path.read_text(encoding="utf-8")
 
 
@@ -25,6 +44,7 @@ class TestWebUiContracts(unittest.TestCase):
         cls.readme = read_repo_text("clients", "web", "README.md")
         cls.gateway_ws_client = read_repo_text("clients", "web", "gateway_ws_client.js")
         cls.dm_ui = read_repo_text("clients", "web", "dm_ui.js")
+        cls.mls_vectors_loader = read_repo_text("clients", "web", "mls_vectors_loader.js")
 
     def test_custom_event_contracts_gateway(self):
         marker = "CustomEvent('conv.event.received'"
@@ -50,6 +70,11 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("CustomEvent('gateway.send_env'", self.dm_ui)
         self.assertIn("addEventListener('conv.selected'", self.dm_ui)
         self.assertIn("addEventListener('conv.event.received'", self.dm_ui)
+        self.assertIn("Auto-apply commit after echo", self.dm_ui)
+        self.assertIn("Auto-decrypt app env on ingest", self.dm_ui)
+        self.assertIn("auto_apply_commit_after_echo", self.dm_ui)
+        self.assertIn("auto_decrypt_app_env", self.dm_ui)
+        self.assertIn("bound to conv_id", self.dm_ui)
 
     def test_dm_echo_before_apply_gate(self):
         marker = "addEventListener('dm.commit.echoed'"
@@ -65,6 +90,49 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("open http://localhost:8000/index.html", self.readme)
         self.assertIn("open http://localhost:8000/clients/web/index.html", self.readme)
         self.assertIn("404 for `/clients/web/...`", self.readme)
+
+    def test_web_assets_have_no_absolute_serve_paths(self):
+        offending = []
+        for path in iter_web_text_files():
+            contents = read_web_text(path)
+            if "/clients/web/" in contents:
+                offending.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(
+            offending,
+            [],
+            msg="Found hard-coded /clients/web/ references in web assets",
+        )
+
+    def test_index_html_uses_relative_asset_paths(self):
+        allowlisted_prefixes = ("/v1/",)
+        script_srcs = re.findall(
+            r"<script[^>]+src=[\"']([^\"']+)[\"']",
+            self.index_html,
+            flags=re.IGNORECASE,
+        )
+        link_hrefs = re.findall(
+            r"<link[^>]+href=[\"']([^\"']+)[\"']",
+            self.index_html,
+            flags=re.IGNORECASE,
+        )
+        inline_fetches = re.findall(
+            r"fetch\(\s*[\"']([^\"']+)[\"']",
+            self.index_html,
+        )
+        asset_urls = script_srcs + link_hrefs + inline_fetches
+        absolute_assets = []
+        for url in asset_urls:
+            if url.startswith("/") and not url.startswith(allowlisted_prefixes):
+                absolute_assets.append(url)
+        self.assertEqual(
+            absolute_assets,
+            [],
+            msg="index.html should use relative asset paths; absolute paths are reserved for API calls",
+        )
+
+    def test_wasm_vector_path_is_relative(self):
+        self.assertIn("vendor/mls_harness.wasm", self.mls_vectors_loader)
+        self.assertNotIn("/vendor/mls_harness.wasm", self.mls_vectors_loader)
 
     def test_csp_posture(self):
         meta_match = re.search(
