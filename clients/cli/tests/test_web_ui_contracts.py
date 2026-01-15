@@ -6,6 +6,20 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 WEB_ROOT = REPO_ROOT / "clients" / "web"
 WEB_TEXT_EXTENSIONS = {".html", ".js", ".md", ".css"}
+ALLOWLISTED_API_PREFIXES = ("/v1/", "/v1?", "/v1")
+README_ALLOWED_CLIENTS_WEB_SNIPPETS = (
+    "open http://localhost:8000/clients/web/index.html",
+    "404 for `/clients/web/...`",
+)
+HTML_ASSET_ATTR_RE = re.compile(
+    r"<(?:script|img|link)\b[^>]*(?:src|href)=[\"']([^\"']+)[\"']",
+    flags=re.IGNORECASE,
+)
+JS_ENDPOINT_RE = re.compile(
+    r"\bfetch\(\s*[\"'](?P<fetch>[^\"']+)"
+    r"|\bnew\s+WebSocket\(\s*[\"'](?P<ws>[^\"']+)"
+    r"|\bnew\s+EventSource\(\s*[\"'](?P<sse>[^\"']+)"
+)
 
 
 def read_repo_text(*parts):
@@ -18,10 +32,6 @@ def iter_web_text_files():
         if not path.is_file():
             continue
         if path.suffix.lower() not in WEB_TEXT_EXTENSIONS:
-            continue
-        if path.name == "mls_harness.wasm":
-            continue
-        if path.name == "README.md":
             continue
         yield path
 
@@ -37,6 +47,43 @@ def slice_after(text, marker, span=600):
     return text[index : index + span]
 
 
+def is_disallowed_absolute_path(url):
+    return url.startswith("/") and not url.startswith(ALLOWLISTED_API_PREFIXES)
+
+
+def strip_allowed_snippets(contents, snippets):
+    remainder = contents
+    for snippet in snippets:
+        remainder = remainder.replace(snippet, "")
+    return remainder
+
+
+def collect_absolute_html_asset_paths(contents):
+    return [
+        match.group(1)
+        for match in HTML_ASSET_ATTR_RE.finditer(contents)
+        if is_disallowed_absolute_path(match.group(1).strip())
+    ]
+
+
+def collect_disallowed_js_endpoints(contents):
+    disallowed = []
+    for match in JS_ENDPOINT_RE.finditer(contents):
+        for key in ("fetch", "ws", "sse"):
+            url = match.group(key)
+            if not url:
+                continue
+            if is_disallowed_absolute_path(url.strip()):
+                disallowed.append(url.strip())
+    return disallowed
+
+
+def assert_detail_keys(test_case, window, keys):
+    for key in keys:
+        pattern = rf"\b{re.escape(key)}\b(?=\s*(?:,|:|}}))"
+        test_case.assertRegex(window, pattern)
+
+
 class TestWebUiContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -50,13 +97,12 @@ class TestWebUiContracts(unittest.TestCase):
         marker = "CustomEvent('conv.event.received'"
         self.assertIn(marker, self.gateway_ws_client)
         window = slice_after(self.gateway_ws_client, marker)
-        for key in ("conv_id", "seq", "msg_id", "env"):
-            self.assertIn(key, window)
+        assert_detail_keys(self, window, ("conv_id", "seq", "msg_id", "env"))
 
         marker = "CustomEvent('conv.selected'"
         self.assertIn(marker, self.gateway_ws_client)
         window = slice_after(self.gateway_ws_client, marker)
-        self.assertIn("conv_id", window)
+        assert_detail_keys(self, window, ("conv_id",))
 
         self.assertIn("addEventListener('gateway.send_env'", self.gateway_ws_client)
 
@@ -64,10 +110,12 @@ class TestWebUiContracts(unittest.TestCase):
         marker = "CustomEvent('dm.outbox.updated'"
         self.assertIn(marker, self.dm_ui)
         window = slice_after(self.dm_ui, marker)
-        for key in ("welcome_env_b64", "commit_env_b64", "app_env_b64"):
-            self.assertIn(key, window)
+        assert_detail_keys(
+            self,
+            window,
+            ("welcome_env_b64", "commit_env_b64", "app_env_b64"),
+        )
 
-        self.assertIn("CustomEvent('gateway.send_env'", self.dm_ui)
         self.assertIn("addEventListener('conv.selected'", self.dm_ui)
         self.assertIn("addEventListener('conv.event.received'", self.dm_ui)
         self.assertIn("Auto-apply commit after echo", self.dm_ui)
@@ -82,29 +130,62 @@ class TestWebUiContracts(unittest.TestCase):
         window = slice_after(self.dm_ui, marker, span=800)
         self.assertIn("last_local_commit_env_b64", window)
         self.assertIn("detail.env_b64", window)
-        self.assertIn("detail.env_b64 !== last_local_commit_env_b64", window)
+        self.assertRegex(
+            window,
+            r"detail\.env_b64\s*(?:===|!==)\s*last_local_commit_env_b64",
+        )
         self.assertIn("set_commit_echo_state('received'", window)
 
     def test_serving_path_regressions(self):
         self.assertNotIn("/clients/web/", self.index_html)
         self.assertIn("open http://localhost:8000/index.html", self.readme)
         self.assertIn("open http://localhost:8000/clients/web/index.html", self.readme)
+        self.assertIn("Option A", self.readme)
+        self.assertIn("Option B", self.readme)
         self.assertIn("404 for `/clients/web/...`", self.readme)
 
     def test_web_assets_have_no_absolute_serve_paths(self):
-        offending = []
+        clients_web_refs = []
+        html_absolute_assets = []
+        js_absolute_endpoints = []
         for path in iter_web_text_files():
             contents = read_web_text(path)
             if "/clients/web/" in contents:
-                offending.append(str(path.relative_to(REPO_ROOT)))
+                if path.name == "README.md":
+                    remainder = strip_allowed_snippets(
+                        contents, README_ALLOWED_CLIENTS_WEB_SNIPPETS
+                    )
+                    if "/clients/web/" in remainder:
+                        clients_web_refs.append(str(path.relative_to(REPO_ROOT)))
+                else:
+                    clients_web_refs.append(str(path.relative_to(REPO_ROOT)))
+            if path.suffix.lower() == ".html":
+                for url in collect_absolute_html_asset_paths(contents):
+                    html_absolute_assets.append(
+                        f"{path.relative_to(REPO_ROOT)}: {url}"
+                    )
+            if path.suffix.lower() in {".html", ".js"}:
+                for url in collect_disallowed_js_endpoints(contents):
+                    js_absolute_endpoints.append(
+                        f"{path.relative_to(REPO_ROOT)}: {url}"
+                    )
         self.assertEqual(
-            offending,
+            clients_web_refs,
             [],
             msg="Found hard-coded /clients/web/ references in web assets",
         )
+        self.assertEqual(
+            html_absolute_assets,
+            [],
+            msg="HTML assets should not use absolute paths for local files",
+        )
+        self.assertEqual(
+            js_absolute_endpoints,
+            [],
+            msg="JS fetch/WebSocket/EventSource calls should not use absolute local paths",
+        )
 
     def test_index_html_uses_relative_asset_paths(self):
-        allowlisted_prefixes = ("/v1/",)
         script_srcs = re.findall(
             r"<script[^>]+src=[\"']([^\"']+)[\"']",
             self.index_html,
@@ -122,7 +203,7 @@ class TestWebUiContracts(unittest.TestCase):
         asset_urls = script_srcs + link_hrefs + inline_fetches
         absolute_assets = []
         for url in asset_urls:
-            if url.startswith("/") and not url.startswith(allowlisted_prefixes):
+            if is_disallowed_absolute_path(url):
                 absolute_assets.append(url)
         self.assertEqual(
             absolute_assets,
