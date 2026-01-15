@@ -4,12 +4,22 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
 
 ## Usage
 1. Build the MLS harness WASM module: `tools/mls_harness/build_wasm.sh`. The generated `clients/web/vendor/mls_harness.wasm` is local-only and must not be committed.
-2. Serve the directory over HTTP (for example, `python -m http.server`). Opening the HTML file directly will not work for WASM fetches.
-3. Open `clients/web/index.html` in a modern browser. No npm/yarn/pnpm setup is required. The WASM vector check fetches artifacts under `clients/web/vendor/` and `clients/web/vectors/` from the static server started in the previous step.
-4. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
-5. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
-6. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
-7. Incoming `conv.event` entries are rendered with their ciphertext payload and any routing metadata (`conv_home`, `origin_gateway`). Heartbeat `ping` frames are answered automatically with `pong`.
+2. Serve the directory over HTTP (opening the HTML file directly will not work for WASM fetches). Pick one of the following options:
+   - **Option A (serve from `clients/web`)**
+     - `cd clients/web`
+     - `python -m http.server`
+     - `open http://localhost:8000/index.html`
+   - **Option B (serve from repo root)**
+     - `python -m http.server`
+     - `open http://localhost:8000/clients/web/index.html`
+   - **Preferred CSP dev server**
+     - `python clients/web/tools/csp_dev_server.py --serve`
+     - `open http://127.0.0.1:8081/index.html`
+   - **Tip:** If you see a 404 for `/clients/web/...`, you likely started the server inside `clients/web/`; use `/index.html` instead.
+3. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
+4. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
+5. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
+6. Incoming `conv.event` entries are rendered with their ciphertext payload and any routing metadata (`conv_home`, `origin_gateway`). Heartbeat `ping` frames are answered automatically with `pong`.
 
 ## Supported gateway operations
 - `session.start`

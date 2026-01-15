@@ -59,12 +59,15 @@ let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
 let live_inbox_enabled_input = null;
 let live_inbox_auto_input = null;
+let auto_apply_commit_input = null;
+let auto_decrypt_app_env_input = null;
 let live_inbox_expected_input = null;
 let live_inbox_ingest_btn = null;
 let live_inbox_status_line = null;
 let dm_conv_status_line = null;
 let active_conv_id = '(none)';
 const conv_state_by_id = new Map();
+let commit_apply_in_flight = false;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -119,6 +122,8 @@ parsed_commit_env_b64: '',
 parsed_app_env_b64: '',
 live_inbox_enabled: false,
 live_inbox_auto: false,
+auto_apply_commit_after_echo: false,
+auto_decrypt_app_env: false,
 });
 
 const get_conv_state = (conv_id) => {
@@ -194,6 +199,31 @@ update_commit_echo_status_line();
 update_commit_apply_state();
 };
 
+const build_auto_commit_suffix = (seq) => {
+if (typeof seq === 'number') {
+return ` (seq=${seq})`;
+}
+return '';
+};
+
+const maybe_auto_apply_commit = async (seq, context_note) => {
+if (!get_auto_apply_commit_enabled()) {
+return false;
+}
+if (!commit_apply_btn || commit_apply_btn.disabled) {
+return false;
+}
+const ok = await handle_commit_apply();
+if (!ok) {
+return false;
+}
+const suffix = build_auto_commit_suffix(seq);
+const message = context_note ? `${context_note}${suffix}` : `auto-applied commit after echo${suffix}`;
+set_status(message);
+log_output(message);
+return true;
+};
+
 const save_active_conv_state = () => {
 const state = get_conv_state(active_conv_id);
 state.inbox_by_seq = new Map(live_inbox_by_seq);
@@ -212,6 +242,10 @@ state.parsed_commit_env_b64 = parsed_commit_env_b64 || '';
 state.parsed_app_env_b64 = parsed_app_env_b64 || '';
 state.live_inbox_enabled = Boolean(live_inbox_enabled_input && live_inbox_enabled_input.checked);
 state.live_inbox_auto = Boolean(live_inbox_auto_input && live_inbox_auto_input.checked);
+state.auto_apply_commit_after_echo =
+Boolean(auto_apply_commit_input && auto_apply_commit_input.checked);
+state.auto_decrypt_app_env =
+Boolean(auto_decrypt_app_env_input && auto_decrypt_app_env_input.checked);
 };
 
 const apply_conv_state = (state) => {
@@ -225,6 +259,12 @@ live_inbox_enabled_input.checked = Boolean(normalized_state.live_inbox_enabled);
 }
 if (live_inbox_auto_input) {
 live_inbox_auto_input.checked = Boolean(normalized_state.live_inbox_auto);
+}
+if (auto_apply_commit_input) {
+auto_apply_commit_input.checked = Boolean(normalized_state.auto_apply_commit_after_echo);
+}
+if (auto_decrypt_app_env_input) {
+auto_decrypt_app_env_input.checked = Boolean(normalized_state.auto_decrypt_app_env);
 }
 update_live_inbox_controls();
 update_live_inbox_status();
@@ -245,6 +285,12 @@ set_incoming_env_input(normalized_state.staged_incoming_env_b64 || '');
 
 const get_live_inbox_enabled = () =>
 Boolean(live_inbox_enabled_input && live_inbox_enabled_input.checked);
+
+const get_auto_apply_commit_enabled = () =>
+Boolean(auto_apply_commit_input && auto_apply_commit_input.checked);
+
+const get_auto_decrypt_app_env_enabled = () =>
+Boolean(auto_decrypt_app_env_input && auto_decrypt_app_env_input.checked);
 
 const normalize_live_inbox_expected_seq = (value) => {
 const parsed = Number.parseInt(value, 10);
@@ -903,11 +949,18 @@ log_output('bob applied welcome');
 };
 
 const handle_commit_apply = async () => {
+if (commit_apply_in_flight) {
+set_status('commit apply already in progress');
+log_output('commit apply already in progress');
+return false;
+}
 if (!alice_participant_b64 || !commit_b64) {
 set_status('error');
 log_output('need alice participant and commit');
-return;
+return false;
 }
+commit_apply_in_flight = true;
+try {
 set_status('applying commit...');
 log_output('');
 const result = await dm_commit_apply(alice_participant_b64, commit_b64);
@@ -915,12 +968,20 @@ if (!result || !result.ok) {
 const error_text = result && result.error ? result.error : 'unknown error';
 set_status('error');
 log_output(`commit apply failed: ${error_text}`);
-return;
+return false;
 }
 alice_participant_b64 = result.participant_b64;
 const suffix = result.noop ? ' (noop)' : '';
 set_status(`commit applied${suffix}`);
 log_output(`alice commit applied${suffix}`);
+return true;
+} catch (error) {
+set_status('error');
+log_output(`commit apply failed: ${error}`);
+return false;
+} finally {
+commit_apply_in_flight = false;
+}
 };
 
 const handle_import_welcome_env = () => {
@@ -979,7 +1040,7 @@ live_inbox_auto_input.disabled = !enabled;
 }
 };
 
-const ingest_live_inbox_seq = (seq) => {
+const ingest_live_inbox_seq = async (seq) => {
 if (!get_live_inbox_enabled()) {
 update_live_inbox_status('live inbox disabled');
 return false;
@@ -1002,12 +1063,15 @@ if (env_b64 === last_local_commit_env_b64 && last_local_commit_env_b64) {
 set_commit_echo_state('received', seq);
 set_status(`commit echo received (seq=${seq})`);
 log_output(`commit echo received at seq=${seq}`);
+await maybe_auto_apply_commit(seq, 'auto-applied commit after echo');
 } else {
 handle_import_commit_env();
+await maybe_auto_apply_commit(seq, 'auto-applied commit after ingest');
 }
 } else {
 set_status(`app env staged (seq=${seq})`);
 log_output(`app env staged from inbox (seq=${seq})`);
+await handle_auto_decrypt_app_env();
 }
 live_inbox_by_seq.delete(seq);
 live_inbox_last_ingested_seq = seq;
@@ -1016,7 +1080,7 @@ update_live_inbox_status();
 return true;
 };
 
-const run_live_inbox_auto_ingest = () => {
+const run_live_inbox_auto_ingest = async () => {
 if (!get_live_inbox_enabled()) {
 return;
 }
@@ -1029,7 +1093,7 @@ const seq = live_inbox_expected_seq;
 if (!live_inbox_by_seq.has(seq)) {
 break;
 }
-const ok = ingest_live_inbox_seq(seq);
+const ok = await ingest_live_inbox_seq(seq);
 if (!ok) {
 break;
 }
@@ -1044,22 +1108,22 @@ const handle_decrypt_app_env = async (participant_label) => {
 const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
 const unpacked = unpack_dm_env(env_b64);
 if (!unpacked) {
-return;
+return { ok: false, error: 'invalid env' };
 }
 if (unpacked.kind !== 3) {
 set_status('error');
 log_output('expected app env (kind=3)');
-return;
+return { ok: false, error: 'wrong kind' };
 }
 if (participant_label === 'bob' && !bob_participant_b64) {
 set_status('error');
 log_output('need bob participant');
-return;
+return { ok: false, error: 'missing bob participant' };
 }
 if (participant_label === 'alice' && !alice_participant_b64) {
 set_status('error');
 log_output('need alice participant');
-return;
+return { ok: false, error: 'missing alice participant' };
 }
 set_status(`decrypting as ${participant_label}...`);
 log_output('');
@@ -1069,7 +1133,7 @@ if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
 set_status('error');
 log_output(`decrypt failed: ${error_text}`);
-return;
+return { ok: false, error: error_text };
 }
 if (participant_label === 'bob') {
 bob_participant_b64 = dec_result.participant_b64;
@@ -1080,6 +1144,38 @@ set_ciphertext_output(unpacked.payload_b64);
 set_decrypted_output(dec_result.plaintext);
 set_status(`app env decrypted as ${participant_label}`);
 log_output(`app env decrypted as ${participant_label}`);
+return { ok: true };
+};
+
+const handle_auto_decrypt_app_env = async () => {
+if (!get_auto_decrypt_app_env_enabled()) {
+return false;
+}
+let attempted = false;
+if (bob_participant_b64) {
+attempted = true;
+const result = await handle_decrypt_app_env('bob');
+if (result.ok) {
+if (expected_plaintext_input && expected_plaintext_input.value) {
+handle_verify_expected();
+}
+return true;
+}
+}
+if (alice_participant_b64) {
+attempted = true;
+const result = await handle_decrypt_app_env('alice');
+if (result.ok) {
+if (expected_plaintext_input && expected_plaintext_input.value) {
+handle_verify_expected();
+}
+return true;
+}
+}
+const message = attempted ? 'auto-decrypt failed; env staged' : 'auto-decrypt skipped; env staged';
+set_status(message);
+log_output(message);
+return false;
 };
 
 const handle_encrypt_alice = async () => {
@@ -1538,6 +1634,7 @@ if (detail.env_b64 !== last_local_commit_env_b64) {
 return;
 }
 set_commit_echo_state('received', detail.seq);
+void maybe_auto_apply_commit(detail.seq, 'auto-applied commit after echo');
 });
 
 window.addEventListener('conv.event.received', (event) => {
@@ -1565,7 +1662,7 @@ update_live_inbox_status();
 if (!get_live_inbox_enabled()) {
 return;
 }
-run_live_inbox_auto_ingest();
+void run_live_inbox_auto_ingest();
 });
 
 const dm_fieldset = dm_status ? dm_status.closest('fieldset') : null;
@@ -1867,7 +1964,7 @@ live_inbox_enabled_input.addEventListener('change', () => {
 update_live_inbox_controls();
 update_live_inbox_status();
 if (get_live_inbox_enabled()) {
-run_live_inbox_auto_ingest();
+void run_live_inbox_auto_ingest();
 }
 });
 live_inbox_enable_label.appendChild(live_inbox_enabled_input);
@@ -1881,12 +1978,26 @@ live_inbox_auto_input.addEventListener('change', () => {
 update_live_inbox_controls();
 update_live_inbox_status();
 if (get_live_inbox_enabled()) {
-run_live_inbox_auto_ingest();
+void run_live_inbox_auto_ingest();
 }
 });
 live_inbox_auto_label.appendChild(live_inbox_auto_input);
 live_inbox_auto_label.appendChild(document.createTextNode(' Auto-ingest in order'));
 live_inbox_container.appendChild(live_inbox_auto_label);
+
+const auto_apply_commit_label = document.createElement('label');
+auto_apply_commit_input = document.createElement('input');
+auto_apply_commit_input.type = 'checkbox';
+auto_apply_commit_label.appendChild(auto_apply_commit_input);
+auto_apply_commit_label.appendChild(document.createTextNode(' Auto-apply commit after echo'));
+live_inbox_container.appendChild(auto_apply_commit_label);
+
+const auto_decrypt_app_label = document.createElement('label');
+auto_decrypt_app_env_input = document.createElement('input');
+auto_decrypt_app_env_input.type = 'checkbox';
+auto_decrypt_app_label.appendChild(auto_decrypt_app_env_input);
+auto_decrypt_app_label.appendChild(document.createTextNode(' Auto-decrypt app env on ingest'));
+live_inbox_container.appendChild(auto_decrypt_app_label);
 
 const live_inbox_expected_label = document.createElement('label');
 live_inbox_expected_label.textContent = 'expected_seq';
@@ -1897,7 +2008,7 @@ live_inbox_expected_input.value = String(live_inbox_expected_seq);
 live_inbox_expected_input.addEventListener('change', () => {
 set_live_inbox_expected_seq(live_inbox_expected_input.value);
 if (get_live_inbox_enabled()) {
-run_live_inbox_auto_ingest();
+void run_live_inbox_auto_ingest();
 }
 });
 live_inbox_expected_label.appendChild(live_inbox_expected_input);
@@ -1909,7 +2020,7 @@ live_inbox_ingest_btn = document.createElement('button');
 live_inbox_ingest_btn.type = 'button';
 live_inbox_ingest_btn.textContent = 'Ingest next';
 live_inbox_ingest_btn.addEventListener('click', () => {
-ingest_live_inbox_seq(live_inbox_expected_seq);
+void ingest_live_inbox_seq(live_inbox_expected_seq);
 });
 live_inbox_buttons.appendChild(live_inbox_ingest_btn);
 live_inbox_container.appendChild(live_inbox_buttons);
