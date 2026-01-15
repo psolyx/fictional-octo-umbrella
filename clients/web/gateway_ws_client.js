@@ -108,6 +108,24 @@
     }
   };
 
+  const derive_http_base_url = (ws_url) => {
+    if (typeof ws_url !== 'string' || !ws_url) {
+      return '';
+    }
+    try {
+      const parsed_url = new URL(ws_url);
+      if (parsed_url.protocol === 'ws:') {
+        return `http://${parsed_url.host}`;
+      }
+      if (parsed_url.protocol === 'wss:') {
+        return `https://${parsed_url.host}`;
+      }
+    } catch (err) {
+      return '';
+    }
+    return '';
+  };
+
   const sha256_hex = async (bytes) => {
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return bytes_to_hex(new Uint8Array(digest));
@@ -1112,12 +1130,14 @@
     constructor() {
       this.ws = null;
       this.pending_frames = [];
+      this.gateway_url = '';
     }
 
     connect(url) {
       if (this.ws) {
         this.ws.close();
       }
+      this.gateway_url = url;
       this.pending_frames = [];
       append_log(`connecting to ${url}`);
       this.ws = new WebSocket(url);
@@ -1250,7 +1270,13 @@
         return;
       }
       if (message.t === 'session.ready') {
-        append_log(`session ready: ${JSON.stringify(body)}`);
+        append_log('session ready');
+        const session_token = typeof body.session_token === 'string' ? body.session_token : '';
+        const user_id = typeof body.user_id === 'string' ? body.user_id : '';
+        const http_base_url = derive_http_base_url(this.gateway_url);
+        window.dispatchEvent(
+          new CustomEvent('gateway.session.ready', { detail: { session_token, user_id, http_base_url } })
+        );
         if (body.resume_token) {
           resume_token_input.value = body.resume_token;
           write_setting('resume_token', body.resume_token).catch((err) =>

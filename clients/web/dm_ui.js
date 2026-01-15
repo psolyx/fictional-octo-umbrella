@@ -14,6 +14,7 @@ const alice_plaintext_input = document.getElementById('dm_alice_plaintext');
 const bob_plaintext_input = document.getElementById('dm_bob_plaintext');
 const ciphertext_output = document.getElementById('dm_ciphertext');
 const decrypted_output = document.getElementById('dm_decrypted');
+const device_id_input = document.getElementById('device_id');
 
 const create_alice_btn = document.getElementById('dm_create_alice');
 const create_bob_btn = document.getElementById('dm_create_bob');
@@ -76,10 +77,20 @@ let bob_has_joined = false;
 let last_welcome_seq = null;
 let last_commit_seq = null;
 let last_app_seq = null;
+let gateway_session_token = '';
+let gateway_user_id = '';
+let gateway_http_base_url = '';
+let dm_bootstrap_peer_input = null;
+let dm_bootstrap_count_input = null;
+let dm_bootstrap_fetch_btn = null;
+let dm_bootstrap_publish_btn = null;
+let dm_bootstrap_status_line = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
 const seed_init = 3003;
+const keypackage_fetch_path = '/v1/keypackages/fetch';
+const keypackage_publish_path = '/v1/keypackages';
 
 const db_name = 'mls_dm_state';
 const store_name = 'records';
@@ -157,6 +168,12 @@ dm_conv_status_line.textContent = `DM UI bound to conv_id: ${active_conv_id}`;
 const set_status = (message) => {
 if (dm_status) {
 dm_status.textContent = message;
+}
+};
+
+const set_dm_bootstrap_status = (message) => {
+if (dm_bootstrap_status_line) {
+dm_bootstrap_status_line.textContent = message;
 }
 };
 
@@ -938,6 +955,122 @@ bob_participant_b64 = result.participant_b64;
 bob_keypackage_b64 = result.keypackage_b64;
 set_status('bob ready');
 log_output('bob participant created');
+};
+
+const parse_keypackage_count = () => {
+if (!dm_bootstrap_count_input) {
+return 1;
+}
+const parsed = Number.parseInt(dm_bootstrap_count_input.value, 10);
+if (!Number.isInteger(parsed) || parsed < 1) {
+return 1;
+}
+return parsed;
+};
+
+const get_dm_bootstrap_auth = () => {
+if (!gateway_session_token || !gateway_http_base_url) {
+set_dm_bootstrap_status('gateway session not ready');
+return null;
+}
+return {
+session_token: gateway_session_token,
+http_base_url: gateway_http_base_url,
+};
+};
+
+const handle_fetch_peer_keypackage = async () => {
+const auth = get_dm_bootstrap_auth();
+if (!auth) {
+return;
+}
+const peer_user_id = dm_bootstrap_peer_input ? dm_bootstrap_peer_input.value.trim() : '';
+if (!peer_user_id) {
+set_dm_bootstrap_status('missing peer_user_id');
+return;
+}
+const count = parse_keypackage_count();
+set_dm_bootstrap_status('fetching peer keypackage...');
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${keypackage_fetch_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ user_id: peer_user_id, count }),
+});
+} catch (error) {
+set_dm_bootstrap_status(`fetch failed: ${error}`);
+return;
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const error_message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+set_dm_bootstrap_status(`fetch failed: ${error_message}`);
+return;
+}
+const keypackages = payload && Array.isArray(payload.keypackages) ? payload.keypackages : [];
+if (!keypackages.length || typeof keypackages[0] !== 'string') {
+set_dm_bootstrap_status('no keypackages returned');
+return;
+}
+bob_keypackage_b64 = keypackages[0];
+set_dm_bootstrap_status('peer keypackage loaded');
+set_status('peer keypackage loaded');
+};
+
+const handle_publish_keypackage = async () => {
+const auth = get_dm_bootstrap_auth();
+if (!auth) {
+return;
+}
+const device_id = device_id_input ? device_id_input.value.trim() : '';
+if (!device_id) {
+set_dm_bootstrap_status('missing device_id');
+return;
+}
+const keypackage_b64 = alice_keypackage_b64 || bob_keypackage_b64;
+if (!keypackage_b64) {
+set_dm_bootstrap_status('missing keypackage to publish');
+return;
+}
+set_dm_bootstrap_status('publishing keypackage...');
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${keypackage_publish_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ device_id, keypackages: [keypackage_b64] }),
+});
+} catch (error) {
+set_dm_bootstrap_status(`publish failed: ${error}`);
+return;
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const error_message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+set_dm_bootstrap_status(`publish failed: ${error_message}`);
+return;
+}
+set_dm_bootstrap_status('published keypackage');
+set_status('keypackage published');
 };
 
 const handle_init = async () => {
@@ -1793,6 +1926,20 @@ reset_state();
 });
 }
 
+window.addEventListener('gateway.session.ready', (event) => {
+const detail = event && event.detail ? event.detail : null;
+gateway_session_token = detail && typeof detail.session_token === 'string' ? detail.session_token : '';
+gateway_user_id = detail && typeof detail.user_id === 'string' ? detail.user_id : '';
+gateway_http_base_url =
+detail && typeof detail.http_base_url === 'string' ? detail.http_base_url : '';
+if (gateway_session_token && gateway_http_base_url) {
+const user_note = gateway_user_id ? ` (user_id=${gateway_user_id})` : '';
+set_dm_bootstrap_status(`gateway session ready${user_note}`);
+return;
+}
+set_dm_bootstrap_status('gateway session not ready');
+});
+
 window.addEventListener('dm.commit.echoed', (event) => {
 const detail = event && event.detail ? event.detail : null;
 if (!detail || typeof detail.env_b64 !== 'string') {
@@ -2004,6 +2151,64 @@ storage_container.parentNode.appendChild(outbox_container);
 dm_fieldset.appendChild(outbox_container);
 }
 update_outbox_ui();
+
+const bootstrap_container = document.createElement('div');
+bootstrap_container.className = 'dm_bootstrap';
+
+const bootstrap_title = document.createElement('div');
+bootstrap_title.textContent = 'DM bootstrap';
+bootstrap_container.appendChild(bootstrap_title);
+
+const bootstrap_peer_label = document.createElement('label');
+bootstrap_peer_label.textContent = 'peer_user_id';
+dm_bootstrap_peer_input = document.createElement('input');
+dm_bootstrap_peer_input.type = 'text';
+dm_bootstrap_peer_input.size = 48;
+bootstrap_peer_label.appendChild(dm_bootstrap_peer_input);
+bootstrap_container.appendChild(bootstrap_peer_label);
+
+const bootstrap_count_label = document.createElement('label');
+bootstrap_count_label.textContent = 'keypackage_count';
+dm_bootstrap_count_input = document.createElement('input');
+dm_bootstrap_count_input.type = 'number';
+dm_bootstrap_count_input.min = '1';
+dm_bootstrap_count_input.value = '1';
+bootstrap_count_label.appendChild(dm_bootstrap_count_input);
+bootstrap_container.appendChild(bootstrap_count_label);
+
+const bootstrap_buttons = document.createElement('div');
+bootstrap_buttons.className = 'button-row';
+dm_bootstrap_fetch_btn = document.createElement('button');
+dm_bootstrap_fetch_btn.type = 'button';
+dm_bootstrap_fetch_btn.textContent = 'Fetch peer keypackage';
+dm_bootstrap_fetch_btn.addEventListener('click', () => {
+void handle_fetch_peer_keypackage();
+});
+bootstrap_buttons.appendChild(dm_bootstrap_fetch_btn);
+
+dm_bootstrap_publish_btn = document.createElement('button');
+dm_bootstrap_publish_btn.type = 'button';
+dm_bootstrap_publish_btn.textContent = 'Publish my keypackage';
+dm_bootstrap_publish_btn.addEventListener('click', () => {
+void handle_publish_keypackage();
+});
+bootstrap_buttons.appendChild(dm_bootstrap_publish_btn);
+bootstrap_container.appendChild(bootstrap_buttons);
+
+dm_bootstrap_status_line = document.createElement('div');
+dm_bootstrap_status_line.className = 'dm_bootstrap_status';
+dm_bootstrap_status_line.textContent = 'gateway session not ready';
+bootstrap_container.appendChild(dm_bootstrap_status_line);
+
+if (outbox_container.parentNode) {
+if (outbox_container.nextSibling) {
+outbox_container.parentNode.insertBefore(bootstrap_container, outbox_container.nextSibling);
+} else {
+outbox_container.parentNode.appendChild(bootstrap_container);
+}
+} else {
+dm_fieldset.appendChild(bootstrap_container);
+}
 
 const import_container = document.createElement('div');
 import_container.className = 'dm_import_env';
