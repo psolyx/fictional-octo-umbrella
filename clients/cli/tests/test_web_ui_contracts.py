@@ -104,6 +104,11 @@ class TestWebUiContracts(unittest.TestCase):
         window = slice_after(self.gateway_ws_client, marker)
         assert_detail_keys(self, window, ("conv_id",))
 
+        marker = "CustomEvent('gateway.session.ready'"
+        self.assertIn(marker, self.gateway_ws_client)
+        window = slice_after(self.gateway_ws_client, marker)
+        assert_detail_keys(self, window, ("session_token", "user_id", "http_base_url"))
+
         self.assertIn("addEventListener('gateway.send_env'", self.gateway_ws_client)
 
     def test_custom_event_contracts_dm_ui(self):
@@ -126,6 +131,8 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("auto_decrypt_app_env", self.dm_ui)
         self.assertIn("auto_join_on_welcome", self.dm_ui)
         self.assertIn("bound to conv_id", self.dm_ui)
+        self.assertIn("/v1/keypackages/fetch", self.dm_ui)
+        self.assertIn("/v1/keypackages", self.dm_ui)
 
     def test_dm_echo_before_apply_gate(self):
         marker = "addEventListener('dm.commit.echoed'"
