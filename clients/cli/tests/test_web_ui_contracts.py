@@ -111,6 +111,16 @@ class TestWebUiContracts(unittest.TestCase):
 
         self.assertIn("addEventListener('gateway.send_env'", self.gateway_ws_client)
 
+    def test_rooms_panel_contracts(self):
+        self.assertIn("Rooms v1", self.gateway_ws_client)
+        self.assertIn("/v1/rooms/create", self.gateway_ws_client)
+        self.assertIn("/v1/rooms/invite", self.gateway_ws_client)
+        self.assertIn("/v1/rooms/remove", self.gateway_ws_client)
+        self.assertRegex(
+            self.gateway_ws_client,
+            r"Authorization[\s\S]{0,160}Bearer[\s\S]{0,160}session_token",
+        )
+
     def test_custom_event_contracts_dm_ui(self):
         marker = "CustomEvent('dm.outbox.updated'"
         self.assertIn(marker, self.dm_ui)
