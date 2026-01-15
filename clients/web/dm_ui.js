@@ -59,15 +59,23 @@ let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
 let live_inbox_enabled_input = null;
 let live_inbox_auto_input = null;
+let auto_join_on_welcome_input = null;
 let auto_apply_commit_input = null;
 let auto_decrypt_app_env_input = null;
 let live_inbox_expected_input = null;
 let live_inbox_ingest_btn = null;
+let run_next_step_btn = null;
 let live_inbox_status_line = null;
+let run_next_step_status_line = null;
 let dm_conv_status_line = null;
 let active_conv_id = '(none)';
 const conv_state_by_id = new Map();
 let commit_apply_in_flight = false;
+let run_next_step_in_flight = false;
+let bob_has_joined = false;
+let last_welcome_seq = null;
+let last_commit_seq = null;
+let last_app_seq = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -124,6 +132,11 @@ live_inbox_enabled: false,
 live_inbox_auto: false,
 auto_apply_commit_after_echo: false,
 auto_decrypt_app_env: false,
+auto_join_on_welcome: false,
+bob_has_joined: false,
+last_welcome_seq: null,
+last_commit_seq: null,
+last_app_seq: null,
 });
 
 const get_conv_state = (conv_id) => {
@@ -246,6 +259,12 @@ state.auto_apply_commit_after_echo =
 Boolean(auto_apply_commit_input && auto_apply_commit_input.checked);
 state.auto_decrypt_app_env =
 Boolean(auto_decrypt_app_env_input && auto_decrypt_app_env_input.checked);
+state.auto_join_on_welcome =
+Boolean(auto_join_on_welcome_input && auto_join_on_welcome_input.checked);
+state.bob_has_joined = Boolean(bob_has_joined);
+state.last_welcome_seq = Number.isInteger(last_welcome_seq) ? last_welcome_seq : null;
+state.last_commit_seq = Number.isInteger(last_commit_seq) ? last_commit_seq : null;
+state.last_app_seq = Number.isInteger(last_app_seq) ? last_app_seq : null;
 };
 
 const apply_conv_state = (state) => {
@@ -266,6 +285,9 @@ auto_apply_commit_input.checked = Boolean(normalized_state.auto_apply_commit_aft
 if (auto_decrypt_app_env_input) {
 auto_decrypt_app_env_input.checked = Boolean(normalized_state.auto_decrypt_app_env);
 }
+if (auto_join_on_welcome_input) {
+auto_join_on_welcome_input.checked = Boolean(normalized_state.auto_join_on_welcome);
+}
 update_live_inbox_controls();
 update_live_inbox_status();
 set_outbox_envs({
@@ -279,8 +301,16 @@ parsed_welcome_env_b64 = normalize_state_value(normalized_state.parsed_welcome_e
 parsed_commit_env_b64 = normalize_state_value(normalized_state.parsed_commit_env_b64);
 parsed_app_env_b64 = normalize_state_value(normalized_state.parsed_app_env_b64);
 expected_plaintext = normalize_state_value(normalized_state.expected_plaintext);
+bob_has_joined = Boolean(normalized_state.bob_has_joined);
+last_welcome_seq =
+Number.isInteger(normalized_state.last_welcome_seq) ? normalized_state.last_welcome_seq : null;
+last_commit_seq =
+Number.isInteger(normalized_state.last_commit_seq) ? normalized_state.last_commit_seq : null;
+last_app_seq =
+Number.isInteger(normalized_state.last_app_seq) ? normalized_state.last_app_seq : null;
 set_expected_plaintext_input();
 set_incoming_env_input(normalized_state.staged_incoming_env_b64 || '');
+set_run_next_step_status('last action: idle');
 };
 
 const get_live_inbox_enabled = () =>
@@ -291,6 +321,9 @@ Boolean(auto_apply_commit_input && auto_apply_commit_input.checked);
 
 const get_auto_decrypt_app_env_enabled = () =>
 Boolean(auto_decrypt_app_env_input && auto_decrypt_app_env_input.checked);
+
+const get_auto_join_on_welcome_enabled = () =>
+Boolean(auto_join_on_welcome_input && auto_join_on_welcome_input.checked);
 
 const normalize_live_inbox_expected_seq = (value) => {
 const parsed = Number.parseInt(value, 10);
@@ -306,6 +339,12 @@ if (live_inbox_expected_input) {
 live_inbox_expected_input.value = String(live_inbox_expected_seq);
 }
 update_live_inbox_status();
+};
+
+const set_run_next_step_status = (message) => {
+if (run_next_step_status_line) {
+run_next_step_status_line.textContent = message;
+}
 };
 
 const update_live_inbox_status = (note) => {
@@ -851,6 +890,10 @@ parsed_app_env_b64 = '';
 set_outbox_envs({ welcome_env_b64: '', commit_env_b64: '', app_env_b64: '' });
 last_local_commit_env_b64 = '';
 set_commit_echo_state('idle', null);
+bob_has_joined = false;
+last_welcome_seq = null;
+last_commit_seq = null;
+last_app_seq = null;
 live_inbox_by_seq = new Map();
 live_inbox_last_ingested_seq = null;
 set_live_inbox_expected_seq(1);
@@ -919,6 +962,7 @@ return;
 alice_participant_b64 = result.participant_b64;
 welcome_b64 = result.welcome_b64;
 commit_b64 = result.commit_b64;
+bob_has_joined = false;
 set_status('init ok');
 const welcome_env_b64 = pack_dm_env(1, welcome_b64);
 const commit_env_b64 = pack_dm_env(2, commit_b64);
@@ -932,7 +976,7 @@ const handle_join = async () => {
 if (!bob_participant_b64 || !welcome_b64) {
 set_status('error');
 log_output('need bob participant and welcome');
-return;
+return false;
 }
 set_status('joining...');
 log_output('');
@@ -941,11 +985,13 @@ if (!result || !result.ok) {
 const error_text = result && result.error ? result.error : 'unknown error';
 set_status('error');
 log_output(`join failed: ${error_text}`);
-return;
+return false;
 }
 bob_participant_b64 = result.participant_b64;
+bob_has_joined = true;
 set_status('bob joined');
 log_output('bob applied welcome');
+return true;
 };
 
 const handle_commit_apply = async () => {
@@ -984,23 +1030,54 @@ commit_apply_in_flight = false;
 }
 };
 
-const handle_import_welcome_env = () => {
+const handle_import_welcome_env = async (options) => {
+const normalized_options = options || {};
 const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
 const unpacked = unpack_dm_env(env_b64);
 if (!unpacked) {
-return;
+return { ok: false };
 }
 if (unpacked.kind !== 1) {
 set_status('error');
 log_output('expected welcome env (kind=1)');
-return;
+return { ok: false };
 }
 welcome_b64 = unpacked.payload_b64;
 set_status('welcome loaded');
 log_output('welcome env loaded from gateway/cli');
+if (normalized_options.seq !== undefined) {
+last_welcome_seq =
+Number.isInteger(normalized_options.seq) ? normalized_options.seq : last_welcome_seq;
+} else {
+last_welcome_seq = null;
+}
+if (!normalized_options.allow_auto_join) {
+return { ok: true };
+}
+if (!get_auto_join_on_welcome_enabled()) {
+return { ok: true };
+}
+if (bob_has_joined) {
+set_run_next_step_status('last action: auto-join skipped; bob already joined');
+return { ok: true };
+}
+if (!bob_participant_b64) {
+set_run_next_step_status('last action: auto-join skipped; missing bob participant');
+return { ok: false };
+}
+const joined = await handle_join();
+if (joined) {
+const suffix =
+Number.isInteger(normalized_options.seq) ? ` (seq=${normalized_options.seq})` : '';
+set_run_next_step_status(`last action: auto-joined bob on welcome${suffix}`);
+return { ok: true };
+}
+set_run_next_step_status('last action: auto-join failed; check status');
+return { ok: false };
 };
 
-const handle_import_commit_env = () => {
+const handle_import_commit_env = (options) => {
+const normalized_options = options || {};
 const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
 const unpacked = unpack_dm_env(env_b64);
 if (!unpacked) {
@@ -1014,6 +1091,12 @@ return;
 commit_b64 = unpacked.payload_b64;
 last_local_commit_env_b64 = '';
 set_commit_echo_state('idle', null);
+if (normalized_options.seq !== undefined) {
+last_commit_seq =
+Number.isInteger(normalized_options.seq) ? normalized_options.seq : last_commit_seq;
+} else {
+last_commit_seq = null;
+}
 set_status('commit loaded');
 log_output('commit env loaded; pending apply');
 };
@@ -1038,6 +1121,9 @@ live_inbox_ingest_btn.disabled = !enabled;
 if (live_inbox_auto_input) {
 live_inbox_auto_input.disabled = !enabled;
 }
+if (auto_join_on_welcome_input) {
+auto_join_on_welcome_input.disabled = !enabled;
+}
 };
 
 const ingest_live_inbox_seq = async (seq) => {
@@ -1057,18 +1143,20 @@ return false;
 }
 set_incoming_env_input(env_b64);
 if (env_meta.kind === 1) {
-handle_import_welcome_env();
+await handle_import_welcome_env({ allow_auto_join: true, seq });
 } else if (env_meta.kind === 2) {
+last_commit_seq = seq;
 if (env_b64 === last_local_commit_env_b64 && last_local_commit_env_b64) {
 set_commit_echo_state('received', seq);
 set_status(`commit echo received (seq=${seq})`);
 log_output(`commit echo received at seq=${seq}`);
 await maybe_auto_apply_commit(seq, 'auto-applied commit after echo');
 } else {
-handle_import_commit_env();
+handle_import_commit_env({ seq });
 await maybe_auto_apply_commit(seq, 'auto-applied commit after ingest');
 }
 } else {
+last_app_seq = seq;
 set_status(`app env staged (seq=${seq})`);
 log_output(`app env staged from inbox (seq=${seq})`);
 await handle_auto_decrypt_app_env();
@@ -1176,6 +1264,93 @@ const message = attempted ? 'auto-decrypt failed; env staged' : 'auto-decrypt sk
 set_status(message);
 log_output(message);
 return false;
+};
+
+const build_seq_suffix = (seq) => (Number.isInteger(seq) ? ` (seq=${seq})` : '');
+
+const get_commit_env_b64 = () => {
+if (!commit_b64) {
+return '';
+}
+return pack_dm_env(2, commit_b64);
+};
+
+const is_local_commit_pending = () => {
+const commit_env_b64 = get_commit_env_b64();
+if (!commit_env_b64 || !last_local_commit_env_b64) {
+return false;
+}
+return commit_env_b64 === last_local_commit_env_b64;
+};
+
+const is_staged_app_env = () => {
+const env_b64 = incoming_env_input ? incoming_env_input.value.trim() : '';
+if (!env_b64) {
+return false;
+}
+const unpacked = unpack_dm_env(env_b64);
+return Boolean(unpacked && unpacked.kind === 3);
+};
+
+const handle_run_next_step = async () => {
+if (run_next_step_in_flight) {
+set_run_next_step_status('last action: run next step already in progress');
+return;
+}
+run_next_step_in_flight = true;
+try {
+if (welcome_b64 && bob_participant_b64 && !bob_has_joined) {
+const joined = await handle_join();
+const suffix = build_seq_suffix(last_welcome_seq);
+if (joined) {
+set_run_next_step_status(`last action: joined bob from welcome${suffix}`);
+} else {
+set_run_next_step_status('last action: join failed; check status');
+}
+return;
+}
+if (welcome_b64 && !bob_participant_b64 && !bob_has_joined) {
+set_run_next_step_status('last action: join blocked; missing bob participant');
+return;
+}
+if (commit_b64) {
+const is_local = is_local_commit_pending();
+if (is_local && commit_echo_state !== 'received') {
+set_run_next_step_status('last action: commit pending; waiting for echo');
+return;
+}
+if (!commit_apply_btn || commit_apply_btn.disabled) {
+set_run_next_step_status('last action: commit apply unavailable');
+return;
+}
+const applied = await handle_commit_apply();
+const seq_note = is_local ? commit_echo_seq : last_commit_seq;
+const suffix = build_seq_suffix(seq_note);
+if (applied) {
+set_run_next_step_status(`last action: applied commit${suffix}`);
+} else {
+set_run_next_step_status('last action: commit apply failed; check status');
+}
+return;
+}
+if (is_staged_app_env()) {
+if (!get_auto_decrypt_app_env_enabled()) {
+set_run_next_step_status('last action: app env staged; auto-decrypt disabled');
+return;
+}
+const decrypted = await handle_auto_decrypt_app_env();
+const suffix = build_seq_suffix(last_app_seq);
+if (decrypted) {
+set_run_next_step_status(`last action: auto-decrypt attempted${suffix}`);
+} else {
+set_run_next_step_status('last action: auto-decrypt skipped; env staged');
+}
+return;
+}
+set_run_next_step_status('last action: nothing to do');
+} finally {
+run_next_step_in_flight = false;
+}
 };
 
 const handle_encrypt_alice = async () => {
@@ -1912,7 +2087,7 @@ const load_welcome_btn = document.createElement('button');
 load_welcome_btn.type = 'button';
 load_welcome_btn.textContent = 'Load welcome env';
 load_welcome_btn.addEventListener('click', () => {
-handle_import_welcome_env();
+void handle_import_welcome_env();
 });
 
 const load_commit_btn = document.createElement('button');
@@ -1985,6 +2160,13 @@ live_inbox_auto_label.appendChild(live_inbox_auto_input);
 live_inbox_auto_label.appendChild(document.createTextNode(' Auto-ingest in order'));
 live_inbox_container.appendChild(live_inbox_auto_label);
 
+const auto_join_on_welcome_label = document.createElement('label');
+auto_join_on_welcome_input = document.createElement('input');
+auto_join_on_welcome_input.type = 'checkbox';
+auto_join_on_welcome_label.appendChild(auto_join_on_welcome_input);
+auto_join_on_welcome_label.appendChild(document.createTextNode(' Auto-join on welcome ingest'));
+live_inbox_container.appendChild(auto_join_on_welcome_label);
+
 const auto_apply_commit_label = document.createElement('label');
 auto_apply_commit_input = document.createElement('input');
 auto_apply_commit_input.type = 'checkbox';
@@ -2023,6 +2205,14 @@ live_inbox_ingest_btn.addEventListener('click', () => {
 void ingest_live_inbox_seq(live_inbox_expected_seq);
 });
 live_inbox_buttons.appendChild(live_inbox_ingest_btn);
+
+run_next_step_btn = document.createElement('button');
+run_next_step_btn.type = 'button';
+run_next_step_btn.textContent = 'Run next step';
+run_next_step_btn.addEventListener('click', () => {
+void handle_run_next_step();
+});
+live_inbox_buttons.appendChild(run_next_step_btn);
 live_inbox_container.appendChild(live_inbox_buttons);
 
 live_inbox_status_line = document.createElement('div');
@@ -2030,6 +2220,11 @@ live_inbox_status_line.className = 'dm_live_inbox_status';
 live_inbox_container.appendChild(live_inbox_status_line);
 update_live_inbox_controls();
 update_live_inbox_status();
+
+run_next_step_status_line = document.createElement('div');
+run_next_step_status_line.className = 'dm_live_inbox_status';
+run_next_step_status_line.textContent = 'last action: idle';
+live_inbox_container.appendChild(run_next_step_status_line);
 
 import_container.appendChild(live_inbox_container);
 

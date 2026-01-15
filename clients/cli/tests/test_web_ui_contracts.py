@@ -120,8 +120,11 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("addEventListener('conv.event.received'", self.dm_ui)
         self.assertIn("Auto-apply commit after echo", self.dm_ui)
         self.assertIn("Auto-decrypt app env on ingest", self.dm_ui)
+        self.assertIn("Auto-join on welcome ingest", self.dm_ui)
+        self.assertIn("Run next step", self.dm_ui)
         self.assertIn("auto_apply_commit_after_echo", self.dm_ui)
         self.assertIn("auto_decrypt_app_env", self.dm_ui)
+        self.assertIn("auto_join_on_welcome", self.dm_ui)
         self.assertIn("bound to conv_id", self.dm_ui)
 
     def test_dm_echo_before_apply_gate(self):
