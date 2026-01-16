@@ -626,3 +626,382 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
 
             await initiator_sse.release()
             await joiner_sse.release()
+
+    async def test_room_bootstrap_add_and_app_roundtrip_over_ds(self):
+        env: Dict[str, str] = dict(self.harness_env)
+
+        owner_auth = "Bearer owner"
+        peer_one_auth = "Bearer peer_one"
+        peer_two_auth = "Bearer peer_two"
+        peer_three_auth = "Bearer peer_three"
+        conv_id = "room-conv-1"
+
+        ready_owner = await self._start_session_http(auth_token=owner_auth, device_id="dev-owner")
+        ready_peer_one = await self._start_session_http(auth_token=peer_one_auth, device_id="dev-peer-1")
+        ready_peer_two = await self._start_session_http(auth_token=peer_two_auth, device_id="dev-peer-2")
+        ready_peer_three = await self._start_session_http(auth_token=peer_three_auth, device_id="dev-peer-3")
+
+        await self._create_room(ready_owner["session_token"], conv_id)
+        await self._invite_member(ready_owner["session_token"], conv_id, ready_peer_one["user_id"])
+        await self._invite_member(ready_owner["session_token"], conv_id, ready_peer_two["user_id"])
+
+        async def open_sse(session_token: str):
+            resp = await self.client.get(
+                "/v1/sse",
+                params={"conv_id": conv_id, "from_seq": "1"},
+                headers={"Authorization": f"Bearer {session_token}"},
+            )
+            self.assertEqual(resp.status, 200)
+            return resp
+
+        async def read_events(sse_map: Dict[str, TestClient], expected_seq: int):
+            events: Dict[str, dict] = {}
+            for name, sse in sse_map.items():
+                while True:
+                    event_type, event = await read_sse_event(sse)
+                    self.assertEqual(event_type, "conv.event")
+                    event_seq = event["body"]["seq"]
+                    if event_seq < expected_seq:
+                        continue
+                    self.assertEqual(event_seq, expected_seq)
+                    events[name] = event
+                    break
+            return events
+
+        with (
+            tempfile.TemporaryDirectory(prefix="owner-") as owner_dir,
+            tempfile.TemporaryDirectory(prefix="peer-one-") as peer_one_dir,
+            tempfile.TemporaryDirectory(prefix="peer-two-") as peer_two_dir,
+            tempfile.TemporaryDirectory(prefix="peer-three-") as peer_three_dir,
+        ):
+            owner_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", owner_dir, "--name", "owner", "--seed", "9101"
+            )
+            peer_one_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", peer_one_dir, "--name", "peer_one", "--seed", "9102"
+            )
+            peer_two_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", peer_two_dir, "--name", "peer_two", "--seed", "9103"
+            )
+            peer_three_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", peer_three_dir, "--name", "peer_three", "--seed", "9104"
+            )
+
+            await self._publish_keypackages(ready_owner["session_token"], "dev-owner", [owner_kp])
+            await self._publish_keypackages(ready_peer_one["session_token"], "dev-peer-1", [peer_one_kp])
+            await self._publish_keypackages(ready_peer_two["session_token"], "dev-peer-2", [peer_two_kp])
+            await self._publish_keypackages(ready_peer_three["session_token"], "dev-peer-3", [peer_three_kp])
+
+            peer_one_fetch = await self._fetch_keypackages(ready_owner["session_token"], ready_peer_one["user_id"], 1)
+            peer_two_fetch = await self._fetch_keypackages(ready_owner["session_token"], ready_peer_two["user_id"], 1)
+            self.assertEqual(len(peer_one_fetch), 1)
+            self.assertEqual(len(peer_two_fetch), 1)
+
+            init_output = await self._run_harness(
+                env,
+                "group-init",
+                "--state-dir",
+                owner_dir,
+                "--peer-keypackage",
+                peer_one_fetch[0],
+                "--peer-keypackage",
+                peer_two_fetch[0],
+                "--group-id",
+                "cm9vbS1ncm91cA==",
+                "--seed",
+                "7001",
+            )
+            init_payload = json.loads(init_output)
+
+            owner_sse = await open_sse(ready_owner["session_token"])
+            peer_one_sse = await open_sse(ready_peer_one["session_token"])
+            peer_two_sse = await open_sse(ready_peer_two["session_token"])
+
+            expected_seq = 1
+            welcome_env = pack_dm_env(1, init_payload["welcome"])
+            welcome_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-welcome-1",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(welcome_env),
+                    "env": welcome_env,
+                },
+            }
+            welcome_resp = await self._post_inbox(ready_owner["session_token"], welcome_frame)
+            self.assertEqual(welcome_resp.status, 200)
+            welcome_ack = await welcome_resp.json()
+            self.assertEqual(welcome_ack["seq"], expected_seq)
+
+            welcome_events = await read_events(
+                {"owner": owner_sse, "peer_one": peer_one_sse, "peer_two": peer_two_sse}, expected_seq
+            )
+            for event in welcome_events.values():
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            _, peer_one_welcome = unpack_dm_env(welcome_events["peer_one"]["body"]["env"])
+            _, peer_two_welcome = unpack_dm_env(welcome_events["peer_two"]["body"]["env"])
+            await self._run_harness(env, "dm-join", "--state-dir", peer_one_dir, "--welcome", peer_one_welcome)
+            await self._run_harness(env, "dm-join", "--state-dir", peer_two_dir, "--welcome", peer_two_welcome)
+
+            expected_seq += 1
+            commit_env = pack_dm_env(2, init_payload["commit"])
+            commit_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-commit-1",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(commit_env),
+                    "env": commit_env,
+                },
+            }
+            commit_resp = await self._post_inbox(ready_owner["session_token"], commit_frame)
+            self.assertEqual(commit_resp.status, 200)
+            commit_ack = await commit_resp.json()
+            self.assertEqual(commit_ack["seq"], expected_seq)
+
+            commit_events = await read_events(
+                {"owner": owner_sse, "peer_one": peer_one_sse, "peer_two": peer_two_sse}, expected_seq
+            )
+            for event in commit_events.values():
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            for member, state_dir in (
+                ("owner", owner_dir),
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+            ):
+                _, commit_payload = unpack_dm_env(commit_events[member]["body"]["env"])
+                await self._run_harness(
+                    env, "dm-commit-apply", "--state-dir", state_dir, "--commit", commit_payload
+                )
+
+            expected_seq += 1
+            first_plaintext = "room-app-1"
+            first_cipher = await self._run_harness(
+                env, "dm-encrypt", "--state-dir", owner_dir, "--plaintext", first_plaintext
+            )
+            first_env = pack_dm_env(3, first_cipher)
+            first_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-app-1",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(first_env), "env": first_env},
+            }
+            first_resp = await self._post_inbox(ready_owner["session_token"], first_frame)
+            self.assertEqual(first_resp.status, 200)
+            first_ack = await first_resp.json()
+            self.assertEqual(first_ack["seq"], expected_seq)
+
+            first_events = await read_events(
+                {"owner": owner_sse, "peer_one": peer_one_sse, "peer_two": peer_two_sse}, expected_seq
+            )
+            for member, state_dir in (
+                ("owner", owner_dir),
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+            ):
+                event = first_events[member]
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            for member, state_dir in (
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+            ):
+                _, app_payload = unpack_dm_env(first_events[member]["body"]["env"])
+                decrypted = await self._run_harness(
+                    env, "dm-decrypt", "--state-dir", state_dir, "--ciphertext", app_payload
+                )
+                self.assertEqual(decrypted, first_plaintext)
+
+            expected_seq += 1
+            await self._invite_member(ready_owner["session_token"], conv_id, ready_peer_three["user_id"])
+            peer_three_fetch = await self._fetch_keypackages(
+                ready_owner["session_token"], ready_peer_three["user_id"], 1
+            )
+            self.assertEqual(len(peer_three_fetch), 1)
+
+            add_output = await self._run_harness(
+                env,
+                "group-add",
+                "--state-dir",
+                owner_dir,
+                "--peer-keypackage",
+                peer_three_fetch[0],
+                "--seed",
+                "7002",
+            )
+            add_payload = json.loads(add_output)
+            add_proposals = add_payload["proposals"]
+            self.assertEqual(len(add_proposals), 1)
+
+            peer_three_sse = await open_sse(ready_peer_three["session_token"])
+
+            add_proposal_env = pack_dm_env(2, add_proposals[0])
+            add_proposal_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-add-proposal-1",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(add_proposal_env),
+                    "env": add_proposal_env,
+                },
+            }
+            add_proposal_resp = await self._post_inbox(ready_owner["session_token"], add_proposal_frame)
+            self.assertEqual(add_proposal_resp.status, 200)
+            add_proposal_ack = await add_proposal_resp.json()
+            self.assertEqual(add_proposal_ack["seq"], expected_seq)
+
+            add_proposal_events = await read_events(
+                {
+                    "owner": owner_sse,
+                    "peer_one": peer_one_sse,
+                    "peer_two": peer_two_sse,
+                    "peer_three": peer_three_sse,
+                },
+                expected_seq,
+            )
+            for event in add_proposal_events.values():
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            for member, state_dir in (
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+            ):
+                _, proposal_payload = unpack_dm_env(add_proposal_events[member]["body"]["env"])
+                await self._run_harness(
+                    env, "dm-commit-apply", "--state-dir", state_dir, "--commit", proposal_payload
+                )
+
+            expected_seq += 1
+            add_welcome_env = pack_dm_env(1, add_payload["welcome"])
+            add_welcome_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-welcome-2",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(add_welcome_env),
+                    "env": add_welcome_env,
+                },
+            }
+            add_welcome_resp = await self._post_inbox(ready_owner["session_token"], add_welcome_frame)
+            self.assertEqual(add_welcome_resp.status, 200)
+            add_welcome_ack = await add_welcome_resp.json()
+            self.assertEqual(add_welcome_ack["seq"], expected_seq)
+
+            add_welcome_events = await read_events(
+                {
+                    "owner": owner_sse,
+                    "peer_one": peer_one_sse,
+                    "peer_two": peer_two_sse,
+                    "peer_three": peer_three_sse,
+                },
+                expected_seq,
+            )
+            for event in add_welcome_events.values():
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            _, peer_three_welcome = unpack_dm_env(add_welcome_events["peer_three"]["body"]["env"])
+            await self._run_harness(
+                env, "dm-join", "--state-dir", peer_three_dir, "--welcome", peer_three_welcome
+            )
+
+            expected_seq += 1
+            add_commit_env = pack_dm_env(2, add_payload["commit"])
+            add_commit_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-commit-2",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(add_commit_env),
+                    "env": add_commit_env,
+                },
+            }
+            add_commit_resp = await self._post_inbox(ready_owner["session_token"], add_commit_frame)
+            self.assertEqual(add_commit_resp.status, 200)
+            add_commit_ack = await add_commit_resp.json()
+            self.assertEqual(add_commit_ack["seq"], expected_seq)
+
+            add_commit_events = await read_events(
+                {
+                    "owner": owner_sse,
+                    "peer_one": peer_one_sse,
+                    "peer_two": peer_two_sse,
+                    "peer_three": peer_three_sse,
+                },
+                expected_seq,
+            )
+            for event in add_commit_events.values():
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            for member, state_dir in (
+                ("owner", owner_dir),
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+            ):
+                _, commit_payload = unpack_dm_env(add_commit_events[member]["body"]["env"])
+                await self._run_harness(
+                    env, "dm-commit-apply", "--state-dir", state_dir, "--commit", commit_payload
+                )
+
+            expected_seq += 1
+            second_plaintext = "room-app-2"
+            second_cipher = await self._run_harness(
+                env, "dm-encrypt", "--state-dir", peer_one_dir, "--plaintext", second_plaintext
+            )
+            second_env = pack_dm_env(3, second_cipher)
+            second_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-app-2",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(second_env), "env": second_env},
+            }
+            second_resp = await self._post_inbox(ready_peer_one["session_token"], second_frame)
+            self.assertEqual(second_resp.status, 200)
+            second_ack = await second_resp.json()
+            self.assertEqual(second_ack["seq"], expected_seq)
+
+            second_events = await read_events(
+                {
+                    "owner": owner_sse,
+                    "peer_one": peer_one_sse,
+                    "peer_two": peer_two_sse,
+                    "peer_three": peer_three_sse,
+                },
+                expected_seq,
+            )
+            for member, state_dir in (
+                ("owner", owner_dir),
+                ("peer_one", peer_one_dir),
+                ("peer_two", peer_two_dir),
+                ("peer_three", peer_three_dir),
+            ):
+                event = second_events[member]
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+
+            for member, state_dir in (
+                ("owner", owner_dir),
+                ("peer_two", peer_two_dir),
+                ("peer_three", peer_three_dir),
+            ):
+                _, app_payload = unpack_dm_env(second_events[member]["body"]["env"])
+                decrypted = await self._run_harness(
+                    env, "dm-decrypt", "--state-dir", state_dir, "--ciphertext", app_payload
+                )
+                self.assertEqual(decrypted, second_plaintext)
+
+            await owner_sse.release()
+            await peer_one_sse.release()
+            await peer_two_sse.release()
+            await peer_three_sse.release()
