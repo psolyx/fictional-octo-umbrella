@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	mls "github.com/cisco/go-mls"
 
@@ -63,6 +64,39 @@ func main() {
 		welcome, commit, err := runDMInit(*stateDir, *peerKP, *groupID, *seed)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "dm-init failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("{\"welcome\":\"%s\",\"commit\":\"%s\"}\n", welcome, commit)
+	case "group-init":
+		groupInit := flag.NewFlagSet("group-init", flag.ExitOnError)
+		stateDir := groupInit.String("state-dir", "", "directory for participant state")
+		groupID := groupInit.String("group-id", "ZHMtZG0tZ3JvdXA=", "base64 group ID")
+		seed := groupInit.Int64("seed", 7331, "deterministic RNG seed for commit")
+		var peerKPs stringSlice
+		groupInit.Var(&peerKPs, "peer-keypackage", "base64-encoded peer KeyPackage (repeatable)")
+		if err := groupInit.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to parse group-init flags: %v\n", err)
+			os.Exit(2)
+		}
+		welcome, commit, err := runGroupInit(*stateDir, peerKPs, *groupID, *seed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "group-init failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("{\"welcome\":\"%s\",\"commit\":\"%s\"}\n", welcome, commit)
+	case "group-add":
+		groupAdd := flag.NewFlagSet("group-add", flag.ExitOnError)
+		stateDir := groupAdd.String("state-dir", "", "directory for participant state")
+		seed := groupAdd.Int64("seed", 7331, "deterministic RNG seed for commit")
+		var peerKPs stringSlice
+		groupAdd.Var(&peerKPs, "peer-keypackage", "base64-encoded peer KeyPackage (repeatable)")
+		if err := groupAdd.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to parse group-add flags: %v\n", err)
+			os.Exit(2)
+		}
+		welcome, commit, err := runGroupAdd(*stateDir, peerKPs, *seed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "group-add failed: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("{\"welcome\":\"%s\",\"commit\":\"%s\"}\n", welcome, commit)
@@ -163,7 +197,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: mls-harness <smoke|vectors|wg-vectors|soak|dm-*> [flags]\n")
+	fmt.Fprintf(os.Stderr, "usage: mls-harness <smoke|vectors|wg-vectors|soak|dm-*|group-init|group-add> [flags]\n")
 	os.Exit(2)
 }
 
@@ -197,6 +231,48 @@ func runDMInit(stateDir, peerKPBase64, groupIDBase64 string, seed int64) (string
 		return "", "", errors.New("participant state not initialized; run dm-keypackage first")
 	}
 	participantBlob, welcome, commit, err := dm.Init(participantBlob, peerKPBase64, groupIDBase64, seed)
+	if err != nil {
+		return "", "", err
+	}
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
+		return "", "", fmt.Errorf("save participant: %w", err)
+	}
+	return welcome, commit, nil
+}
+
+func runGroupInit(stateDir string, peerKPs []string, groupIDBase64 string, seed int64) (string, string, error) {
+	if stateDir == "" {
+		return "", "", errors.New("state-dir is required")
+	}
+	participantBlob, err := loadParticipantBlob(stateDir)
+	if err != nil {
+		return "", "", fmt.Errorf("load participant: %w", err)
+	}
+	if participantBlob == "" {
+		return "", "", errors.New("participant state not initialized; run dm-keypackage first")
+	}
+	participantBlob, welcome, commit, err := dm.InitMany(participantBlob, peerKPs, groupIDBase64, seed)
+	if err != nil {
+		return "", "", err
+	}
+	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
+		return "", "", fmt.Errorf("save participant: %w", err)
+	}
+	return welcome, commit, nil
+}
+
+func runGroupAdd(stateDir string, peerKPs []string, seed int64) (string, string, error) {
+	if stateDir == "" {
+		return "", "", errors.New("state-dir is required")
+	}
+	participantBlob, err := loadParticipantBlob(stateDir)
+	if err != nil {
+		return "", "", fmt.Errorf("load participant: %w", err)
+	}
+	if participantBlob == "" {
+		return "", "", errors.New("participant state not initialized")
+	}
+	participantBlob, welcome, commit, err := dm.AddMany(participantBlob, peerKPs, seed)
 	if err != nil {
 		return "", "", err
 	}
@@ -456,4 +532,18 @@ func registerValue(v interface{}) {
 		return
 	}
 	gob.Register(v)
+}
+
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	if s == nil {
+		return ""
+	}
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSlice) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }
