@@ -5,6 +5,7 @@ dm_decrypt,
 dm_encrypt,
 dm_init,
 dm_join,
+ensure_wasm_ready,
 } from './mls_vectors_loader.js';
 
 const dm_status = document.getElementById('dm_status');
@@ -85,10 +86,17 @@ let dm_bootstrap_count_input = null;
 let dm_bootstrap_fetch_btn = null;
 let dm_bootstrap_publish_btn = null;
 let dm_bootstrap_status_line = null;
+let room_conv_id = '(none)';
+let room_conv_status_line = null;
+let room_keypackages_input = null;
+let room_add_keypackage_input = null;
+let room_status_line = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
 const seed_init = 3003;
+const seed_room_init = 4004;
+const seed_room_add = 5005;
 const keypackage_fetch_path = '/v1/keypackages/fetch';
 const keypackage_publish_path = '/v1/keypackages';
 
@@ -165,9 +173,22 @@ return;
 dm_conv_status_line.textContent = `DM UI bound to conv_id: ${active_conv_id}`;
 };
 
+const update_room_conv_status = () => {
+if (!room_conv_status_line) {
+return;
+}
+room_conv_status_line.textContent = `room conv_id: ${room_conv_id}`;
+};
+
 const set_status = (message) => {
 if (dm_status) {
 dm_status.textContent = message;
+}
+};
+
+const set_room_status = (message) => {
+if (room_status_line) {
+room_status_line.textContent = message;
 }
 };
 
@@ -563,6 +584,162 @@ const generate_group_id = () => {
 const bytes = new Uint8Array(32);
 crypto.getRandomValues(bytes);
 return bytes_to_base64(bytes);
+};
+
+const parse_keypackage_lines = (text) => {
+if (typeof text !== 'string') {
+return [];
+}
+return text
+.split('\n')
+.map((line) => line.trim())
+.filter((line) => line.length > 0);
+};
+
+const get_room_conv_id_for_send = () => {
+const normalized = normalize_conv_id(room_conv_id);
+if (normalized === '(none)') {
+return '';
+}
+return normalized;
+};
+
+const get_group_init_fn = () => {
+const group_init_fn = globalThis['groupInit'];
+if (typeof group_init_fn !== 'function') {
+return null;
+}
+return group_init_fn;
+};
+
+const get_group_add_fn = () => {
+const group_add_fn = globalThis['groupAdd'];
+if (typeof group_add_fn !== 'function') {
+return null;
+}
+return group_add_fn;
+};
+
+/*
+Manual sanity (room):
+- With gateway session ready and conv_id selected, "Room init" sends welcome+commit and waits for echo before commit apply.
+- "Room add member" sends follow-up welcome+commit, still waiting for echo before commit apply.
+*/
+
+const handle_room_init = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before init');
+return;
+}
+if (!alice_participant_b64) {
+set_room_status('room: need owner participant');
+log_output('room init blocked: missing owner participant');
+return;
+}
+const peer_keypackages = parse_keypackage_lines(
+room_keypackages_input ? room_keypackages_input.value : ''
+);
+if (peer_keypackages.length < 2) {
+set_room_status('room: need at least 2 peer keypackages');
+log_output('room init blocked: need at least 2 peer keypackages');
+return;
+}
+if (!group_id_b64) {
+group_id_b64 = generate_group_id();
+set_group_id_input();
+}
+set_room_status('room: init running');
+await ensure_wasm_ready();
+const group_init_fn = get_group_init_fn();
+if (!group_init_fn) {
+set_room_status('room: wasm group_init missing');
+log_output('room init failed: wasm group_init missing');
+return;
+}
+const result = group_init_fn(alice_participant_b64, peer_keypackages, group_id_b64, seed_room_init);
+if (!result || !result.ok) {
+const error_text = result && result.error ? result.error : 'unknown error';
+set_room_status('room: init failed');
+log_output(`room init failed: ${error_text}`);
+return;
+}
+if (typeof result.participant_b64 === 'string') {
+alice_participant_b64 = result.participant_b64;
+}
+if (typeof result.commit_b64 !== 'string' || typeof result.welcome_b64 !== 'string') {
+set_room_status('room: init missing envelopes');
+log_output('room init failed: missing welcome/commit');
+return;
+}
+commit_b64 = result.commit_b64;
+const welcome_env_b64 = pack_dm_env(1, result.welcome_b64);
+const commit_env_b64 = pack_dm_env(2, result.commit_b64);
+set_outbox_envs({ welcome_env_b64, commit_env_b64 });
+last_local_commit_env_b64 = commit_env_b64;
+set_commit_echo_state('waiting', null);
+set_room_status('room: sending init (welcome)');
+dispatch_gateway_send_env(conv_id, welcome_env_b64);
+set_room_status('room: sending init (commit)');
+dispatch_gateway_send_env(conv_id, commit_env_b64);
+set_room_status('room: init sent (waiting for commit echo)');
+log_output(`room init outbox ready for conv_id ${conv_id}`);
+};
+
+const handle_room_add = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before add');
+return;
+}
+if (!alice_participant_b64) {
+set_room_status('room: need owner participant');
+log_output('room add blocked: missing owner participant');
+return;
+}
+const peer_keypackages = parse_keypackage_lines(
+room_add_keypackage_input ? room_add_keypackage_input.value : ''
+);
+if (peer_keypackages.length < 1) {
+set_room_status('room: need 1 peer keypackage');
+log_output('room add blocked: missing peer keypackage');
+return;
+}
+set_room_status('room: add running');
+await ensure_wasm_ready();
+const group_add_fn = get_group_add_fn();
+if (!group_add_fn) {
+set_room_status('room: wasm group_add missing');
+log_output('room add failed: wasm group_add missing');
+return;
+}
+const result = group_add_fn(alice_participant_b64, peer_keypackages, seed_room_add);
+if (!result || !result.ok) {
+const error_text = result && result.error ? result.error : 'unknown error';
+set_room_status('room: add failed');
+log_output(`room add failed: ${error_text}`);
+return;
+}
+if (typeof result.participant_b64 === 'string') {
+alice_participant_b64 = result.participant_b64;
+}
+if (typeof result.commit_b64 !== 'string' || typeof result.welcome_b64 !== 'string') {
+set_room_status('room: add missing envelopes');
+log_output('room add failed: missing welcome/commit');
+return;
+}
+commit_b64 = result.commit_b64;
+const welcome_env_b64 = pack_dm_env(1, result.welcome_b64);
+const commit_env_b64 = pack_dm_env(2, result.commit_b64);
+set_outbox_envs({ welcome_env_b64, commit_env_b64 });
+last_local_commit_env_b64 = commit_env_b64;
+set_commit_echo_state('waiting', null);
+set_room_status('room: sending add (welcome)');
+dispatch_gateway_send_env(conv_id, welcome_env_b64);
+set_room_status('room: sending add (commit)');
+dispatch_gateway_send_env(conv_id, commit_env_b64);
+set_room_status('room: add sent (waiting for commit echo)');
+log_output(`room add outbox ready for conv_id ${conv_id}`);
 };
 
 const open_db = () => new Promise((resolve, reject) => {
@@ -2152,6 +2329,82 @@ dm_fieldset.appendChild(outbox_container);
 }
 update_outbox_ui();
 
+const room_container = document.createElement('div');
+room_container.className = 'dm_room';
+room_container.id = 'dm_room_panel';
+
+const room_title = document.createElement('div');
+room_title.textContent = 'MLS Room (gateway)';
+room_container.appendChild(room_title);
+
+room_conv_status_line = document.createElement('div');
+room_conv_status_line.className = 'dm_room_conv_status';
+room_conv_status_line.textContent = `room conv_id: ${room_conv_id}`;
+room_container.appendChild(room_conv_status_line);
+
+const room_bind_row = document.createElement('div');
+room_bind_row.className = 'button-row';
+const room_bind_btn = document.createElement('button');
+room_bind_btn.type = 'button';
+room_bind_btn.textContent = 'Use active conv_id for room';
+room_bind_btn.addEventListener('click', () => {
+room_conv_id = active_conv_id;
+update_room_conv_status();
+set_room_status('room: conv_id bound');
+});
+room_bind_row.appendChild(room_bind_btn);
+room_container.appendChild(room_bind_row);
+
+const room_keypackages_label = document.createElement('label');
+room_keypackages_label.textContent = 'room_peer_keypackages (one per line)';
+room_keypackages_input = document.createElement('textarea');
+room_keypackages_input.rows = 4;
+room_keypackages_input.cols = 64;
+room_keypackages_label.appendChild(room_keypackages_input);
+room_container.appendChild(room_keypackages_label);
+
+const room_add_label = document.createElement('label');
+room_add_label.textContent = 'room_add_peer_keypackage';
+room_add_keypackage_input = document.createElement('textarea');
+room_add_keypackage_input.rows = 2;
+room_add_keypackage_input.cols = 64;
+room_add_label.appendChild(room_add_keypackage_input);
+room_container.appendChild(room_add_label);
+
+const room_buttons = document.createElement('div');
+room_buttons.className = 'button-row';
+const room_init_btn = document.createElement('button');
+room_init_btn.type = 'button';
+room_init_btn.textContent = 'Room init (owner)';
+room_init_btn.addEventListener('click', () => {
+void handle_room_init();
+});
+room_buttons.appendChild(room_init_btn);
+
+const room_add_btn = document.createElement('button');
+room_add_btn.type = 'button';
+room_add_btn.textContent = 'Room add member (owner)';
+room_add_btn.addEventListener('click', () => {
+void handle_room_add();
+});
+room_buttons.appendChild(room_add_btn);
+room_container.appendChild(room_buttons);
+
+room_status_line = document.createElement('div');
+room_status_line.className = 'dm_room_status';
+room_status_line.textContent = 'room: idle';
+room_container.appendChild(room_status_line);
+
+if (outbox_container.parentNode) {
+if (outbox_container.nextSibling) {
+outbox_container.parentNode.insertBefore(room_container, outbox_container.nextSibling);
+} else {
+outbox_container.parentNode.appendChild(room_container);
+}
+} else {
+dm_fieldset.appendChild(room_container);
+}
+
 const bootstrap_container = document.createElement('div');
 bootstrap_container.className = 'dm_bootstrap';
 
@@ -2200,11 +2453,11 @@ dm_bootstrap_status_line.className = 'dm_bootstrap_status';
 dm_bootstrap_status_line.textContent = 'gateway session not ready';
 bootstrap_container.appendChild(dm_bootstrap_status_line);
 
-if (outbox_container.parentNode) {
-if (outbox_container.nextSibling) {
-outbox_container.parentNode.insertBefore(bootstrap_container, outbox_container.nextSibling);
+if (room_container.parentNode) {
+if (room_container.nextSibling) {
+room_container.parentNode.insertBefore(bootstrap_container, room_container.nextSibling);
 } else {
-outbox_container.parentNode.appendChild(bootstrap_container);
+room_container.parentNode.appendChild(bootstrap_container);
 }
 } else {
 dm_fieldset.appendChild(bootstrap_container);
@@ -2459,6 +2712,7 @@ set_group_id_input();
 update_commit_apply_state();
 update_commit_echo_status_line();
 update_conv_status_label();
+update_room_conv_status();
 
 window.addEventListener('conv.selected', (event) => {
 const detail = event && event.detail ? event.detail : null;
@@ -2466,9 +2720,14 @@ const next_conv_id = normalize_conv_id(detail && typeof detail.conv_id === 'stri
 if (next_conv_id === active_conv_id) {
 return;
 }
+const previous_conv_id = active_conv_id;
 save_active_conv_state();
 active_conv_id = next_conv_id;
 apply_conv_state(get_conv_state(active_conv_id));
 set_status('idle');
 update_conv_status_label();
+if (room_conv_id === previous_conv_id) {
+room_conv_id = active_conv_id;
+update_room_conv_status();
+}
 });
