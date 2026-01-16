@@ -15,8 +15,10 @@ func main() {
 	js.Global().Set("verifyVectors", js.FuncOf(verifyVectors))
 	js.Global().Set("dmCreateParticipant", js.FuncOf(dmCreateParticipant))
 	js.Global().Set("dmInit", js.FuncOf(dmInit))
+	js.Global().Set("groupInit", js.FuncOf(groupInit))
 	js.Global().Set("dmJoin", js.FuncOf(dmJoin))
 	js.Global().Set("dmCommitApply", js.FuncOf(dmCommitApply))
+	js.Global().Set("groupAdd", js.FuncOf(groupAdd))
 	js.Global().Set("dmEncrypt", js.FuncOf(dmEncrypt))
 	js.Global().Set("dmDecrypt", js.FuncOf(dmDecrypt))
 	select {}
@@ -45,15 +47,30 @@ func verifyVectors(_ js.Value, args []js.Value) interface{} {
 }
 
 func dmCreateParticipant(_ js.Value, args []js.Value) interface{} {
-	if len(args) < 2 {
-		return js.ValueOf(map[string]interface{}{"ok": false, "error": "name and seed_int are required"})
+	if len(args) != 2 && len(args) != 3 {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": "expected (name, seed_int) or (participant_b64, name, seed_int)"})
 	}
-	name := args[0].String()
-	seedInt, err := readSeed(args[1])
+	participantB64 := ""
+	nameValue := args[0]
+	seedValue := args[1]
+	if len(args) == 3 {
+		var err error
+		participantB64, err = readString(args[0], "participant_b64")
+		if err != nil {
+			return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+		}
+		nameValue = args[1]
+		seedValue = args[2]
+	}
+	name, err := readString(nameValue, "name")
 	if err != nil {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
 	}
-	participantB64, keypackageB64, err := dm.KeyPackage("", name, seedInt)
+	seedInt, err := readSeed(seedValue)
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	participantB64, keypackageB64, err := dm.KeyPackage(participantB64, name, seedInt)
 	if err != nil {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
 	}
@@ -77,6 +94,42 @@ func dmInit(_ js.Value, args []js.Value) interface{} {
 	}
 
 	participantB64, welcomeB64, commitB64, err := dm.Init(participantB64, peerKeypackageB64, groupIDB64, seedInt)
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	return js.ValueOf(map[string]interface{}{
+		"ok":              true,
+		"participant_b64": participantB64,
+		"welcome_b64":     welcomeB64,
+		"commit_b64":      commitB64,
+	})
+}
+
+func groupInit(_ js.Value, args []js.Value) interface{} {
+	if len(args) < 4 {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": "participant, peer_keypackages, group_id, seed_int are required"})
+	}
+	participantB64, err := readString(args[0], "participant_b64")
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	peerKeypackages, err := readStringArray(args[1], "peer_keypackages")
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	if len(peerKeypackages) < 2 {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": "peer_keypackages must include at least 2 entries"})
+	}
+	groupIDB64, err := readString(args[2], "group_id_b64")
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	seedInt, err := readSeed(args[3])
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+
+	participantB64, welcomeB64, commitB64, err := dm.InitMany(participantB64, peerKeypackages, groupIDB64, seedInt)
 	if err != nil {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
 	}
@@ -121,6 +174,38 @@ func dmCommitApply(_ js.Value, args []js.Value) interface{} {
 	})
 }
 
+func groupAdd(_ js.Value, args []js.Value) interface{} {
+	if len(args) < 3 {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": "participant, peer_keypackages, seed_int are required"})
+	}
+	participantB64, err := readString(args[0], "participant_b64")
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	peerKeypackages, err := readStringArray(args[1], "peer_keypackages")
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	if len(peerKeypackages) < 1 {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": "peer_keypackages must include at least 1 entry"})
+	}
+	seedInt, err := readSeed(args[2])
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+
+	participantB64, welcomeB64, commitB64, err := dm.AddMany(participantB64, peerKeypackages, seedInt)
+	if err != nil {
+		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
+	}
+	return js.ValueOf(map[string]interface{}{
+		"ok":              true,
+		"participant_b64": participantB64,
+		"welcome_b64":     welcomeB64,
+		"commit_b64":      commitB64,
+	})
+}
+
 func dmEncrypt(_ js.Value, args []js.Value) interface{} {
 	if len(args) < 2 {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": "participant and plaintext are required"})
@@ -160,4 +245,27 @@ func readSeed(value js.Value) (int64, error) {
 		return 0, errors.New("seed_int must be a number")
 	}
 	return int64(value.Int()), nil
+}
+
+func readString(value js.Value, name string) (string, error) {
+	if value.Type() != js.TypeString {
+		return "", errors.New(name + " must be a string")
+	}
+	return value.String(), nil
+}
+
+func readStringArray(value js.Value, name string) ([]string, error) {
+	if !js.Global().Get("Array").Call("isArray", value).Bool() {
+		return nil, errors.New(name + " must be an array")
+	}
+	length := value.Length()
+	values := make([]string, 0, length)
+	for index := 0; index < length; index++ {
+		entry := value.Index(index)
+		if entry.Type() != js.TypeString {
+			return nil, errors.New(name + " must be an array of strings")
+		}
+		values = append(values, entry.String())
+	}
+	return values, nil
 }
