@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -94,12 +95,17 @@ func main() {
 			fmt.Fprintf(os.Stderr, "failed to parse group-add flags: %v\n", err)
 			os.Exit(2)
 		}
-		welcome, commit, err := runGroupAdd(*stateDir, peerKPs, *seed)
+		welcome, commit, proposals, err := runGroupAdd(*stateDir, peerKPs, *seed)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "group-add failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("{\"welcome\":\"%s\",\"commit\":\"%s\"}\n", welcome, commit)
+		proposalsJSON, err := json.Marshal(proposals)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "group-add failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("{\"welcome\":\"%s\",\"commit\":\"%s\",\"proposals\":%s}\n", welcome, commit, proposalsJSON)
 	case "dm-join":
 		dmJoin := flag.NewFlagSet("dm-join", flag.ExitOnError)
 		stateDir := dmJoin.String("state-dir", "", "directory for participant state")
@@ -261,25 +267,25 @@ func runGroupInit(stateDir string, peerKPs []string, groupIDBase64 string, seed 
 	return welcome, commit, nil
 }
 
-func runGroupAdd(stateDir string, peerKPs []string, seed int64) (string, string, error) {
+func runGroupAdd(stateDir string, peerKPs []string, seed int64) (string, string, []string, error) {
 	if stateDir == "" {
-		return "", "", errors.New("state-dir is required")
+		return "", "", nil, errors.New("state-dir is required")
 	}
 	participantBlob, err := loadParticipantBlob(stateDir)
 	if err != nil {
-		return "", "", fmt.Errorf("load participant: %w", err)
+		return "", "", nil, fmt.Errorf("load participant: %w", err)
 	}
 	if participantBlob == "" {
-		return "", "", errors.New("participant state not initialized")
+		return "", "", nil, errors.New("participant state not initialized")
 	}
-	participantBlob, welcome, commit, err := dm.AddMany(participantBlob, peerKPs, seed)
+	participantBlob, welcome, commit, proposals, err := dm.AddMany(participantBlob, peerKPs, seed)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if err := saveParticipantBlob(stateDir, participantBlob); err != nil {
-		return "", "", fmt.Errorf("save participant: %w", err)
+		return "", "", nil, fmt.Errorf("save participant: %w", err)
 	}
-	return welcome, commit, nil
+	return welcome, commit, proposals, nil
 }
 
 func runDMJoin(stateDir, welcomeBase64 string) error {
