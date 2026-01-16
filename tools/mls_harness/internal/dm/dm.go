@@ -82,6 +82,80 @@ func Init(participant_b64, peer_kp_b64, group_id_b64 string, seed int64) (string
 	if peer_kp_b64 == "" {
 		return "", "", "", errors.New("peer keypackage is required")
 	}
+	return initWithPeers(participant_b64, []string{peer_kp_b64}, group_id_b64, seed)
+}
+
+func InitMany(participant_b64 string, peer_kps_b64 []string, group_id_b64 string, seed int64) (string, string, string, error) {
+	if participant_b64 == "" {
+		return "", "", "", errors.New("participant is required")
+	}
+	if err := validatePeerKeyPackages(peer_kps_b64, 2); err != nil {
+		return "", "", "", err
+	}
+	return initWithPeers(participant_b64, peer_kps_b64, group_id_b64, seed)
+}
+
+func AddMany(participant_b64 string, peer_kps_b64 []string, seed int64) (string, string, string, error) {
+	if participant_b64 == "" {
+		return "", "", "", errors.New("participant is required")
+	}
+	if err := validatePeerKeyPackages(peer_kps_b64, 1); err != nil {
+		return "", "", "", err
+	}
+
+	participant, err := decode_participant(participant_b64)
+	if err != nil {
+		return "", "", "", fmt.Errorf("decode participant: %w", err)
+	}
+	if participant == nil || participant.State == nil {
+		return "", "", "", errors.New("participant state not initialized")
+	}
+
+	rng := harness.DeterministicRNGWithSeed(seed)
+	restore := harness.OverrideCryptoRand(rng)
+	defer restore()
+
+	for _, peer_kp_b64 := range peer_kps_b64 {
+		peer_kp, err := parse_keypackage(peer_kp_b64)
+		if err != nil {
+			return "", "", "", fmt.Errorf("parse peer keypackage: %w", err)
+		}
+
+		add, err := participant.State.Add(peer_kp)
+		if err != nil {
+			return "", "", "", fmt.Errorf("add peer: %w", err)
+		}
+		if _, err := participant.State.Handle(add); err != nil {
+			return "", "", "", fmt.Errorf("handle add: %w", err)
+		}
+	}
+
+	commit_secret := harness.RandomBytes(rng, 32)
+	commit_pt, welcome, next_state, err := participant.State.Commit(commit_secret)
+	if err != nil {
+		return "", "", "", fmt.Errorf("commit: %w", err)
+	}
+
+	commit_bytes, err := syntax.Marshal(*commit_pt)
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal commit: %w", err)
+	}
+	welcome_bytes, err := syntax.Marshal(*welcome)
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal welcome: %w", err)
+	}
+
+	participant.Pending = &PendingCommit{Commit: commit_bytes, Welcome: welcome_bytes, NextState: next_state}
+
+	participant_b64, err = encode_participant(participant)
+	if err != nil {
+		return "", "", "", fmt.Errorf("encode participant: %w", err)
+	}
+
+	return participant_b64, base64.StdEncoding.EncodeToString(welcome_bytes), base64.StdEncoding.EncodeToString(commit_bytes), nil
+}
+
+func initWithPeers(participant_b64 string, peer_kps_b64 []string, group_id_b64 string, seed int64) (string, string, string, error) {
 	group_id, err := base64.StdEncoding.DecodeString(group_id_b64)
 	if err != nil {
 		return "", "", "", fmt.Errorf("decode group-id: %w", err)
@@ -103,22 +177,24 @@ func Init(participant_b64, peer_kp_b64, group_id_b64 string, seed int64) (string
 		return "", "", "", fmt.Errorf("build identity: %w", err)
 	}
 
-	peer_kp, err := parse_keypackage(peer_kp_b64)
-	if err != nil {
-		return "", "", "", fmt.Errorf("parse peer keypackage: %w", err)
-	}
-
 	state, err := mls.NewEmptyState(group_id, participant.InitSecret, sig_priv, *kp)
 	if err != nil {
 		return "", "", "", fmt.Errorf("create group: %w", err)
 	}
 
-	add, err := state.Add(peer_kp)
-	if err != nil {
-		return "", "", "", fmt.Errorf("add peer: %w", err)
-	}
-	if _, err := state.Handle(add); err != nil {
-		return "", "", "", fmt.Errorf("handle add: %w", err)
+	for _, peer_kp_b64 := range peer_kps_b64 {
+		peer_kp, err := parse_keypackage(peer_kp_b64)
+		if err != nil {
+			return "", "", "", fmt.Errorf("parse peer keypackage: %w", err)
+		}
+
+		add, err := state.Add(peer_kp)
+		if err != nil {
+			return "", "", "", fmt.Errorf("add peer: %w", err)
+		}
+		if _, err := state.Handle(add); err != nil {
+			return "", "", "", fmt.Errorf("handle add: %w", err)
+		}
 	}
 
 	commit_secret := harness.RandomBytes(rng, 32)
@@ -145,6 +221,21 @@ func Init(participant_b64, peer_kp_b64, group_id_b64 string, seed int64) (string
 	}
 
 	return participant_b64, base64.StdEncoding.EncodeToString(welcome_bytes), base64.StdEncoding.EncodeToString(commit_bytes), nil
+}
+
+func validatePeerKeyPackages(peer_kps_b64 []string, minCount int) error {
+	if len(peer_kps_b64) < minCount {
+		if minCount == 1 {
+			return errors.New("at least one peer keypackage is required")
+		}
+		return errors.New("at least two peer keypackages are required")
+	}
+	for _, peer_kp_b64 := range peer_kps_b64 {
+		if peer_kp_b64 == "" {
+			return errors.New("peer keypackage is required")
+		}
+	}
+	return nil
 }
 
 func Join(participant_b64, welcome_b64 string) (string, error) {
