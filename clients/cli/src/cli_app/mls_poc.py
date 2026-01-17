@@ -256,6 +256,37 @@ def build_parser() -> argparse.ArgumentParser:
     gw_dm_init.add_argument("--seed", type=int, default=7331, help="Deterministic seed (default: 7331)")
     gw_dm_init.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
+    gw_room_init = subparsers.add_parser(
+        "gw-room-init-send",
+        help="Init a room via harness and send Welcome/Commit via gateway",
+    )
+    gw_room_init.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_init.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_room_init.add_argument(
+        "--peer-kp-b64",
+        required=True,
+        action="append",
+        help="Peer KeyPackage (base64, repeatable, required)",
+    )
+    gw_room_init.add_argument("--group-id", required=True, help="Group id (base64, required)")
+    gw_room_init.add_argument("--seed", type=int, default=9001, help="Deterministic seed (default: 9001)")
+    gw_room_init.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_room_add = subparsers.add_parser(
+        "gw-room-add-send",
+        help="Add peers via harness and send Welcome/Commit via gateway",
+    )
+    gw_room_add.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_add.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_room_add.add_argument(
+        "--peer-kp-b64",
+        required=True,
+        action="append",
+        help="Peer KeyPackage (base64, repeatable, required)",
+    )
+    gw_room_add.add_argument("--seed", type=int, default=9002, help="Deterministic seed (default: 9002)")
+    gw_room_add.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
     gw_dm_send = subparsers.add_parser("gw-dm-send", help="Encrypt and send a DM application message")
     gw_dm_send.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_dm_send.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
@@ -531,6 +562,81 @@ def handle_gw_dm_init_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def _peer_keypackage_args(peer_kp_b64: Iterable[str]) -> list[str]:
+    args: list[str] = []
+    for keypackage in peer_kp_b64:
+        args.extend(["--peer-keypackage", keypackage])
+    return args
+
+
+def _send_welcome_commit(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    payload: dict[str, object],
+) -> None:
+    welcome = str(payload["welcome"])
+    commit = str(payload["commit"])
+
+    welcome_env = dm_envelope.pack(0x01, welcome)
+    welcome_msg_id = _msg_id_for_env(welcome_env)
+    welcome_response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        conv_id,
+        welcome_msg_id,
+        welcome_env,
+    )
+    sys.stdout.write(f"welcome_seq: {welcome_response['seq']}\n")
+
+    commit_env = dm_envelope.pack(0x02, commit)
+    commit_msg_id = _msg_id_for_env(commit_env)
+    commit_response = gateway_client.inbox_send(
+        base_url,
+        session_token,
+        conv_id,
+        commit_msg_id,
+        commit_env,
+    )
+    sys.stdout.write(f"commit_seq: {commit_response['seq']}\n")
+
+
+def handle_gw_room_init_send(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    output = _run_harness_capture(
+        "group-init",
+        [
+            "--state-dir",
+            args.state_dir,
+            *_peer_keypackage_args(args.peer_kp_b64),
+            "--group-id",
+            args.group_id,
+            "--seed",
+            str(args.seed),
+        ],
+    )
+    payload = json.loads(_first_nonempty_line(output))
+    _send_welcome_commit(base_url, session_token, args.conv_id, payload)
+    return 0
+
+
+def handle_gw_room_add_send(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    output = _run_harness_capture(
+        "group-add",
+        [
+            "--state-dir",
+            args.state_dir,
+            *_peer_keypackage_args(args.peer_kp_b64),
+            "--seed",
+            str(args.seed),
+        ],
+    )
+    payload = json.loads(_first_nonempty_line(output))
+    _send_welcome_commit(base_url, session_token, args.conv_id, payload)
+    return 0
+
+
 def handle_gw_dm_send(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     output = _run_harness_capture(
@@ -747,6 +853,10 @@ def main(argv: list[str] | None = None) -> int:
             return handle_gw_dm_create(args)
         if args.command == "gw-dm-init-send":
             return handle_gw_dm_init_send(args)
+        if args.command == "gw-room-init-send":
+            return handle_gw_room_init_send(args)
+        if args.command == "gw-room-add-send":
+            return handle_gw_room_add_send(args)
         if args.command == "gw-dm-send":
             return handle_gw_dm_send(args)
         if args.command == "gw-dm-tail":
