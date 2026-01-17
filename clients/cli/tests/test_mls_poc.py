@@ -87,6 +87,38 @@ class MlsPocDryRunTests(unittest.TestCase):
         self.assertEqual(payload.get("peer_user_ids"), ["peer_user"])
         self.assertIn("steps", payload)
 
+    def test_phase5_room_smoke_dry_run_with_add(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "cli_app.mls_poc",
+                    "gw-phase5-room-smoke",
+                    "--conv-id",
+                    "conv_phase5_add_test",
+                    "--state-dir",
+                    state_dir,
+                    "--peer-user-id",
+                    "peer_user",
+                    "--add-peer-user-id",
+                    "add_peer_user",
+                    "--dry-run",
+                ],
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload.get("command"), "gw-phase5-room-smoke")
+        self.assertEqual(payload.get("add_peer_user_ids"), ["add_peer_user"])
+        steps = payload.get("steps", [])
+        step_names = {step.get("step") for step in steps}
+        self.assertIn("group_add_send_envelopes", step_names)
+        self.assertIn("send_second_app", step_names)
+
 
 if __name__ == "__main__":
     unittest.main()
