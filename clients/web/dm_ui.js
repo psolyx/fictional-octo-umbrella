@@ -88,6 +88,17 @@ let dm_bootstrap_publish_btn = null;
 let dm_bootstrap_status_line = null;
 let room_conv_id = '(none)';
 let room_conv_status_line = null;
+let room_gateway_invite_input = null;
+let room_gateway_remove_input = null;
+let room_gateway_create_btn = null;
+let room_gateway_invite_btn = null;
+let room_gateway_remove_btn = null;
+let room_peer_fetch_input = null;
+let room_peer_fetch_count_input = null;
+let room_peer_fetch_btn = null;
+let room_add_user_id_input = null;
+let room_add_fetch_btn = null;
+let room_welcome_auto_join_input = null;
 let room_keypackages_input = null;
 let room_add_keypackage_input = null;
 let room_welcome_env_input = null;
@@ -107,6 +118,9 @@ const seed_room_init = 4004;
 const seed_room_add = 5005;
 const keypackage_fetch_path = '/v1/keypackages/fetch';
 const keypackage_publish_path = '/v1/keypackages';
+const room_create_path = '/v1/rooms/create';
+const room_invite_path = '/v1/rooms/invite';
+const room_remove_path = '/v1/rooms/remove';
 const gateway_transcript_db_name = 'gateway_web_demo';
 const gateway_transcript_db_version = 2;
 const gateway_transcript_store_name = 'transcripts';
@@ -608,6 +622,25 @@ return text
 .filter((line) => line.length > 0);
 };
 
+const parse_user_id_list = (text) => {
+if (typeof text !== 'string') {
+return [];
+}
+return text
+.split(/[\s,]+/u)
+.map((value) => value.trim())
+.filter((value) => value.length > 0);
+};
+
+const append_textarea_lines = (textarea, lines) => {
+if (!textarea || !Array.isArray(lines) || !lines.length) {
+return;
+}
+const existing = textarea.value ? textarea.value.trim() : '';
+const prefix = existing ? `${existing}\n` : '';
+textarea.value = `${prefix}${lines.join('\n')}`;
+};
+
 const get_room_conv_id_for_send = () => {
 const normalized = normalize_conv_id(room_conv_id);
 if (normalized === '(none)') {
@@ -663,6 +696,23 @@ latest = record;
 return latest;
 };
 
+const select_latest_welcome_record = (records) => {
+let latest = null;
+for (const record of records) {
+if (!record || typeof record.env !== 'string') {
+continue;
+}
+const env_meta = parse_live_inbox_env(record.env);
+if (!env_meta || env_meta.kind !== 1) {
+continue;
+}
+if (!latest || record.seq > latest.seq) {
+latest = record;
+}
+}
+return latest;
+};
+
 const resolve_room_participant = (action_label) => {
 const selection = room_participant_select ? room_participant_select.value : 'bob';
 if (selection === 'alice') {
@@ -699,11 +749,306 @@ return group_add_fn;
 
 /*
 Manual sanity (room):
-- With gateway session ready and conv_id selected, "Room init" sends welcome+commit and waits for echo before commit apply.
+- Use "Create room" to register room_conv_id and optionally invite peers.
+- Invite/remove uses gateway HTTP and expects user_id lists (comma/space separated).
+- "Fetch room peer keypackages" loads keypackages for init/add without copy/paste.
+- "Load latest welcome from transcript" finds the newest kind=1 env and can auto-join.
+- "Room init" sends welcome+commit and waits for echo before commit apply.
 - "Room add member" sends follow-up welcome+commit, still waiting for echo before commit apply.
 - "Room join (peer)" uses bob participant to apply welcome, waits for echoed commit from transcript.
 - "Room send app" emits kind=3 env; "Room decrypt latest app" reads from transcript store.
 */
+
+const get_room_gateway_auth = () => {
+if (!gateway_session_token || !gateway_http_base_url) {
+set_room_status('room: gateway session not ready');
+return null;
+}
+return {
+session_token: gateway_session_token,
+http_base_url: gateway_http_base_url,
+};
+};
+
+const parse_peer_fetch_count = () => {
+if (!room_peer_fetch_count_input) {
+return 1;
+}
+const parsed = Number.parseInt(room_peer_fetch_count_input.value, 10);
+if (!Number.isInteger(parsed) || parsed < 1) {
+return 1;
+}
+return parsed;
+};
+
+const resolve_room_create_conv_id = () => {
+const normalized = normalize_conv_id(room_conv_id);
+if (normalized !== '(none)') {
+return normalized;
+}
+if (!group_id_b64) {
+group_id_b64 = generate_group_id();
+set_group_id_input();
+}
+return group_id_b64;
+};
+
+const fetch_keypackage_for_user = async (auth, user_id, count) => {
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${keypackage_fetch_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ user_id, count }),
+});
+} catch (error) {
+return { ok: false, error: `fetch failed: ${error}` };
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+return { ok: false, error: message };
+}
+const keypackages = payload && Array.isArray(payload.keypackages) ? payload.keypackages : [];
+if (!keypackages.length || typeof keypackages[0] !== 'string') {
+return { ok: false, error: 'no keypackages returned' };
+}
+return { ok: true, keypackage: keypackages[0] };
+};
+
+const handle_room_create_gateway = async () => {
+const auth = get_room_gateway_auth();
+if (!auth) {
+return;
+}
+const conv_id = resolve_room_create_conv_id();
+if (!conv_id) {
+set_room_status('room: missing conv_id');
+return;
+}
+const invite_text = room_gateway_invite_input ? room_gateway_invite_input.value : '';
+const members = parse_user_id_list(invite_text);
+set_room_status('room: creating room...');
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${room_create_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ conv_id, members }),
+});
+} catch (error) {
+set_room_status(`room: create failed (${error})`);
+return;
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+set_room_status(`room: create failed (${message})`);
+return;
+}
+room_conv_id = conv_id;
+update_room_conv_status();
+set_room_status('room: created');
+log_output(`room created for conv_id ${conv_id}`);
+};
+
+const handle_room_invite_gateway = async () => {
+const auth = get_room_gateway_auth();
+if (!auth) {
+return;
+}
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before invite');
+return;
+}
+const invite_text = room_gateway_invite_input ? room_gateway_invite_input.value : '';
+const members = parse_user_id_list(invite_text);
+if (!members.length) {
+set_room_status('room: invite user_id required');
+return;
+}
+set_room_status('room: inviting members...');
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${room_invite_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ conv_id, members }),
+});
+} catch (error) {
+set_room_status(`room: invite failed (${error})`);
+return;
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+set_room_status(`room: invite failed (${message})`);
+return;
+}
+set_room_status('room: invite ok');
+log_output(`room invite sent for conv_id ${conv_id}`);
+};
+
+const handle_room_remove_gateway = async () => {
+const auth = get_room_gateway_auth();
+if (!auth) {
+return;
+}
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before remove');
+return;
+}
+const remove_text = room_gateway_remove_input ? room_gateway_remove_input.value : '';
+const remove_list = parse_user_id_list(remove_text);
+if (!remove_list.length) {
+set_room_status('room: remove user_id required');
+return;
+}
+if (remove_list.length > 1) {
+set_room_status('room: remove expects single user_id');
+return;
+}
+set_room_status('room: removing member...');
+let response;
+try {
+response = await fetch(`${auth.http_base_url}${room_remove_path}`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+Authorization: `Bearer ${auth.session_token}`,
+},
+body: JSON.stringify({ conv_id, members: remove_list }),
+});
+} catch (error) {
+set_room_status(`room: remove failed (${error})`);
+return;
+}
+let payload = null;
+try {
+payload = await response.json();
+} catch (error) {
+payload = null;
+}
+if (!response.ok) {
+const message =
+payload && payload.message ? payload.message : `request failed (${response.status})`;
+set_room_status(`room: remove failed (${message})`);
+return;
+}
+set_room_status('room: remove ok');
+log_output(`room remove sent for conv_id ${conv_id}`);
+};
+
+const handle_room_fetch_peer_keypackages = async () => {
+const auth = get_room_gateway_auth();
+if (!auth) {
+return;
+}
+const peers_text = room_peer_fetch_input ? room_peer_fetch_input.value : '';
+const peer_user_ids = parse_user_id_list(peers_text);
+if (!peer_user_ids.length) {
+set_room_status('room: peer user_ids required');
+return;
+}
+const count = parse_peer_fetch_count();
+set_room_status('room: fetching peer keypackages...');
+const keypackages = [];
+for (const user_id of peer_user_ids) {
+const result = await fetch_keypackage_for_user(auth, user_id, count);
+if (!result.ok) {
+set_room_status(`room: fetch failed for ${user_id} (${result.error})`);
+return;
+}
+keypackages.push(result.keypackage);
+}
+append_textarea_lines(room_keypackages_input, keypackages);
+set_room_status('room: peer keypackages loaded');
+log_output('room peer keypackages loaded');
+};
+
+const handle_room_fetch_add_keypackage = async () => {
+const auth = get_room_gateway_auth();
+if (!auth) {
+return;
+}
+const user_id = room_add_user_id_input ? room_add_user_id_input.value.trim() : '';
+if (!user_id) {
+set_room_status('room: add user_id required');
+return;
+}
+const count = parse_peer_fetch_count();
+set_room_status('room: fetching add keypackage...');
+const result = await fetch_keypackage_for_user(auth, user_id, count);
+if (!result.ok) {
+set_room_status(`room: fetch add failed (${result.error})`);
+return;
+}
+if (room_add_keypackage_input) {
+room_add_keypackage_input.value = result.keypackage;
+}
+set_room_status('room: add keypackage loaded');
+log_output(`room add keypackage loaded for ${user_id}`);
+};
+
+const handle_room_load_latest_welcome = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before loading welcome');
+return;
+}
+set_room_status('room: loading latest welcome from transcript...');
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+set_room_status('room: transcript read failed');
+log_output(`room transcript read failed: ${error}`);
+return;
+}
+const latest = select_latest_welcome_record(records);
+if (!latest) {
+set_room_status('room: no welcome env found');
+log_output('room welcome load blocked: no welcome env found');
+return;
+}
+if (room_welcome_env_input) {
+room_welcome_env_input.value = latest.env;
+}
+set_room_status(`room: welcome loaded (seq=${latest.seq})`);
+log_output(`room welcome loaded (seq=${latest.seq})`);
+if (room_welcome_auto_join_input && room_welcome_auto_join_input.checked) {
+await handle_room_join_peer();
+}
+};
 
 const handle_room_join_peer = async () => {
 const conv_id = get_room_conv_id_for_send();
@@ -2575,6 +2920,104 @@ set_room_status('room: conv_id bound');
 room_bind_row.appendChild(room_bind_btn);
 room_container.appendChild(room_bind_row);
 
+const room_gateway_title = document.createElement('div');
+room_gateway_title.textContent = 'Room management (gateway)';
+room_container.appendChild(room_gateway_title);
+
+const room_gateway_invite_label = document.createElement('label');
+room_gateway_invite_label.textContent = 'invite_user_ids (comma/space separated)';
+room_gateway_invite_input = document.createElement('input');
+room_gateway_invite_input.type = 'text';
+room_gateway_invite_input.size = 64;
+room_gateway_invite_label.appendChild(room_gateway_invite_input);
+room_container.appendChild(room_gateway_invite_label);
+
+const room_gateway_remove_label = document.createElement('label');
+room_gateway_remove_label.textContent = 'remove_user_id';
+room_gateway_remove_input = document.createElement('input');
+room_gateway_remove_input.type = 'text';
+room_gateway_remove_input.size = 48;
+room_gateway_remove_label.appendChild(room_gateway_remove_input);
+room_container.appendChild(room_gateway_remove_label);
+
+const room_gateway_buttons = document.createElement('div');
+room_gateway_buttons.className = 'button-row';
+room_gateway_create_btn = document.createElement('button');
+room_gateway_create_btn.type = 'button';
+room_gateway_create_btn.textContent = 'Create room';
+room_gateway_create_btn.addEventListener('click', () => {
+void handle_room_create_gateway();
+});
+room_gateway_buttons.appendChild(room_gateway_create_btn);
+
+room_gateway_invite_btn = document.createElement('button');
+room_gateway_invite_btn.type = 'button';
+room_gateway_invite_btn.textContent = 'Invite';
+room_gateway_invite_btn.addEventListener('click', () => {
+void handle_room_invite_gateway();
+});
+room_gateway_buttons.appendChild(room_gateway_invite_btn);
+
+room_gateway_remove_btn = document.createElement('button');
+room_gateway_remove_btn.type = 'button';
+room_gateway_remove_btn.textContent = 'Remove';
+room_gateway_remove_btn.addEventListener('click', () => {
+void handle_room_remove_gateway();
+});
+room_gateway_buttons.appendChild(room_gateway_remove_btn);
+room_container.appendChild(room_gateway_buttons);
+
+const room_fetch_title = document.createElement('div');
+room_fetch_title.textContent = 'Fetch room peer keypackages';
+room_container.appendChild(room_fetch_title);
+
+const room_peer_fetch_label = document.createElement('label');
+room_peer_fetch_label.textContent = 'peer_user_ids (comma/space separated)';
+room_peer_fetch_input = document.createElement('input');
+room_peer_fetch_input.type = 'text';
+room_peer_fetch_input.size = 64;
+room_peer_fetch_label.appendChild(room_peer_fetch_input);
+room_container.appendChild(room_peer_fetch_label);
+
+const room_peer_fetch_count_label = document.createElement('label');
+room_peer_fetch_count_label.textContent = 'count';
+room_peer_fetch_count_input = document.createElement('input');
+room_peer_fetch_count_input.type = 'number';
+room_peer_fetch_count_input.min = '1';
+room_peer_fetch_count_input.value = '1';
+room_peer_fetch_count_label.appendChild(room_peer_fetch_count_input);
+room_container.appendChild(room_peer_fetch_count_label);
+
+const room_peer_fetch_row = document.createElement('div');
+room_peer_fetch_row.className = 'button-row';
+room_peer_fetch_btn = document.createElement('button');
+room_peer_fetch_btn.type = 'button';
+room_peer_fetch_btn.textContent = 'Fetch keypackages for init';
+room_peer_fetch_btn.addEventListener('click', () => {
+void handle_room_fetch_peer_keypackages();
+});
+room_peer_fetch_row.appendChild(room_peer_fetch_btn);
+room_container.appendChild(room_peer_fetch_row);
+
+const room_add_fetch_label = document.createElement('label');
+room_add_fetch_label.textContent = 'add_member_user_id';
+room_add_user_id_input = document.createElement('input');
+room_add_user_id_input.type = 'text';
+room_add_user_id_input.size = 48;
+room_add_fetch_label.appendChild(room_add_user_id_input);
+room_container.appendChild(room_add_fetch_label);
+
+const room_add_fetch_row = document.createElement('div');
+room_add_fetch_row.className = 'button-row';
+room_add_fetch_btn = document.createElement('button');
+room_add_fetch_btn.type = 'button';
+room_add_fetch_btn.textContent = 'Fetch keypackage for add';
+room_add_fetch_btn.addEventListener('click', () => {
+void handle_room_fetch_add_keypackage();
+});
+room_add_fetch_row.appendChild(room_add_fetch_btn);
+room_container.appendChild(room_add_fetch_row);
+
 const room_keypackages_label = document.createElement('label');
 room_keypackages_label.textContent = 'room_peer_keypackages (one per line)';
 room_keypackages_input = document.createElement('textarea');
@@ -2598,6 +3041,23 @@ room_welcome_env_input.rows = 3;
 room_welcome_env_input.cols = 64;
 room_welcome_label.appendChild(room_welcome_env_input);
 room_container.appendChild(room_welcome_label);
+
+const room_welcome_controls = document.createElement('div');
+room_welcome_controls.className = 'button-row';
+const room_welcome_load_btn = document.createElement('button');
+room_welcome_load_btn.type = 'button';
+room_welcome_load_btn.textContent = 'Load latest welcome from transcript';
+room_welcome_load_btn.addEventListener('click', () => {
+void handle_room_load_latest_welcome();
+});
+room_welcome_controls.appendChild(room_welcome_load_btn);
+const room_welcome_auto_label = document.createElement('label');
+room_welcome_auto_label.textContent = 'Auto-join when welcome loaded';
+room_welcome_auto_join_input = document.createElement('input');
+room_welcome_auto_join_input.type = 'checkbox';
+room_welcome_auto_label.appendChild(room_welcome_auto_join_input);
+room_welcome_controls.appendChild(room_welcome_auto_label);
+room_container.appendChild(room_welcome_controls);
 
 const room_buttons = document.createElement('div');
 room_buttons.className = 'button-row';
