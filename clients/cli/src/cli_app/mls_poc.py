@@ -109,6 +109,14 @@ def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
 
 
 def _run_harness_capture(subcommand: str, extra_args: Iterable[str]) -> str:
+    returncode, stdout, stderr = _run_harness_capture_with_status(subcommand, extra_args)
+    if returncode != 0:
+        sys.stderr.write(stderr)
+        raise RuntimeError(f"harness {subcommand} failed")
+    return stdout
+
+
+def _run_harness_capture_with_status(subcommand: str, extra_args: Iterable[str]) -> tuple[int, str, str]:
     repo_root = find_repo_root()
     go_path = ensure_go_ready()
 
@@ -142,10 +150,7 @@ def _run_harness_capture(subcommand: str, extra_args: Iterable[str]) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr)
-        raise RuntimeError(f"harness {subcommand} failed")
-    return result.stdout
+    return result.returncode, result.stdout, result.stderr
 
 
 def _first_nonempty_line(output: str) -> str:
@@ -203,6 +208,11 @@ def _extract_http_error_message(exc: urllib.error.HTTPError) -> str:
         return raw
     message = payload.get("message")
     return str(message) if message else raw
+
+
+def _is_uninitialized_commit_error(message: str) -> bool:
+    lowered = message.lower()
+    return "participant state not initialized" in lowered or "state not initialized" in lowered
 
 
 def _send_envelope(base_url: str, session_token: str, conv_id: str, env_b64: str) -> int:
@@ -311,6 +321,7 @@ def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
                         },
                     },
                     "envelopes": [
+                        {"kind": 2, "name": "add_proposal", "msg_id": "sha256(env_bytes)"},
                         {"kind": 1, "name": "add_welcome", "msg_id": "sha256(env_bytes)"},
                         {"kind": 2, "name": "add_commit", "msg_id": "sha256(env_bytes)"},
                     ],
@@ -963,6 +974,26 @@ def _send_welcome_commit(
     sys.stdout.write(f"commit_seq: {commit_response['seq']}\n")
 
 
+def _extract_proposals(payload: dict[str, object]) -> list[str]:
+    proposals = payload.get("proposals")
+    if not isinstance(proposals, list):
+        return []
+    return [proposal for proposal in proposals if isinstance(proposal, str)]
+
+
+def _send_proposals(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    proposals: Iterable[str],
+) -> list[int]:
+    proposal_seqs: list[int] = []
+    for proposal in proposals:
+        proposal_env = dm_envelope.pack(0x02, proposal)
+        proposal_seqs.append(_send_envelope(base_url, session_token, conv_id, proposal_env))
+    return proposal_seqs
+
+
 def handle_gw_room_init_send(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     output = _run_harness_capture(
@@ -995,6 +1026,10 @@ def handle_gw_room_add_send(args: argparse.Namespace) -> int:
         ],
     )
     payload = json.loads(_first_nonempty_line(output))
+    proposals = _extract_proposals(payload)
+    proposal_seqs = _send_proposals(base_url, session_token, args.conv_id, proposals)
+    for index, proposal_seq in enumerate(proposal_seqs, start=1):
+        sys.stdout.write(f"proposal_seq_{index}: {proposal_seq}\n")
     _send_welcome_commit(base_url, session_token, args.conv_id, payload)
     return 0
 
@@ -1117,6 +1152,8 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
             ],
         )
         add_payload = json.loads(_first_nonempty_line(add_output))
+        add_proposals = _extract_proposals(add_payload)
+        add_proposal_seqs = _send_proposals(base_url, session_token, args.conv_id, add_proposals)
         add_welcome_env = dm_envelope.pack(0x01, str(add_payload["welcome"]))
         add_commit_env = dm_envelope.pack(0x02, str(add_payload["commit"]))
         add_welcome_seq = _send_envelope(base_url, session_token, args.conv_id, add_welcome_env)
@@ -1137,6 +1174,7 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
         summary.update(
             {
                 "add_commit_seq": add_commit_seq,
+                "add_proposal_seqs": add_proposal_seqs,
                 "add_welcome_seq": add_welcome_seq,
                 "app2_seq": app2_seq,
             }
@@ -1147,6 +1185,8 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
 
 def handle_gw_dm_tail(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    joined = _state_dir_has_data(Path(args.state_dir))
+    warned_uninitialized_commit = False
     if args.wipe_state:
         if args.from_seq is None:
             raise RuntimeError("--wipe-state requires --from-seq (use --from-seq 1 to rebuild state)")
@@ -1186,8 +1226,9 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
                     payload_b64,
                 ],
             )
+            joined = True
         elif kind == 0x02:
-            _run_harness_capture(
+            returncode, stdout, stderr = _run_harness_capture_with_status(
                 "dm-commit-apply",
                 [
                     "--state-dir",
@@ -1196,6 +1237,19 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
                     payload_b64,
                 ],
             )
+            if returncode != 0:
+                message = stderr.strip() or stdout.strip()
+                if not joined and _is_uninitialized_commit_error(message):
+                    if not warned_uninitialized_commit:
+                        sys.stderr.write(
+                            "Skipping commit before Welcome (participant state not initialized).\n"
+                        )
+                        warned_uninitialized_commit = True
+                else:
+                    sys.stderr.write(stderr)
+                    raise RuntimeError("harness dm-commit-apply failed")
+            else:
+                joined = True
         elif kind == 0x03:
             output = _run_harness_capture(
                 "dm-decrypt",

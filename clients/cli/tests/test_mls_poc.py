@@ -118,6 +118,17 @@ class MlsPocDryRunTests(unittest.TestCase):
         step_names = {step.get("step") for step in steps}
         self.assertIn("group_add_send_envelopes", step_names)
         self.assertIn("send_second_app", step_names)
+        add_steps = [step for step in steps if step.get("step") == "group_add_send_envelopes"]
+        self.assertEqual(len(add_steps), 1)
+        add_envelopes = add_steps[0].get("envelopes", [])
+        self.assertGreaterEqual(len(add_envelopes), 3)
+        self.assertEqual(add_envelopes[0].get("name"), "add_proposal")
+        self.assertEqual(add_envelopes[1].get("name"), "add_welcome")
+        self.assertEqual(add_envelopes[2].get("name"), "add_commit")
+
+    def test_uninitialized_commit_error_helper(self):
+        self.assertTrue(mls_poc._is_uninitialized_commit_error("participant state not initialized"))
+        self.assertFalse(mls_poc._is_uninitialized_commit_error("unexpected epoch mismatch"))
 
 
 if __name__ == "__main__":
