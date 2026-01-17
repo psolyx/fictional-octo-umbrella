@@ -90,6 +90,14 @@ let room_conv_id = '(none)';
 let room_conv_status_line = null;
 let room_keypackages_input = null;
 let room_add_keypackage_input = null;
+let room_welcome_env_input = null;
+let room_join_btn = null;
+let room_participant_select = null;
+let room_send_plaintext_input = null;
+let room_send_btn = null;
+let room_decrypt_btn = null;
+let room_decrypt_msg_id_output = null;
+let room_decrypt_plaintext_output = null;
 let room_status_line = null;
 
 const seed_alice = 1001;
@@ -99,6 +107,10 @@ const seed_room_init = 4004;
 const seed_room_add = 5005;
 const keypackage_fetch_path = '/v1/keypackages/fetch';
 const keypackage_publish_path = '/v1/keypackages';
+const gateway_transcript_db_name = 'gateway_web_demo';
+const gateway_transcript_db_version = 2;
+const gateway_transcript_store_name = 'transcripts';
+const gateway_transcript_index_name = 'by_conv_id';
 
 const db_name = 'mls_dm_state';
 const store_name = 'records';
@@ -604,6 +616,71 @@ return '';
 return normalized;
 };
 
+const open_transcript_db = () => new Promise((resolve, reject) => {
+const request = indexedDB.open(gateway_transcript_db_name, gateway_transcript_db_version);
+request.onupgradeneeded = (event) => {
+const db = event.target.result;
+if (!db.objectStoreNames.contains(gateway_transcript_store_name)) {
+const store = db.createObjectStore(gateway_transcript_store_name, { keyPath: 'key' });
+store.createIndex(gateway_transcript_index_name, 'conv_id', { unique: false });
+return;
+}
+const store = request.transaction.objectStore(gateway_transcript_store_name);
+if (!store.indexNames.contains(gateway_transcript_index_name)) {
+store.createIndex(gateway_transcript_index_name, 'conv_id', { unique: false });
+}
+};
+request.onsuccess = () => resolve(request.result);
+request.onerror = () => reject(request.error);
+});
+
+const read_transcript_records_by_conv_id = async (conv_id) => {
+const db = await open_transcript_db();
+return new Promise((resolve, reject) => {
+const tx = db.transaction(gateway_transcript_store_name, 'readonly');
+const store = tx.objectStore(gateway_transcript_store_name);
+const index = store.index(gateway_transcript_index_name);
+const request = index.getAll(conv_id);
+request.onsuccess = () => resolve(request.result || []);
+request.onerror = () => reject(request.error || new Error('transcript read failed'));
+});
+};
+
+const select_latest_app_record = (records) => {
+let latest = null;
+for (const record of records) {
+if (!record || typeof record.env !== 'string') {
+continue;
+}
+const env_meta = parse_live_inbox_env(record.env);
+if (!env_meta || env_meta.kind !== 3) {
+continue;
+}
+if (!latest || record.seq > latest.seq) {
+latest = record;
+}
+}
+return latest;
+};
+
+const resolve_room_participant = (action_label) => {
+const selection = room_participant_select ? room_participant_select.value : 'bob';
+if (selection === 'alice') {
+if (!alice_participant_b64) {
+set_room_status(`room: need alice participant for ${action_label}`);
+log_output(`room ${action_label} blocked: missing alice participant`);
+return null;
+}
+return { label: 'alice', participant_b64: alice_participant_b64 };
+}
+if (!bob_participant_b64) {
+set_room_status(`room: need bob participant for ${action_label}`);
+log_output(`room ${action_label} blocked: missing bob participant`);
+return null;
+}
+return { label: 'bob', participant_b64: bob_participant_b64 };
+};
+
 const get_group_init_fn = () => {
 const group_init_fn = globalThis['groupInit'];
 if (typeof group_init_fn !== 'function') {
@@ -624,7 +701,143 @@ return group_add_fn;
 Manual sanity (room):
 - With gateway session ready and conv_id selected, "Room init" sends welcome+commit and waits for echo before commit apply.
 - "Room add member" sends follow-up welcome+commit, still waiting for echo before commit apply.
+- "Room join (peer)" uses bob participant to apply welcome, waits for echoed commit from transcript.
+- "Room send app" emits kind=3 env; "Room decrypt latest app" reads from transcript store.
 */
+
+const handle_room_join_peer = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before join');
+return false;
+}
+if (!bob_participant_b64) {
+set_room_status('room: need bob participant');
+log_output('room join blocked: missing bob participant');
+return false;
+}
+const env_b64 = room_welcome_env_input ? room_welcome_env_input.value.trim() : '';
+if (!env_b64) {
+set_room_status('room: need welcome env');
+log_output('room join blocked: missing welcome env');
+return false;
+}
+const unpacked = unpack_dm_env(env_b64);
+if (!unpacked || unpacked.kind !== 1) {
+set_room_status('room: expected welcome env (kind=1)');
+log_output('room join blocked: invalid welcome env');
+return false;
+}
+set_room_status('room: joining peer...');
+await ensure_wasm_ready();
+const result = await dm_join(bob_participant_b64, unpacked.payload_b64);
+if (!result || !result.ok) {
+const error_text = result && result.error ? result.error : 'unknown error';
+set_room_status('room: join failed');
+log_output(`room join failed: ${error_text}`);
+return false;
+}
+bob_participant_b64 = result.participant_b64;
+bob_has_joined = true;
+set_room_status('room: peer joined (waiting for commit echo)');
+log_output('room peer applied welcome');
+return true;
+};
+
+const handle_room_send_app = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before send');
+return;
+}
+const participant = resolve_room_participant('send');
+if (!participant) {
+return;
+}
+const plaintext = room_send_plaintext_input ? room_send_plaintext_input.value : '';
+if (!plaintext) {
+set_room_status('room: app plaintext required');
+log_output('room send blocked: missing plaintext');
+return;
+}
+set_room_status(`room: encrypting app as ${participant.label}`);
+await ensure_wasm_ready();
+const enc_result = await dm_encrypt(participant.participant_b64, plaintext);
+if (!enc_result || !enc_result.ok) {
+const error_text = enc_result && enc_result.error ? enc_result.error : 'unknown error';
+set_room_status('room: app encrypt failed');
+log_output(`room app encrypt failed: ${error_text}`);
+return;
+}
+if (participant.label === 'alice') {
+alice_participant_b64 = enc_result.participant_b64;
+} else {
+bob_participant_b64 = enc_result.participant_b64;
+}
+const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
+set_outbox_envs({ app_env_b64 });
+dispatch_gateway_send_env(conv_id, app_env_b64);
+set_room_status(`room: app sent as ${participant.label}`);
+log_output(`room app env sent for conv_id ${conv_id}`);
+};
+
+const set_room_decrypt_output = (msg_id, plaintext) => {
+if (room_decrypt_msg_id_output) {
+room_decrypt_msg_id_output.value = msg_id ? String(msg_id) : '';
+}
+if (room_decrypt_plaintext_output) {
+room_decrypt_plaintext_output.value = plaintext || '';
+}
+};
+
+const handle_room_decrypt_latest_app = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room: select conv_id before decrypt');
+return;
+}
+const participant = resolve_room_participant('decrypt');
+if (!participant) {
+return;
+}
+set_room_status('room: loading transcript app env');
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+set_room_status('room: transcript read failed');
+log_output(`room transcript read failed: ${error}`);
+return;
+}
+const latest = select_latest_app_record(records);
+if (!latest) {
+set_room_status('room: no app env found');
+log_output('room decrypt blocked: no app env found');
+return;
+}
+const unpacked = unpack_dm_env(latest.env);
+if (!unpacked || unpacked.kind !== 3) {
+set_room_status('room: latest app env invalid');
+log_output('room decrypt blocked: latest app env invalid');
+return;
+}
+set_room_status(`room: decrypting app seq=${latest.seq}`);
+const dec_result = await dm_decrypt(participant.participant_b64, unpacked.payload_b64);
+if (!dec_result || !dec_result.ok) {
+const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
+set_room_status('room: app decrypt failed');
+log_output(`room app decrypt failed: ${error_text}`);
+return;
+}
+if (participant.label === 'alice') {
+alice_participant_b64 = dec_result.participant_b64;
+} else {
+bob_participant_b64 = dec_result.participant_b64;
+}
+set_room_decrypt_output(latest.msg_id, dec_result.plaintext);
+set_room_status(`room: app decrypted (seq=${latest.seq})`);
+log_output(`room app decrypted (seq=${latest.seq})`);
+};
 
 const handle_room_init = async () => {
 const conv_id = get_room_conv_id_for_send();
@@ -1094,6 +1307,13 @@ set_live_inbox_expected_seq(1);
 set_group_id_input();
 set_ciphertext_output('');
 set_decrypted_output('');
+if (room_welcome_env_input) {
+room_welcome_env_input.value = '';
+}
+if (room_send_plaintext_input) {
+room_send_plaintext_input.value = '';
+}
+set_room_decrypt_output('', '');
 set_expected_plaintext_input();
 set_incoming_env_input('');
 await db_clear();
@@ -2371,6 +2591,14 @@ room_add_keypackage_input.cols = 64;
 room_add_label.appendChild(room_add_keypackage_input);
 room_container.appendChild(room_add_label);
 
+const room_welcome_label = document.createElement('label');
+room_welcome_label.textContent = 'room_welcome_env_b64 (kind=1)';
+room_welcome_env_input = document.createElement('textarea');
+room_welcome_env_input.rows = 3;
+room_welcome_env_input.cols = 64;
+room_welcome_label.appendChild(room_welcome_env_input);
+room_container.appendChild(room_welcome_label);
+
 const room_buttons = document.createElement('div');
 room_buttons.className = 'button-row';
 const room_init_btn = document.createElement('button');
@@ -2388,7 +2616,77 @@ room_add_btn.addEventListener('click', () => {
 void handle_room_add();
 });
 room_buttons.appendChild(room_add_btn);
+
+room_join_btn = document.createElement('button');
+room_join_btn.type = 'button';
+room_join_btn.textContent = 'Room join (peer)';
+room_join_btn.addEventListener('click', () => {
+void handle_room_join_peer();
+});
+room_buttons.appendChild(room_join_btn);
 room_container.appendChild(room_buttons);
+
+const room_participant_label = document.createElement('label');
+room_participant_label.textContent = 'room_participant';
+room_participant_select = document.createElement('select');
+const room_participant_bob = document.createElement('option');
+room_participant_bob.value = 'bob';
+room_participant_bob.textContent = 'bob (peer)';
+room_participant_select.appendChild(room_participant_bob);
+const room_participant_alice = document.createElement('option');
+room_participant_alice.value = 'alice';
+room_participant_alice.textContent = 'alice (owner)';
+room_participant_select.appendChild(room_participant_alice);
+room_participant_label.appendChild(room_participant_select);
+room_container.appendChild(room_participant_label);
+
+const room_send_label = document.createElement('label');
+room_send_label.textContent = 'room_app_plaintext';
+room_send_plaintext_input = document.createElement('textarea');
+room_send_plaintext_input.rows = 2;
+room_send_plaintext_input.cols = 64;
+room_send_label.appendChild(room_send_plaintext_input);
+room_container.appendChild(room_send_label);
+
+const room_send_row = document.createElement('div');
+room_send_row.className = 'button-row';
+room_send_btn = document.createElement('button');
+room_send_btn.type = 'button';
+room_send_btn.textContent = 'Room send app (current participant)';
+room_send_btn.addEventListener('click', () => {
+void handle_room_send_app();
+});
+room_send_row.appendChild(room_send_btn);
+room_container.appendChild(room_send_row);
+
+const room_decrypt_row = document.createElement('div');
+room_decrypt_row.className = 'button-row';
+room_decrypt_btn = document.createElement('button');
+room_decrypt_btn.type = 'button';
+room_decrypt_btn.textContent = 'Room decrypt latest app';
+room_decrypt_btn.addEventListener('click', () => {
+void handle_room_decrypt_latest_app();
+});
+room_decrypt_row.appendChild(room_decrypt_btn);
+room_container.appendChild(room_decrypt_row);
+
+const room_msg_id_label = document.createElement('label');
+room_msg_id_label.textContent = 'room_latest_msg_id';
+room_decrypt_msg_id_output = document.createElement('input');
+room_decrypt_msg_id_output.type = 'text';
+room_decrypt_msg_id_output.readOnly = true;
+room_decrypt_msg_id_output.size = 36;
+room_msg_id_label.appendChild(room_decrypt_msg_id_output);
+room_container.appendChild(room_msg_id_label);
+
+const room_plaintext_label = document.createElement('label');
+room_plaintext_label.textContent = 'room_latest_plaintext';
+room_decrypt_plaintext_output = document.createElement('textarea');
+room_decrypt_plaintext_output.rows = 2;
+room_decrypt_plaintext_output.cols = 64;
+room_decrypt_plaintext_output.readOnly = true;
+room_plaintext_label.appendChild(room_decrypt_plaintext_output);
+room_container.appendChild(room_plaintext_label);
 
 room_status_line = document.createElement('div');
 room_status_line.className = 'dm_room_status';
