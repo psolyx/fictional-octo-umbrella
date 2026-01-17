@@ -248,6 +248,56 @@ def build_parser() -> argparse.ArgumentParser:
     gw_dm_create.add_argument("--peer-user-id", required=True, help="Peer user id (required)")
     gw_dm_create.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
 
+    gw_room_create = subparsers.add_parser("gw-room-create", help="Create a room conversation via the gateway")
+    gw_room_create.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_create.add_argument(
+        "--member-user-id",
+        required=True,
+        action="append",
+        help="Member user id to add (repeatable, required)",
+    )
+    gw_room_create.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_room_invite = subparsers.add_parser("gw-room-invite", help="Invite members to a room via the gateway")
+    gw_room_invite.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_invite.add_argument(
+        "--member-user-id",
+        required=True,
+        action="append",
+        help="Member user id to invite (repeatable, required)",
+    )
+    gw_room_invite.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_room_remove = subparsers.add_parser("gw-room-remove", help="Remove members from a room via the gateway")
+    gw_room_remove.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_remove.add_argument(
+        "--member-user-id",
+        required=True,
+        action="append",
+        help="Member user id to remove (repeatable, required)",
+    )
+    gw_room_remove.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_room_promote = subparsers.add_parser("gw-room-promote", help="Promote members in a room via the gateway")
+    gw_room_promote.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_promote.add_argument(
+        "--member-user-id",
+        required=True,
+        action="append",
+        help="Member user id to promote (repeatable, required)",
+    )
+    gw_room_promote.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_room_demote = subparsers.add_parser("gw-room-demote", help="Demote members in a room via the gateway")
+    gw_room_demote.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_room_demote.add_argument(
+        "--member-user-id",
+        required=True,
+        action="append",
+        help="Member user id to demote (repeatable, required)",
+    )
+    gw_room_demote.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
     gw_dm_init = subparsers.add_parser("gw-dm-init-send", help="Init a DM and send Welcome/Commit via gateway")
     gw_dm_init.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_dm_init.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
@@ -515,6 +565,41 @@ def handle_gw_kp_fetch(args: argparse.Namespace) -> int:
 def handle_gw_dm_create(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     response = gateway_client.room_create(base_url, session_token, args.conv_id, [args.peer_user_id])
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_room_create(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    response = gateway_client.room_create(base_url, session_token, args.conv_id, args.member_user_id)
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_room_invite(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    response = gateway_client.room_invite(base_url, session_token, args.conv_id, args.member_user_id)
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_room_remove(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    response = gateway_client.room_remove(base_url, session_token, args.conv_id, args.member_user_id)
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_room_promote(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    response = gateway_client.room_promote(base_url, session_token, args.conv_id, args.member_user_id)
+    sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
+    return 0
+
+
+def handle_gw_room_demote(args: argparse.Namespace) -> int:
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    response = gateway_client.room_demote(base_url, session_token, args.conv_id, args.member_user_id)
     sys.stdout.write(f"{json.dumps(response, sort_keys=True)}\n")
     return 0
 
@@ -851,6 +936,16 @@ def main(argv: list[str] | None = None) -> int:
             return handle_gw_kp_fetch(args)
         if args.command == "gw-dm-create":
             return handle_gw_dm_create(args)
+        if args.command == "gw-room-create":
+            return handle_gw_room_create(args)
+        if args.command == "gw-room-invite":
+            return handle_gw_room_invite(args)
+        if args.command == "gw-room-remove":
+            return handle_gw_room_remove(args)
+        if args.command == "gw-room-promote":
+            return handle_gw_room_promote(args)
+        if args.command == "gw-room-demote":
+            return handle_gw_room_demote(args)
         if args.command == "gw-dm-init-send":
             return handle_gw_dm_init_send(args)
         if args.command == "gw-room-init-send":
