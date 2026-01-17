@@ -232,6 +232,106 @@ def _poll_keypackage(
 def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
     base_url = args.base_url or "<stored session base_url>"
     command_prefix = "python -m cli_app.mls_poc"
+    steps: list[dict[str, object]] = [
+        {
+            "step": "start_session",
+            "commands": [f"{command_prefix} gw-start --base-url {base_url}"],
+        },
+        {
+            "step": "create_room",
+            "gateway_request": {
+                "method": "POST",
+                "path": "/v1/rooms/create",
+                "body": {
+                    "conv_id": args.conv_id,
+                    "members": ["<my_user_id>", *args.peer_user_id],
+                },
+            },
+        },
+        {
+            "step": "wait_for_keypackages",
+            "gateway_request": {
+                "method": "POST",
+                "path": "/v1/keypackages/fetch",
+                "body": {
+                    "count": 1,
+                    "user_id": "<peer_user_id>",
+                },
+            },
+        },
+        {
+            "step": "send_envelopes",
+            "gateway_request": {
+                "method": "POST",
+                "path": "/v1/inbox",
+                "body": {
+                    "conv_id": args.conv_id,
+                    "env": "<base64 envelope>",
+                    "msg_id": "sha256(env_bytes)",
+                },
+            },
+            "envelopes": [
+                {"kind": 1, "name": "welcome", "msg_id": "sha256(env_bytes)"},
+                {"kind": 2, "name": "commit", "msg_id": "sha256(env_bytes)"},
+                {"kind": 3, "name": "app", "msg_id": "sha256(env_bytes)"},
+            ],
+        },
+        {
+            "step": "web_peer_actions",
+            "instructions": [
+                "Peer publishes KeyPackage in the web UI.",
+                "Peer joins the room after Welcome appears in their inbox.",
+            ],
+        },
+    ]
+    add_peer_user_ids = args.add_peer_user_id or []
+    if add_peer_user_ids:
+        steps.extend(
+            [
+                {
+                    "step": "wait_for_add_keypackages",
+                    "gateway_request": {
+                        "method": "POST",
+                        "path": "/v1/keypackages/fetch",
+                        "body": {
+                            "count": 1,
+                            "user_id": "<add_peer_user_id>",
+                        },
+                    },
+                },
+                {
+                    "step": "group_add_send_envelopes",
+                    "gateway_request": {
+                        "method": "POST",
+                        "path": "/v1/inbox",
+                        "body": {
+                            "conv_id": args.conv_id,
+                            "env": "<base64 envelope>",
+                            "msg_id": "sha256(env_bytes)",
+                        },
+                    },
+                    "envelopes": [
+                        {"kind": 1, "name": "add_welcome", "msg_id": "sha256(env_bytes)"},
+                        {"kind": 2, "name": "add_commit", "msg_id": "sha256(env_bytes)"},
+                    ],
+                },
+                {
+                    "step": "send_second_app",
+                    "gateway_request": {
+                        "method": "POST",
+                        "path": "/v1/inbox",
+                        "body": {
+                            "conv_id": args.conv_id,
+                            "env": "<base64 envelope>",
+                            "msg_id": "sha256(env_bytes)",
+                        },
+                    },
+                    "envelopes": [
+                        {"kind": 3, "name": "app2", "msg_id": "sha256(env_bytes)"},
+                    ],
+                },
+            ]
+        )
     return {
         "command": "gw-phase5-room-smoke",
         "conv_id": args.conv_id,
@@ -241,7 +341,9 @@ def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
             "interval_ms": args.kp_poll_interval_ms,
             "seconds": args.kp_poll_seconds,
         },
+        "add_peer_user_ids": add_peer_user_ids,
         "peer_user_ids": args.peer_user_id,
+        "plaintext2": args.plaintext2,
         "preconditions": [
             "Run gw-start (or gw-resume) to store session_token and base_url.",
             "Peers must publish KeyPackages (web client or gw-kp-publish).",
@@ -249,61 +351,12 @@ def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
         ],
         "seeds": {
             "app": args.seed_app,
+            "app2": args.seed_app2,
+            "group_add": args.seed_group_add,
             "group_init": args.seed_group_init,
             "keypackage": args.seed_keypackage,
         },
-        "steps": [
-            {
-                "step": "start_session",
-                "commands": [f"{command_prefix} gw-start --base-url {base_url}"],
-            },
-            {
-                "step": "create_room",
-                "gateway_request": {
-                    "method": "POST",
-                    "path": "/v1/rooms/create",
-                    "body": {
-                        "conv_id": args.conv_id,
-                        "members": ["<my_user_id>", *args.peer_user_id],
-                    },
-                },
-            },
-            {
-                "step": "wait_for_keypackages",
-                "gateway_request": {
-                    "method": "POST",
-                    "path": "/v1/keypackages/fetch",
-                    "body": {
-                        "count": 1,
-                        "user_id": "<peer_user_id>",
-                    },
-                },
-            },
-            {
-                "step": "send_envelopes",
-                "gateway_request": {
-                    "method": "POST",
-                    "path": "/v1/inbox",
-                    "body": {
-                        "conv_id": args.conv_id,
-                        "env": "<base64 envelope>",
-                        "msg_id": "sha256(env_bytes)",
-                    },
-                },
-                "envelopes": [
-                    {"kind": 1, "name": "welcome", "msg_id": "sha256(env_bytes)"},
-                    {"kind": 2, "name": "commit", "msg_id": "sha256(env_bytes)"},
-                    {"kind": 3, "name": "app", "msg_id": "sha256(env_bytes)"},
-                ],
-            },
-            {
-                "step": "web_peer_actions",
-                "instructions": [
-                    "Peer publishes KeyPackage in the web UI.",
-                    "Peer joins the room after Welcome appears in their inbox.",
-                ],
-            },
-        ],
+        "steps": steps,
     }
 
 
@@ -538,6 +591,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=43001,
         help="Seed for app message planning (default: 43001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--add-peer-user-id",
+        action="append",
+        help="Additional peer user id to add (repeatable)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--seed-group-add",
+        type=int,
+        default=52001,
+        help="Seed for group-add (default: 52001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--seed-app2",
+        type=int,
+        default=53001,
+        help="Seed for second app message planning (default: 53001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--plaintext2",
+        default="phase5-room-smoke-2",
+        help='Plaintext for the second app message (default: "phase5-room-smoke-2")',
     )
     gw_phase5_room_smoke.add_argument(
         "--dry-run",
@@ -957,6 +1032,7 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
 
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     identity = identity_store.load_or_create_identity(args.profile_paths.identity_path)
+    add_peer_user_ids = args.add_peer_user_id or []
 
     _ensure_initiator_state(args.state_dir, args.seed_keypackage)
 
@@ -1019,6 +1095,52 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
         "conv_id": args.conv_id,
         "welcome_seq": welcome_seq,
     }
+    if add_peer_user_ids:
+        add_peer_keypackages = [
+            _poll_keypackage(
+                base_url,
+                session_token,
+                peer_user_id,
+                args.kp_poll_seconds,
+                args.kp_poll_interval_ms,
+            )
+            for peer_user_id in add_peer_user_ids
+        ]
+        add_output = _run_harness_capture(
+            "group-add",
+            [
+                "--state-dir",
+                args.state_dir,
+                *_peer_keypackage_args(add_peer_keypackages),
+                "--seed",
+                str(args.seed_group_add),
+            ],
+        )
+        add_payload = json.loads(_first_nonempty_line(add_output))
+        add_welcome_env = dm_envelope.pack(0x01, str(add_payload["welcome"]))
+        add_commit_env = dm_envelope.pack(0x02, str(add_payload["commit"]))
+        add_welcome_seq = _send_envelope(base_url, session_token, args.conv_id, add_welcome_env)
+        add_commit_seq = _send_envelope(base_url, session_token, args.conv_id, add_commit_env)
+
+        app2_output = _run_harness_capture(
+            "dm-encrypt",
+            [
+                "--state-dir",
+                args.state_dir,
+                "--plaintext",
+                args.plaintext2,
+            ],
+        )
+        app2_ciphertext = _first_nonempty_line(app2_output)
+        app2_env = dm_envelope.pack(0x03, app2_ciphertext)
+        app2_seq = _send_envelope(base_url, session_token, args.conv_id, app2_env)
+        summary.update(
+            {
+                "add_commit_seq": add_commit_seq,
+                "add_welcome_seq": add_welcome_seq,
+                "app2_seq": app2_seq,
+            }
+        )
     sys.stdout.write(f"{json.dumps(summary, sort_keys=True)}\n")
     return 0
 
