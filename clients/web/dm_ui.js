@@ -1289,9 +1289,20 @@ return;
 commit_b64 = result.commit_b64;
 const welcome_env_b64 = pack_dm_env(1, result.welcome_b64);
 const commit_env_b64 = pack_dm_env(2, result.commit_b64);
+const proposals_b64 = Array.isArray(result.proposals_b64) ? result.proposals_b64 : [];
 set_outbox_envs({ welcome_env_b64, commit_env_b64 });
 last_local_commit_env_b64 = commit_env_b64;
 set_commit_echo_state('waiting', null);
+if (proposals_b64.length > 0) {
+set_room_status(`room: sending add (${proposals_b64.length} proposal${proposals_b64.length === 1 ? '' : 's'})`);
+proposals_b64.forEach((proposal_b64) => {
+const proposal_env_b64 = pack_dm_env(2, proposal_b64);
+if (!proposal_env_b64) {
+return;
+}
+dispatch_gateway_send_env(conv_id, proposal_env_b64);
+});
+}
 set_room_status('room: sending add (welcome)');
 dispatch_gateway_send_env(conv_id, welcome_env_b64);
 set_room_status('room: sending add (commit)');

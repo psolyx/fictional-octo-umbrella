@@ -194,15 +194,19 @@ func groupAdd(_ js.Value, args []js.Value) interface{} {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
 	}
 
-	participantB64, welcomeB64, commitB64, err := dm.AddMany(participantB64, peerKeypackages, seedInt)
+	participantB64, welcomeB64, commitB64, proposalsB64, err := dm.AddMany(participantB64, peerKeypackages, seedInt)
 	if err != nil {
 		return js.ValueOf(map[string]interface{}{"ok": false, "error": err.Error()})
 	}
+	if proposalsB64 == nil {
+		proposalsB64 = []string{}
+	}
 	return js.ValueOf(map[string]interface{}{
-		"ok":              true,
+		"ok":             true,
 		"participant_b64": participantB64,
-		"welcome_b64":     welcomeB64,
-		"commit_b64":      commitB64,
+		"welcome_b64":    welcomeB64,
+		"commit_b64":     commitB64,
+		"proposals_b64":  proposalsB64,
 	})
 }
 
