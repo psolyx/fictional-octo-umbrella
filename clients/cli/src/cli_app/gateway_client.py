@@ -131,6 +131,62 @@ def room_create(
     )
 
 
+def room_invite(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/invite"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_remove(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/remove"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_promote(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/promote"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_demote(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/demote"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict[str, object]:
     payload = {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": seq}}
     _post_json(
