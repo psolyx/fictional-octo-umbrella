@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -55,6 +56,36 @@ class MlsPocTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+
+
+class MlsPocDryRunTests(unittest.TestCase):
+    def test_phase5_room_smoke_dry_run(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "cli_app.mls_poc",
+                    "gw-phase5-room-smoke",
+                    "--conv-id",
+                    "conv_phase5_test",
+                    "--state-dir",
+                    state_dir,
+                    "--peer-user-id",
+                    "peer_user",
+                    "--dry-run",
+                ],
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload.get("command"), "gw-phase5-room-smoke")
+        self.assertEqual(payload.get("conv_id"), "conv_phase5_test")
+        self.assertEqual(payload.get("peer_user_ids"), ["peer_user"])
+        self.assertIn("steps", payload)
 
 
 if __name__ == "__main__":
