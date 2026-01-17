@@ -11,6 +11,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -157,6 +159,152 @@ def _first_nonempty_line(output: str) -> str:
 def _msg_id_for_env(env_b64: str) -> str:
     env_bytes = base64.b64decode(env_b64)
     return hashlib.sha256(env_bytes).hexdigest()
+
+
+def _default_room_group_id_b64() -> str:
+    return base64.b64encode(b"room-group").decode("utf-8")
+
+
+def _state_dir_has_data(state_dir: Path) -> bool:
+    if not state_dir.exists():
+        return False
+    if not state_dir.is_dir():
+        raise RuntimeError(f"state_dir is not a directory: {state_dir}")
+    return any(state_dir.iterdir())
+
+
+def _ensure_initiator_state(state_dir: str, seed_keypackage: int) -> None:
+    state_path = Path(state_dir)
+    if _state_dir_has_data(state_path):
+        return
+    _run_harness_capture(
+        "dm-keypackage",
+        [
+            "--state-dir",
+            state_dir,
+            "--name",
+            "initiator",
+            "--seed",
+            str(seed_keypackage),
+        ],
+    )
+
+
+def _extract_http_error_message(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw = exc.read().decode("utf-8")
+    except Exception:
+        return str(exc)
+    if not raw:
+        return str(exc)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    message = payload.get("message")
+    return str(message) if message else raw
+
+
+def _send_envelope(base_url: str, session_token: str, conv_id: str, env_b64: str) -> int:
+    msg_id = _msg_id_for_env(env_b64)
+    response = gateway_client.inbox_send(base_url, session_token, conv_id, msg_id, env_b64)
+    return int(response["seq"])
+
+
+def _poll_keypackage(
+    base_url: str,
+    session_token: str,
+    user_id: str,
+    timeout_s: int,
+    interval_ms: int,
+) -> str:
+    deadline = time.time() + timeout_s
+    while True:
+        response = gateway_client.keypackages_fetch(base_url, session_token, user_id, 1)
+        keypackages = response.get("keypackages", [])
+        if keypackages:
+            return str(keypackages[0])
+        if time.time() >= deadline:
+            raise RuntimeError(f"Timed out waiting for KeyPackage for user {user_id}")
+        time.sleep(interval_ms / 1000)
+
+
+def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
+    base_url = args.base_url or "<stored session base_url>"
+    command_prefix = "python -m cli_app.mls_poc"
+    return {
+        "command": "gw-phase5-room-smoke",
+        "conv_id": args.conv_id,
+        "dry_run": True,
+        "group_id_b64": args.group_id_b64,
+        "kp_poll": {
+            "interval_ms": args.kp_poll_interval_ms,
+            "seconds": args.kp_poll_seconds,
+        },
+        "peer_user_ids": args.peer_user_id,
+        "preconditions": [
+            "Run gw-start (or gw-resume) to store session_token and base_url.",
+            "Peers must publish KeyPackages (web client or gw-kp-publish).",
+            "Initiator needs MLS state in --state-dir (seed_keypackage is deterministic).",
+        ],
+        "seeds": {
+            "app": args.seed_app,
+            "group_init": args.seed_group_init,
+            "keypackage": args.seed_keypackage,
+        },
+        "steps": [
+            {
+                "step": "start_session",
+                "commands": [f"{command_prefix} gw-start --base-url {base_url}"],
+            },
+            {
+                "step": "create_room",
+                "gateway_request": {
+                    "method": "POST",
+                    "path": "/v1/rooms/create",
+                    "body": {
+                        "conv_id": args.conv_id,
+                        "members": ["<my_user_id>", *args.peer_user_id],
+                    },
+                },
+            },
+            {
+                "step": "wait_for_keypackages",
+                "gateway_request": {
+                    "method": "POST",
+                    "path": "/v1/keypackages/fetch",
+                    "body": {
+                        "count": 1,
+                        "user_id": "<peer_user_id>",
+                    },
+                },
+            },
+            {
+                "step": "send_envelopes",
+                "gateway_request": {
+                    "method": "POST",
+                    "path": "/v1/inbox",
+                    "body": {
+                        "conv_id": args.conv_id,
+                        "env": "<base64 envelope>",
+                        "msg_id": "sha256(env_bytes)",
+                    },
+                },
+                "envelopes": [
+                    {"kind": 1, "name": "welcome", "msg_id": "sha256(env_bytes)"},
+                    {"kind": 2, "name": "commit", "msg_id": "sha256(env_bytes)"},
+                    {"kind": 3, "name": "app", "msg_id": "sha256(env_bytes)"},
+                ],
+            },
+            {
+                "step": "web_peer_actions",
+                "instructions": [
+                    "Peer publishes KeyPackage in the web UI.",
+                    "Peer joins the room after Welcome appears in their inbox.",
+                ],
+            },
+        ],
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -342,6 +490,60 @@ def build_parser() -> argparse.ArgumentParser:
     gw_dm_send.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
     gw_dm_send.add_argument("--plaintext", required=True, help="Plaintext message (required)")
     gw_dm_send.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+
+    gw_phase5_room_smoke = subparsers.add_parser(
+        "gw-phase5-room-smoke",
+        help="Phase 5 interop smoke for room setup and envelope send",
+    )
+    gw_phase5_room_smoke.add_argument("--conv-id", required=True, help="Conversation id (required)")
+    gw_phase5_room_smoke.add_argument("--base-url", help="Gateway base URL (defaults to stored session)")
+    gw_phase5_room_smoke.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
+    gw_phase5_room_smoke.add_argument(
+        "--peer-user-id",
+        required=True,
+        action="append",
+        help="Peer user id that must publish KeyPackages (repeatable, required)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--group-id-b64",
+        default=_default_room_group_id_b64(),
+        help='Group id (base64, default: base64("room-group"))',
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--kp-poll-seconds",
+        type=int,
+        default=30,
+        help="Seconds to poll for KeyPackages (default: 30)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--kp-poll-interval-ms",
+        type=int,
+        default=500,
+        help="Poll interval in milliseconds (default: 500)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--seed-keypackage",
+        type=int,
+        default=31001,
+        help="Seed for dm-keypackage if initiator state is missing (default: 31001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--seed-group-init",
+        type=int,
+        default=42001,
+        help="Seed for group-init (default: 42001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--seed-app",
+        type=int,
+        default=43001,
+        help="Seed for app message planning (default: 43001)",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print a deterministic JSON plan without contacting the network",
+    )
 
     gw_dm_tail = subparsers.add_parser("gw-dm-tail", help="Tail and apply DM gateway events")
     gw_dm_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
@@ -747,6 +949,80 @@ def handle_gw_dm_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        plan = _phase5_room_smoke_plan(args)
+        sys.stdout.write(f"{json.dumps(plan, sort_keys=True)}\n")
+        return 0
+
+    base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
+    identity = identity_store.load_or_create_identity(args.profile_paths.identity_path)
+
+    _ensure_initiator_state(args.state_dir, args.seed_keypackage)
+
+    members = [identity.user_id, *args.peer_user_id]
+    try:
+        gateway_client.room_create(base_url, session_token, args.conv_id, members)
+    except urllib.error.HTTPError as exc:
+        message = _extract_http_error_message(exc)
+        if "conversation already exists" not in message:
+            raise RuntimeError(f"Room creation failed: {message}") from exc
+        sys.stdout.write("Room already exists; continuing.\n")
+
+    peer_keypackages = [
+        _poll_keypackage(
+            base_url,
+            session_token,
+            peer_user_id,
+            args.kp_poll_seconds,
+            args.kp_poll_interval_ms,
+        )
+        for peer_user_id in args.peer_user_id
+    ]
+
+    output = _run_harness_capture(
+        "group-init",
+        [
+            "--state-dir",
+            args.state_dir,
+            *_peer_keypackage_args(peer_keypackages),
+            "--group-id",
+            args.group_id_b64,
+            "--seed",
+            str(args.seed_group_init),
+        ],
+    )
+    payload = json.loads(_first_nonempty_line(output))
+    welcome_env = dm_envelope.pack(0x01, str(payload["welcome"]))
+    commit_env = dm_envelope.pack(0x02, str(payload["commit"]))
+
+    welcome_seq = _send_envelope(base_url, session_token, args.conv_id, welcome_env)
+    commit_seq = _send_envelope(base_url, session_token, args.conv_id, commit_env)
+
+    app_output = _run_harness_capture(
+        "dm-encrypt",
+        [
+            "--state-dir",
+            args.state_dir,
+            "--plaintext",
+            "phase5-room-smoke",
+        ],
+    )
+    app_ciphertext = _first_nonempty_line(app_output)
+    app_env = dm_envelope.pack(0x03, app_ciphertext)
+    app_seq = _send_envelope(base_url, session_token, args.conv_id, app_env)
+
+    summary = {
+        "app_seq": app_seq,
+        "command": "gw-phase5-room-smoke",
+        "commit_seq": commit_seq,
+        "conv_id": args.conv_id,
+        "welcome_seq": welcome_seq,
+    }
+    sys.stdout.write(f"{json.dumps(summary, sort_keys=True)}\n")
+    return 0
+
+
 def handle_gw_dm_tail(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     if args.wipe_state:
@@ -954,6 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
             return handle_gw_room_add_send(args)
         if args.command == "gw-dm-send":
             return handle_gw_dm_send(args)
+        if args.command == "gw-phase5-room-smoke":
+            return handle_gw_phase5_room_smoke(args)
         if args.command == "gw-dm-tail":
             return handle_gw_dm_tail(args)
     except RuntimeError as exc:  # user-facing errors
