@@ -68,21 +68,7 @@ def ensure_go_ready() -> str:
     return go_path
 
 
-def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
-    repo_root = find_repo_root()
-    go_path = ensure_go_ready()
-
-    harness_dir = repo_root / "tools" / "mls_harness"
-    cmd = [
-        go_path,
-        "run",
-        "-p",
-        "1",
-        "./cmd/mls-harness",
-        subcommand,
-        *extra_args,
-    ]
-
+def _harness_env() -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -92,11 +78,71 @@ def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
             "GOMEMLIMIT": "700MiB",
         }
     )
+    return env
+
+
+def _harness_binary_path(repo_root: Path) -> Path:
+    return repo_root / "tools" / "mls_harness" / ".cache" / "mls-harness"
+
+
+def _build_harness_binary(repo_root: Path) -> Path:
+    go_path = ensure_go_ready()
+    harness_dir = repo_root / "tools" / "mls_harness"
+    harness_bin = _harness_binary_path(repo_root)
+    harness_bin.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        go_path,
+        "build",
+        "-p",
+        "1",
+        "-o",
+        str(harness_bin),
+        "./cmd/mls-harness",
+    ]
 
     result = subprocess.run(
         cmd,
         cwd=str(harness_dir),
-        env=env,
+        env=_harness_env(),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to build MLS harness binary:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}\n"
+        )
+
+    try:
+        harness_bin.chmod(0o755)
+    except OSError:
+        pass
+
+    return harness_bin
+
+
+def _ensure_harness_binary(repo_root: Path) -> Path:
+    harness_bin = _harness_binary_path(repo_root)
+    if harness_bin.exists():
+        return harness_bin
+    return _build_harness_binary(repo_root)
+
+
+def run_harness(subcommand: str, extra_args: Iterable[str]) -> int:
+    repo_root = find_repo_root()
+    harness_dir = repo_root / "tools" / "mls_harness"
+    harness_bin = _ensure_harness_binary(repo_root)
+    cmd = [str(harness_bin), subcommand, *extra_args]
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(harness_dir),
+        env=_harness_env(),
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -118,33 +164,14 @@ def _run_harness_capture(subcommand: str, extra_args: Iterable[str]) -> str:
 
 def _run_harness_capture_with_status(subcommand: str, extra_args: Iterable[str]) -> tuple[int, str, str]:
     repo_root = find_repo_root()
-    go_path = ensure_go_ready()
-
     harness_dir = repo_root / "tools" / "mls_harness"
-    cmd = [
-        go_path,
-        "run",
-        "-p",
-        "1",
-        "./cmd/mls-harness",
-        subcommand,
-        *extra_args,
-    ]
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "GOTOOLCHAIN": "local",
-            "GOFLAGS": "-mod=vendor",
-            "GOMAXPROCS": "1",
-            "GOMEMLIMIT": "700MiB",
-        }
-    )
+    harness_bin = _ensure_harness_binary(repo_root)
+    cmd = [str(harness_bin), subcommand, *extra_args]
 
     result = subprocess.run(
         cmd,
         cwd=str(harness_dir),
-        env=env,
+        env=_harness_env(),
         check=False,
         text=True,
         stdout=subprocess.PIPE,
