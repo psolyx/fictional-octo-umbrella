@@ -5,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from cli_app import mls_poc
 
@@ -59,6 +61,39 @@ class MlsPocTests(unittest.TestCase):
 
 
 class MlsPocDryRunTests(unittest.TestCase):
+    def test_harness_uses_cached_binary(self):
+        repo_root = mls_poc.find_repo_root()
+        harness_cache = repo_root / "tools" / "mls_harness" / ".cache"
+        harness_bin = harness_cache / "mls-harness"
+        if harness_bin.exists():
+            harness_bin.unlink()
+
+        def _fake_run(cmd, **kwargs):
+            if cmd[:2] == ["/usr/bin/go", "build"]:
+                harness_bin.parent.mkdir(parents=True, exist_ok=True)
+                harness_bin.write_text("fake", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, stdout="build ok", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        try:
+            with mock.patch("cli_app.mls_poc.ensure_go_ready", return_value="/usr/bin/go"), mock.patch(
+                "cli_app.mls_poc.subprocess.run", side_effect=_fake_run
+            ) as run_mock:
+                returncode, stdout, stderr = mls_poc._run_harness_capture_with_status("vectors", [])
+        finally:
+            if harness_bin.exists():
+                harness_bin.unlink()
+
+        self.assertEqual(returncode, 0, msg=stderr)
+        self.assertEqual(stdout, "ok")
+        self.assertGreaterEqual(len(run_mock.call_args_list), 2)
+        harness_cmd = run_mock.call_args_list[-1].args[0]
+        harness_path = Path(harness_cmd[0])
+        self.assertEqual(harness_path.name, "mls-harness")
+        self.assertTrue(str(harness_path).endswith(str(Path("tools") / "mls_harness" / ".cache" / "mls-harness")))
+        self.assertNotEqual(harness_cmd[0], "/usr/bin/go")
+        self.assertNotIn("run", harness_cmd)
+
     def test_phase5_room_smoke_dry_run(self):
         with tempfile.TemporaryDirectory() as state_dir:
             proc = subprocess.run(
