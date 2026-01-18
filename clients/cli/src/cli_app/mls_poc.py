@@ -215,6 +215,83 @@ def _is_uninitialized_commit_error(message: str) -> bool:
     return "participant state not initialized" in lowered or "state not initialized" in lowered
 
 
+def _pending_commits_path(state_dir: str) -> Path:
+    return Path(state_dir) / "pending_dm_commits.json"
+
+
+def _load_pending_commits(path: Path) -> dict[int, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    pending = data.get("pending", {})
+    if not isinstance(pending, dict):
+        return {}
+    parsed: dict[int, str] = {}
+    for key, value in pending.items():
+        try:
+            seq = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, str):
+            parsed[seq] = value
+    return parsed
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    content = json.dumps(payload, indent=2, sort_keys=True)
+
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+
+
+def _save_pending_commits(path: Path, pending: dict[int, str]) -> None:
+    if not pending:
+        if path.exists():
+            path.unlink()
+        return
+    payload = {"pending": {str(seq): payload_b64 for seq, payload_b64 in sorted(pending.items())}}
+    _atomic_write_json(path, payload)
+
+
+def _buffer_pending_commit(path: Path, pending: dict[int, str], seq: int, payload_b64: str) -> bool:
+    if seq in pending:
+        return False
+    pending[seq] = payload_b64
+    _save_pending_commits(path, pending)
+    return True
+
+
+def _flush_pending_commits(state_dir: str, pending: dict[int, str], pending_path: Path) -> None:
+    for seq in sorted(pending):
+        payload_b64 = pending[seq]
+        returncode, stdout, stderr = _run_harness_capture_with_status(
+            "dm-commit-apply",
+            [
+                "--state-dir",
+                state_dir,
+                "--commit",
+                payload_b64,
+            ],
+        )
+        if returncode != 0:
+            message = stderr.strip() or stdout.strip()
+            sys.stderr.write(message + "\n" if message else stderr)
+            raise RuntimeError("harness dm-commit-apply failed")
+        del pending[seq]
+        _save_pending_commits(pending_path, pending)
+
+
 def _send_envelope(base_url: str, session_token: str, conv_id: str, env_b64: str) -> int:
     msg_id = _msg_id_for_env(env_b64)
     response = gateway_client.inbox_send(base_url, session_token, conv_id, msg_id, env_b64)
@@ -1186,7 +1263,8 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
 def handle_gw_dm_tail(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     joined = _state_dir_has_data(Path(args.state_dir))
-    warned_uninitialized_commit = False
+    pending_path = _pending_commits_path(args.state_dir)
+    pending_commits = _load_pending_commits(pending_path)
     if args.wipe_state:
         if args.from_seq is None:
             raise RuntimeError("--wipe-state requires --from-seq (use --from-seq 1 to rebuild state)")
@@ -1195,6 +1273,9 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
             raise RuntimeError(f"Refusing to wipe non-directory state_dir: {state_path}")
         if state_path.is_dir():
             shutil.rmtree(state_path)
+        if pending_path.exists():
+            pending_path.unlink()
+        pending_commits = {}
         from_seq = args.from_seq
     else:
         from_seq = (
@@ -1202,6 +1283,8 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
             if args.from_seq is not None
             else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
         )
+    if joined and pending_commits:
+        _flush_pending_commits(args.state_dir, pending_commits, pending_path)
     for event in gateway_client.sse_tail(
         base_url,
         session_token,
@@ -1227,29 +1310,31 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
                 ],
             )
             joined = True
+            if pending_commits:
+                _flush_pending_commits(args.state_dir, pending_commits, pending_path)
         elif kind == 0x02:
-            returncode, stdout, stderr = _run_harness_capture_with_status(
-                "dm-commit-apply",
-                [
-                    "--state-dir",
-                    args.state_dir,
-                    "--commit",
-                    payload_b64,
-                ],
-            )
-            if returncode != 0:
-                message = stderr.strip() or stdout.strip()
-                if not joined and _is_uninitialized_commit_error(message):
-                    if not warned_uninitialized_commit:
-                        sys.stderr.write(
-                            "Skipping commit before Welcome (participant state not initialized).\n"
-                        )
-                        warned_uninitialized_commit = True
-                else:
-                    sys.stderr.write(stderr)
-                    raise RuntimeError("harness dm-commit-apply failed")
+            if not joined:
+                _buffer_pending_commit(pending_path, pending_commits, seq, payload_b64)
             else:
-                joined = True
+                returncode, stdout, stderr = _run_harness_capture_with_status(
+                    "dm-commit-apply",
+                    [
+                        "--state-dir",
+                        args.state_dir,
+                        "--commit",
+                        payload_b64,
+                    ],
+                )
+                if returncode != 0:
+                    message = stderr.strip() or stdout.strip()
+                    if _is_uninitialized_commit_error(message):
+                        joined = False
+                        _buffer_pending_commit(pending_path, pending_commits, seq, payload_b64)
+                    else:
+                        sys.stderr.write(stderr)
+                        raise RuntimeError("harness dm-commit-apply failed")
+                else:
+                    joined = True
         elif kind == 0x03:
             output = _run_harness_capture(
                 "dm-decrypt",

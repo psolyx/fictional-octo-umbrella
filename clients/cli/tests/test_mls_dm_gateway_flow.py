@@ -106,7 +106,12 @@ def test_dm_tail_routes_and_acks(monkeypatch):
             return "plaintext\n"
         return ""
 
+    def fake_harness_with_status(subcommand, extra_args):
+        harness_calls.append((subcommand, extra_args))
+        return 0, "", ""
+
     monkeypatch.setattr("cli_app.mls_poc._run_harness_capture", fake_harness)
+    monkeypatch.setattr("cli_app.mls_poc._run_harness_capture_with_status", fake_harness_with_status)
 
     acked = []
     monkeypatch.setattr(
@@ -130,6 +135,9 @@ def test_dm_tail_routes_and_acks(monkeypatch):
         from_seq=None,
         ack=True,
         base_url=None,
+        max_events=None,
+        idle_timeout_s=0.1,
+        wipe_state=False,
         profile_paths=SimpleNamespace(
             session_path=session_path,
             cursors_path=cursors_path,
@@ -143,3 +151,77 @@ def test_dm_tail_routes_and_acks(monkeypatch):
     assert harness_calls[2][0] == "dm-decrypt"
     assert acked == [5, 6, 7]
     assert update_calls == [(5, cursors_path), (6, cursors_path), (7, cursors_path)]
+
+
+def test_dm_tail_buffers_pre_welcome_commits(tmp_path, monkeypatch):
+    events = [
+        {"body": {"seq": 1, "env": "env1"}},
+        {"body": {"seq": 2, "env": "env2"}},
+        {"body": {"seq": 3, "env": "env3"}},
+    ]
+
+    session_path = tmp_path / "session.json"
+    cursors_path = tmp_path / "cursors.json"
+    state_dir = tmp_path / "state"
+    pending_path = state_dir / "pending_dm_commits.json"
+
+    monkeypatch.setattr(
+        "cli_app.mls_poc._load_session",
+        lambda _base, path: ("https://gw", "st") if path == session_path else None,
+    )
+    monkeypatch.setattr("cli_app.mls_poc.gateway_client.sse_tail", lambda *_args, **_kwargs: iter(events))
+
+    unpack_results = [(0x02, "commit-1"), (0x01, "welcome"), (0x02, "commit-2")]
+    monkeypatch.setattr("cli_app.mls_poc.dm_envelope.unpack", lambda _env: unpack_results.pop(0))
+
+    join_calls = []
+    commit_calls = []
+
+    def fake_harness(subcommand, extra_args):
+        if subcommand == "dm-join":
+            join_calls.append(extra_args)
+            return ""
+        raise AssertionError(f"unexpected harness call: {subcommand}")
+
+    def fake_harness_with_status(subcommand, extra_args):
+        assert subcommand == "dm-commit-apply"
+        commit_calls.append(extra_args)
+        return 0, "", ""
+
+    monkeypatch.setattr("cli_app.mls_poc._run_harness_capture", fake_harness)
+    monkeypatch.setattr("cli_app.mls_poc._run_harness_capture_with_status", fake_harness_with_status)
+
+    acked = []
+
+    def fake_ack(_base, _token, _conv, seq):
+        if seq == 1:
+            assert pending_path.exists()
+        acked.append(seq)
+
+    monkeypatch.setattr("cli_app.mls_poc.gateway_client.inbox_ack", fake_ack)
+    monkeypatch.setattr("cli_app.mls_poc.gateway_store.get_next_seq", lambda _conv, _path: 1)
+    monkeypatch.setattr("cli_app.mls_poc.gateway_store.update_next_seq", lambda *_args, **_kwargs: None)
+
+    args = SimpleNamespace(
+        conv_id="c_4",
+        state_dir=str(state_dir),
+        from_seq=None,
+        ack=True,
+        base_url=None,
+        profile_paths=SimpleNamespace(
+            session_path=session_path,
+            cursors_path=cursors_path,
+            identity_path=tmp_path / "identity.json",
+        ),
+        max_events=None,
+        idle_timeout_s=0.1,
+        wipe_state=False,
+    )
+
+    mls_poc.handle_gw_dm_tail(args)
+
+    assert len(join_calls) == 1
+    commit_payloads = [call[call.index("--commit") + 1] for call in commit_calls]
+    assert commit_payloads == ["commit-1", "commit-2"]
+    assert acked == [1, 2, 3]
+    assert not pending_path.exists()
