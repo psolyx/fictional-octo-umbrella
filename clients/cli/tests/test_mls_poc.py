@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cli_app import mls_poc
+from cli_app import interop_transcript, mls_poc
 
 
 def _go_ready():
@@ -164,6 +165,26 @@ class MlsPocDryRunTests(unittest.TestCase):
     def test_uninitialized_commit_error_helper(self):
         self.assertTrue(mls_poc._is_uninitialized_commit_error("participant state not initialized"))
         self.assertFalse(mls_poc._is_uninitialized_commit_error("unexpected epoch mismatch"))
+
+
+class MlsPocTranscriptTests(unittest.TestCase):
+    def test_build_transcript_payload_digest(self):
+        env_one = base64.b64encode(b"\x01one").decode("utf-8")
+        env_two = base64.b64encode(b"\x02two").decode("utf-8")
+        events = [
+            {"seq": 2, "env": env_two, "msg_id": mls_poc._msg_id_for_env(env_two)},
+            {"seq": 1, "env": env_one, "msg_id": mls_poc._msg_id_for_env(env_one)},
+        ]
+        payload = mls_poc._build_transcript_payload("conv_test", events)
+        canonical = interop_transcript.canonicalize_transcript(
+            "conv_test",
+            1,
+            payload["next_seq"],
+            payload["events"],
+        )
+        digest = interop_transcript.compute_digest_sha256_b64(canonical)
+        self.assertEqual(payload["digest_sha256_b64"], digest)
+        self.assertEqual(payload["next_seq"], 3)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ import urllib.error
 from pathlib import Path
 from typing import Iterable, Tuple
 
-from cli_app import dm_envelope, gateway_client, gateway_store, identity_store, profile_paths
+from cli_app import dm_envelope, gateway_client, gateway_store, identity_store, interop_transcript, profile_paths
 
 MIN_GO_VERSION: Tuple[int, int] = (1, 22)
 
@@ -459,6 +459,10 @@ def _phase5_room_smoke_plan(args: argparse.Namespace) -> dict[str, object]:
         "add_peer_user_ids": add_peer_user_ids,
         "peer_user_ids": args.peer_user_id,
         "plaintext2": args.plaintext2,
+        "outputs": {
+            "print_web_cli_block": args.print_web_cli_block,
+            "transcript_out": args.transcript_out,
+        },
         "preconditions": [
             "Run gw-start (or gw-resume) to store session_token and base_url.",
             "Peers must publish KeyPackages (web client or gw-kp-publish).",
@@ -728,6 +732,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--plaintext2",
         default="phase5-room-smoke-2",
         help='Plaintext for the second app message (default: "phase5-room-smoke-2")',
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--transcript-out",
+        help="Write a transcript JSON compatible with the web importer to this path",
+    )
+    gw_phase5_room_smoke.add_argument(
+        "--print-web-cli-block",
+        action="store_true",
+        help="Print key=value lines for the web Parse CLI block helper",
     )
     gw_phase5_room_smoke.add_argument(
         "--dry-run",
@@ -1098,6 +1111,68 @@ def _send_proposals(
     return proposal_seqs
 
 
+def _append_transcript_event(events: list[dict[str, object]], seq: int, env: str) -> None:
+    events.append({"seq": seq, "env": env, "msg_id": _msg_id_for_env(env)})
+
+
+def _send_proposals_with_events(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    proposals: Iterable[str],
+    events: list[dict[str, object]],
+) -> list[int]:
+    proposal_seqs: list[int] = []
+    for proposal in proposals:
+        proposal_env = dm_envelope.pack(0x02, proposal)
+        proposal_seq = _send_envelope(base_url, session_token, conv_id, proposal_env)
+        proposal_seqs.append(proposal_seq)
+        _append_transcript_event(events, proposal_seq, proposal_env)
+    return proposal_seqs
+
+
+def _build_transcript_payload(conv_id: str, events: Iterable[dict[str, object]]) -> dict[str, object]:
+    normalized_events: list[dict[str, object]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        seq = event.get("seq")
+        env = event.get("env")
+        if not isinstance(seq, int) or not isinstance(env, str):
+            continue
+        msg_id = event.get("msg_id")
+        if not isinstance(msg_id, str):
+            msg_id = _msg_id_for_env(env)
+        normalized_events.append({"seq": seq, "env": env, "msg_id": msg_id})
+    canonical = interop_transcript.canonicalize_transcript(conv_id, 1, None, normalized_events)
+    seqs = [entry["seq"] for entry in canonical["events"] if isinstance(entry.get("seq"), int)]
+    canonical["next_seq"] = max(seqs) + 1 if seqs else 1
+    digest = interop_transcript.compute_digest_sha256_b64(canonical)
+    payload = dict(canonical)
+    payload["digest_sha256_b64"] = digest
+    return payload
+
+
+def _emit_web_cli_block(
+    *,
+    welcome_env: str | None,
+    commit_env: str | None,
+    app_env: str | None,
+    expected_plaintext: str,
+) -> None:
+    lines: list[str] = []
+    if welcome_env:
+        lines.append(f"welcome_env_b64={welcome_env}")
+    if commit_env:
+        lines.append(f"commit_env_b64={commit_env}")
+    if app_env:
+        lines.append(f"app_env_b64={app_env}")
+    if expected_plaintext:
+        lines.append(f"expected_plaintext={expected_plaintext}")
+    if lines:
+        sys.stdout.write("\n".join(lines) + "\n")
+
+
 def handle_gw_room_init_send(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     output = _run_harness_capture(
@@ -1172,6 +1247,11 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
     base_url, session_token = _load_session(args.base_url, args.profile_paths.session_path)
     identity = identity_store.load_or_create_identity(args.profile_paths.identity_path)
     add_peer_user_ids = args.add_peer_user_id or []
+    transcript_events: list[dict[str, object]] = []
+    welcome_env = None
+    commit_env = None
+    app_env = None
+    app2_env = None
 
     _ensure_initiator_state(args.state_dir, args.seed_keypackage)
 
@@ -1212,7 +1292,9 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
     commit_env = dm_envelope.pack(0x02, str(payload["commit"]))
 
     welcome_seq = _send_envelope(base_url, session_token, args.conv_id, welcome_env)
+    _append_transcript_event(transcript_events, welcome_seq, welcome_env)
     commit_seq = _send_envelope(base_url, session_token, args.conv_id, commit_env)
+    _append_transcript_event(transcript_events, commit_seq, commit_env)
 
     app_output = _run_harness_capture(
         "dm-encrypt",
@@ -1226,6 +1308,7 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
     app_ciphertext = _first_nonempty_line(app_output)
     app_env = dm_envelope.pack(0x03, app_ciphertext)
     app_seq = _send_envelope(base_url, session_token, args.conv_id, app_env)
+    _append_transcript_event(transcript_events, app_seq, app_env)
 
     summary = {
         "app_seq": app_seq,
@@ -1257,11 +1340,19 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
         )
         add_payload = json.loads(_first_nonempty_line(add_output))
         add_proposals = _extract_proposals(add_payload)
-        add_proposal_seqs = _send_proposals(base_url, session_token, args.conv_id, add_proposals)
+        add_proposal_seqs = _send_proposals_with_events(
+            base_url,
+            session_token,
+            args.conv_id,
+            add_proposals,
+            transcript_events,
+        )
         add_welcome_env = dm_envelope.pack(0x01, str(add_payload["welcome"]))
         add_commit_env = dm_envelope.pack(0x02, str(add_payload["commit"]))
         add_welcome_seq = _send_envelope(base_url, session_token, args.conv_id, add_welcome_env)
+        _append_transcript_event(transcript_events, add_welcome_seq, add_welcome_env)
         add_commit_seq = _send_envelope(base_url, session_token, args.conv_id, add_commit_env)
+        _append_transcript_event(transcript_events, add_commit_seq, add_commit_env)
 
         app2_output = _run_harness_capture(
             "dm-encrypt",
@@ -1275,6 +1366,7 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
         app2_ciphertext = _first_nonempty_line(app2_output)
         app2_env = dm_envelope.pack(0x03, app2_ciphertext)
         app2_seq = _send_envelope(base_url, session_token, args.conv_id, app2_env)
+        _append_transcript_event(transcript_events, app2_seq, app2_env)
         summary.update(
             {
                 "add_commit_seq": add_commit_seq,
@@ -1282,6 +1374,18 @@ def handle_gw_phase5_room_smoke(args: argparse.Namespace) -> int:
                 "add_welcome_seq": add_welcome_seq,
                 "app2_seq": app2_seq,
             }
+        )
+    if args.transcript_out:
+        transcript_path = Path(args.transcript_out)
+        transcript_payload = _build_transcript_payload(args.conv_id, transcript_events)
+        _atomic_write_json(transcript_path, transcript_payload)
+    if args.print_web_cli_block:
+        expected_plaintext = args.plaintext2 if app2_env else "phase5-room-smoke"
+        _emit_web_cli_block(
+            welcome_env=welcome_env,
+            commit_env=commit_env,
+            app_env=app_env,
+            expected_plaintext=expected_plaintext,
         )
     sys.stdout.write(f"{json.dumps(summary, sort_keys=True)}\n")
     return 0
