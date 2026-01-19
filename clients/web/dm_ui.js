@@ -49,6 +49,8 @@ let commit_echo_status_line = null;
 let transcript_file_input = null;
 let transcript_textarea = null;
 let transcript_status_line = null;
+let last_imported_transcript = null;
+let last_imported_digest_note = 'digest missing';
 let outbox_welcome_textarea = null;
 let outbox_commit_textarea = null;
 let outbox_app_textarea = null;
@@ -111,6 +113,7 @@ let room_decrypt_btn = null;
 let room_decrypt_msg_id_output = null;
 let room_decrypt_plaintext_output = null;
 let room_status_line = null;
+let room_phase5_proof_btn = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -1299,6 +1302,47 @@ bob_participant_b64 = dec_result.participant_b64;
 set_room_decrypt_output(latest.msg_id, dec_result.plaintext);
 set_room_status(`room: app decrypted (seq=${latest.seq})`);
 log_output(`room app decrypted (seq=${latest.seq})`);
+};
+
+const handle_room_phase5_proof = async () => {
+const conv_id = get_room_conv_id_for_send();
+if (!conv_id) {
+set_room_status('room proof: select conv_id first');
+log_output('room proof blocked: missing conv_id');
+return;
+}
+let transcript = null;
+if (last_imported_transcript && last_imported_transcript.conv_id === conv_id) {
+transcript = last_imported_transcript;
+set_room_status(`room proof: using imported transcript (${last_imported_digest_note})`);
+} else {
+set_room_status('room proof: loading transcript from db...');
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+set_room_status('room proof: transcript db read failed');
+log_output(`room proof transcript read failed: ${error}`);
+}
+if (records.length) {
+transcript = build_transcript_from_records(conv_id, records);
+set_room_status(`room proof: using transcript db (${records.length} events)`);
+}
+}
+const cli_block_text = cli_block_input ? cli_block_input.value : '';
+let cli_block = null;
+if (cli_block_text && cli_block_text.trim()) {
+const { parsed, found_keys } = parse_cli_block(cli_block_text);
+if (found_keys.length) {
+cli_block = parsed;
+}
+}
+if (!transcript && !cli_block) {
+set_room_status('room proof: missing transcript or cli block');
+log_output('room proof blocked: missing transcript or cli block');
+return;
+}
+await proof_join_and_decrypt({ conv_id, transcript, cli_block });
 };
 
 const handle_room_init = async () => {
@@ -2593,6 +2637,273 @@ app_count,
 };
 };
 
+const pick_latest_env = (events, kind) => {
+if (!Array.isArray(events)) {
+return null;
+}
+let latest = null;
+for (const event of events) {
+if (!event || typeof event.env !== 'string') {
+continue;
+}
+const env_meta = parse_live_inbox_env(event.env);
+if (!env_meta || env_meta.kind !== kind) {
+continue;
+}
+if (!latest || event.seq > latest.seq) {
+latest = {
+seq: event.seq,
+msg_id: event.msg_id,
+env: event.env,
+};
+}
+}
+return latest;
+};
+
+const find_transcript_event_by_env = (events, env_b64, kind) => {
+if (!Array.isArray(events) || !env_b64) {
+return null;
+}
+for (const event of events) {
+if (!event || event.env !== env_b64) {
+continue;
+}
+const env_meta = parse_live_inbox_env(event.env);
+if (!env_meta || env_meta.kind !== kind) {
+continue;
+}
+return { seq: event.seq, msg_id: event.msg_id, env: event.env };
+}
+return null;
+};
+
+const build_transcript_from_records = (conv_id, records) => {
+const events = [];
+for (const record of records) {
+if (!record || typeof record.env !== 'string') {
+continue;
+}
+events.push({
+seq: record.seq,
+msg_id: record.msg_id,
+env: record.env,
+});
+}
+events.sort((left, right) => left.seq - right.seq);
+return {
+schema_version: 1,
+conv_id,
+from_seq: null,
+next_seq: null,
+events,
+};
+};
+
+const is_unechoed_local_commit_env = (env_b64) => {
+if (!env_b64 || !last_local_commit_env_b64) {
+return false;
+}
+if (env_b64 !== last_local_commit_env_b64) {
+return false;
+}
+return commit_echo_state !== 'received';
+};
+
+const proof_join_and_decrypt = async (payload) => {
+const normalized_payload = payload || {};
+const conv_id = normalized_payload.conv_id || '';
+const transcript = normalized_payload.transcript || null;
+const cli_block = normalized_payload.cli_block || null;
+const proof_summary = {
+conv_id,
+digest_result: 'digest missing',
+welcome_seq: null,
+last_handshake_seq: null,
+last_app_seq: null,
+plaintext: '',
+error: '',
+};
+try {
+if (!conv_id) {
+set_room_status('room proof: missing conv_id');
+log_output('room proof blocked: missing conv_id');
+return;
+}
+const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
+if (transcript && transcript.digest_sha256_b64) {
+const computed_digest = await compute_transcript_digest(transcript);
+proof_summary.digest_result =
+computed_digest === transcript.digest_sha256_b64 ? 'digest ok' : 'digest mismatch';
+}
+const cli_envs = cli_block || {
+welcome_env_b64: '',
+commit_env_b64: '',
+app_env_b64: '',
+expected_plaintext: '',
+};
+if (cli_envs.expected_plaintext !== undefined && cli_envs.expected_plaintext !== '') {
+expected_plaintext = cli_envs.expected_plaintext;
+set_expected_plaintext_input();
+}
+const latest_welcome = pick_latest_env(events, 1);
+const selected_welcome_env = cli_envs.welcome_env_b64 || (latest_welcome && latest_welcome.env);
+const matched_welcome =
+selected_welcome_env && find_transcript_event_by_env(events, selected_welcome_env, 1);
+proof_summary.welcome_seq =
+matched_welcome && Number.isInteger(matched_welcome.seq) ? matched_welcome.seq : null;
+if (!selected_welcome_env) {
+set_room_status('room proof: missing welcome env');
+log_output('room proof blocked: missing welcome env');
+proof_summary.error = 'missing welcome env';
+} else {
+const welcome_unpacked = unpack_dm_env(selected_welcome_env);
+if (!welcome_unpacked || welcome_unpacked.kind !== 1) {
+set_room_status('room proof: invalid welcome env');
+log_output('room proof blocked: invalid welcome env');
+proof_summary.error = 'invalid welcome env';
+} else if (!bob_participant_b64) {
+set_room_status('room proof: missing bob participant');
+log_output('room proof blocked: missing bob participant');
+proof_summary.error = 'missing bob participant';
+} else {
+if (room_welcome_env_input) {
+room_welcome_env_input.value = selected_welcome_env;
+}
+set_room_status('room proof: joining bob from welcome...');
+await ensure_wasm_ready();
+const join_result = await dm_join(bob_participant_b64, welcome_unpacked.payload_b64);
+if (!join_result || !join_result.ok) {
+const error_text = join_result && join_result.error ? join_result.error : 'unknown error';
+set_room_status('room proof: join failed');
+log_output(`room proof join failed: ${error_text}`);
+proof_summary.error = `join failed: ${error_text}`;
+} else {
+bob_participant_b64 = join_result.participant_b64;
+bob_has_joined = true;
+last_welcome_seq = proof_summary.welcome_seq;
+set_room_status('room proof: welcome applied');
+log_output('room proof: welcome applied');
+}
+}
+}
+
+const handshake_events = [];
+for (const event of events) {
+if (!event || typeof event.env !== 'string') {
+continue;
+}
+const env_meta = parse_live_inbox_env(event.env);
+if (!env_meta || env_meta.kind !== 2) {
+continue;
+}
+handshake_events.push({ seq: event.seq, env: event.env });
+}
+handshake_events.sort((left, right) => left.seq - right.seq);
+if (cli_envs.commit_env_b64) {
+const matched_commit = find_transcript_event_by_env(events, cli_envs.commit_env_b64, 2);
+if (!matched_commit) {
+handshake_events.push({ seq: null, env: cli_envs.commit_env_b64 });
+}
+}
+let last_handshake_seq = null;
+for (const handshake_event of handshake_events) {
+if (is_unechoed_local_commit_env(handshake_event.env)) {
+set_room_status('room proof: local commit pending echo');
+log_output('room proof blocked: local commit pending echo');
+proof_summary.error = proof_summary.error || 'local commit pending echo';
+continue;
+}
+const apply_result = await apply_handshake_env(handshake_event.seq, handshake_event.env, {
+context_label: 'handshake (proof)',
+});
+if (apply_result.ok) {
+if (Number.isInteger(handshake_event.seq)) {
+last_handshake_seq = handshake_event.seq;
+}
+continue;
+}
+if (apply_result.buffered) {
+continue;
+}
+proof_summary.error = 'handshake apply failed';
+break;
+}
+if (live_inbox_handshake_buffer_by_seq.size) {
+const drained = await drain_handshake_buffer('handshake (proof buffer)');
+if (!drained) {
+proof_summary.error = proof_summary.error || 'handshake buffer drain failed';
+}
+}
+proof_summary.last_handshake_seq = last_handshake_seq;
+last_commit_seq = last_handshake_seq;
+
+const latest_app = pick_latest_env(events, 3);
+const selected_app_env = cli_envs.app_env_b64 || (latest_app && latest_app.env);
+const matched_app = selected_app_env && find_transcript_event_by_env(events, selected_app_env, 3);
+const app_seq =
+matched_app && Number.isInteger(matched_app.seq) ? matched_app.seq : null;
+proof_summary.last_app_seq = app_seq;
+if (!selected_app_env) {
+set_room_status('room proof: no app env found');
+log_output('room proof blocked: no app env found');
+proof_summary.error = proof_summary.error || 'no app env found';
+} else {
+const app_unpacked = unpack_dm_env(selected_app_env);
+if (!app_unpacked || app_unpacked.kind !== 3) {
+set_room_status('room proof: invalid app env');
+log_output('room proof blocked: invalid app env');
+proof_summary.error = proof_summary.error || 'invalid app env';
+} else if (!bob_participant_b64) {
+set_room_status('room proof: missing participant for decrypt');
+log_output('room proof blocked: missing participant for decrypt');
+proof_summary.error = proof_summary.error || 'missing participant';
+} else {
+const seq_suffix = Number.isInteger(app_seq) ? ` (seq=${app_seq})` : '';
+set_room_status(`room proof: decrypting app${seq_suffix}`);
+const dec_result = await dm_decrypt(bob_participant_b64, app_unpacked.payload_b64);
+if (!dec_result || !dec_result.ok) {
+const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
+set_room_status('room proof: app decrypt failed');
+log_output(`room proof app decrypt failed: ${error_text}`);
+proof_summary.error = proof_summary.error || `decrypt failed: ${error_text}`;
+} else {
+bob_participant_b64 = dec_result.participant_b64;
+proof_summary.plaintext = dec_result.plaintext;
+last_app_seq = app_seq;
+set_room_decrypt_output(matched_app ? matched_app.msg_id : '', dec_result.plaintext);
+set_room_status(`room proof: app decrypted${seq_suffix}`);
+log_output(`room proof: app decrypted${seq_suffix}`);
+const expected_value = cli_envs.expected_plaintext || '';
+if (expected_value) {
+if (dec_result.plaintext === expected_value) {
+log_output('room proof: expected_plaintext PASS');
+} else {
+log_output('room proof: expected_plaintext FAIL');
+}
+}
+}
+}
+
+const summary_lines = [
+`proof summary:`,
+`conv_id: ${proof_summary.conv_id || '(none)'}`,
+`digest: ${proof_summary.digest_result}`,
+`welcome seq: ${Number.isInteger(proof_summary.welcome_seq) ? proof_summary.welcome_seq : 'n/a'}`,
+`last handshake seq: ${Number.isInteger(proof_summary.last_handshake_seq) ? proof_summary.last_handshake_seq : 'n/a'}`,
+`last app seq: ${Number.isInteger(proof_summary.last_app_seq) ? proof_summary.last_app_seq : 'n/a'}`,
+`plaintext: ${proof_summary.plaintext || '(none)'}`,
+];
+if (proof_summary.error) {
+summary_lines.push(`error: ${proof_summary.error}`);
+}
+log_output(summary_lines.join('\n'));
+} catch (error) {
+set_room_status('room proof: error');
+log_output(`room proof failed: ${error}`);
+}
+};
+
 const handle_parse_cli_block = () => {
 const block_text = cli_block_input ? cli_block_input.value : '';
 if (!block_text || !block_text.trim()) {
@@ -2685,6 +2996,8 @@ digest_note = 'digest ok';
 digest_note = 'digest mismatch';
 }
 }
+last_imported_transcript = transcript;
+last_imported_digest_note = digest_note;
 const extracted = extract_transcript_envs(transcript.events);
 parsed_welcome_env_b64 = extracted.welcome_env_b64;
 parsed_commit_env_b64 = extracted.commit_env_b64;
@@ -3188,6 +3501,17 @@ room_welcome_auto_join_input.type = 'checkbox';
 room_welcome_auto_label.appendChild(room_welcome_auto_join_input);
 room_welcome_controls.appendChild(room_welcome_auto_label);
 room_container.appendChild(room_welcome_controls);
+
+const room_phase5_proof_row = document.createElement('div');
+room_phase5_proof_row.className = 'button-row';
+room_phase5_proof_btn = document.createElement('button');
+room_phase5_proof_btn.type = 'button';
+room_phase5_proof_btn.textContent = 'Phase 5 Proof: Join + Decrypt (from transcript)';
+room_phase5_proof_btn.addEventListener('click', () => {
+void handle_room_phase5_proof();
+});
+room_phase5_proof_row.appendChild(room_phase5_proof_btn);
+room_container.appendChild(room_phase5_proof_row);
 
 const room_buttons = document.createElement('div');
 room_buttons.className = 'button-row';
