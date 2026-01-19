@@ -57,6 +57,7 @@ let outbox_send_init_btn = null;
 let outbox_send_app_btn = null;
 let outbox_status_line = null;
 let live_inbox_by_seq = new Map();
+let live_inbox_handshake_buffer_by_seq = new Map();
 let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
 let live_inbox_enabled_input = null;
@@ -160,6 +161,7 @@ return trimmed ? trimmed : '(none)';
 
 const build_conv_state = () => ({
 inbox_by_seq: new Map(),
+handshake_buffer_by_seq: new Map(),
 expected_seq: 1,
 last_ingested_seq: null,
 outbox_welcome_env_b64: '',
@@ -301,9 +303,120 @@ log_output(message);
 return true;
 };
 
+const is_uninitialized_commit_error = (error_text) => {
+if (!error_text) {
+return false;
+}
+const lowered = String(error_text).toLowerCase();
+return lowered.includes('participant state not initialized') || lowered.includes('state not initialized');
+};
+
+const select_handshake_participant = () => {
+if (alice_participant_b64) {
+return { label: 'alice', participant_b64: alice_participant_b64 };
+}
+if (bob_participant_b64) {
+return { label: 'bob', participant_b64: bob_participant_b64 };
+}
+return null;
+};
+
+const set_handshake_participant = (label, participant_b64) => {
+if (label === 'alice') {
+alice_participant_b64 = participant_b64;
+return;
+}
+if (label === 'bob') {
+bob_participant_b64 = participant_b64;
+}
+};
+
+const enqueue_handshake_buffer = (seq, env_b64, reason) => {
+if (Number.isInteger(seq)) {
+live_inbox_handshake_buffer_by_seq.set(seq, env_b64);
+}
+const seq_suffix = Number.isInteger(seq) ? ` (seq=${seq})` : '';
+const reason_suffix = reason ? `; ${reason}` : '';
+set_status(`handshake buffered${seq_suffix}`);
+log_output(`handshake buffered${seq_suffix}${reason_suffix}`);
+};
+
+const apply_handshake_env = async (seq, env_b64, options) => {
+const normalized_options = options || {};
+const context_label = normalized_options.context_label || 'handshake';
+const from_buffer = Boolean(normalized_options.from_buffer);
+const seq_suffix = Number.isInteger(seq) ? ` (seq=${seq})` : '';
+const unpacked = unpack_dm_env(env_b64);
+if (!unpacked || unpacked.kind !== 2) {
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: invalid handshake env`);
+return { ok: false, error: 'invalid handshake env' };
+}
+const participant = select_handshake_participant();
+if (!participant) {
+enqueue_handshake_buffer(seq, env_b64, 'no participant available');
+return { ok: false, buffered: true };
+}
+await ensure_wasm_ready();
+let result = null;
+try {
+result = await dm_commit_apply(participant.participant_b64, unpacked.payload_b64);
+} catch (error) {
+const error_text = String(error);
+if (is_uninitialized_commit_error(error_text)) {
+const note = from_buffer ? 'participant state not initialized (buffer retained)' : 'participant state not initialized';
+enqueue_handshake_buffer(seq, env_b64, note);
+return { ok: false, buffered: true };
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
+return { ok: false, error: error_text };
+}
+if (!result || !result.ok) {
+const error_text = result && result.error ? result.error : 'unknown error';
+if (is_uninitialized_commit_error(error_text)) {
+const note = from_buffer ? 'participant state not initialized (buffer retained)' : 'participant state not initialized';
+enqueue_handshake_buffer(seq, env_b64, note);
+return { ok: false, buffered: true };
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
+return { ok: false, error: error_text };
+}
+set_handshake_participant(participant.label, result.participant_b64);
+const noop_suffix = result.noop ? ' (noop)' : '';
+set_status(`${context_label} applied${noop_suffix}${seq_suffix}`);
+log_output(`${context_label} applied as ${participant.label}${noop_suffix}${seq_suffix}`);
+return { ok: true };
+};
+
+const drain_handshake_buffer = async (context_label) => {
+if (!live_inbox_handshake_buffer_by_seq.size) {
+return true;
+}
+const sorted_seqs = Array.from(live_inbox_handshake_buffer_by_seq.keys()).sort((a, b) => a - b);
+for (const seq of sorted_seqs) {
+const env_b64 = live_inbox_handshake_buffer_by_seq.get(seq);
+const result = await apply_handshake_env(seq, env_b64, {
+context_label: context_label || 'handshake',
+from_buffer: true,
+});
+if (result.ok) {
+live_inbox_handshake_buffer_by_seq.delete(seq);
+continue;
+}
+if (result.buffered) {
+break;
+}
+return false;
+}
+return live_inbox_handshake_buffer_by_seq.size === 0;
+};
+
 const save_active_conv_state = () => {
 const state = get_conv_state(active_conv_id);
 state.inbox_by_seq = new Map(live_inbox_by_seq);
+state.handshake_buffer_by_seq = new Map(live_inbox_handshake_buffer_by_seq);
 state.expected_seq = live_inbox_expected_seq;
 state.last_ingested_seq = live_inbox_last_ingested_seq;
 state.outbox_welcome_env_b64 = outbox_welcome_env_b64 || '';
@@ -334,6 +447,7 @@ state.last_app_seq = Number.isInteger(last_app_seq) ? last_app_seq : null;
 const apply_conv_state = (state) => {
 const normalized_state = state || build_conv_state();
 live_inbox_by_seq = new Map(normalized_state.inbox_by_seq || []);
+live_inbox_handshake_buffer_by_seq = new Map(normalized_state.handshake_buffer_by_seq || []);
 live_inbox_last_ingested_seq =
 Number.isInteger(normalized_state.last_ingested_seq) ? normalized_state.last_ingested_seq : null;
 set_live_inbox_expected_seq(normalized_state.expected_seq);
@@ -416,10 +530,12 @@ if (!live_inbox_status_line) {
 return;
 }
 const queued_count = live_inbox_by_seq.size;
+const handshake_count = live_inbox_handshake_buffer_by_seq.size;
 const last_seq_text =
 live_inbox_last_ingested_seq === null ? 'none' : String(live_inbox_last_ingested_seq);
 const parts = [
 `queued=${queued_count}`,
+`handshake_buffered=${handshake_count}`,
 `expected_seq=${live_inbox_expected_seq}`,
 `last_ingested_seq=${last_seq_text}`,
 ];
@@ -1086,6 +1202,7 @@ bob_participant_b64 = result.participant_b64;
 bob_has_joined = true;
 set_room_status('room: peer joined (waiting for commit echo)');
 log_output('room peer applied welcome');
+await drain_handshake_buffer('handshake (room post-welcome)');
 return true;
 };
 
@@ -1658,6 +1775,7 @@ last_welcome_seq = null;
 last_commit_seq = null;
 last_app_seq = null;
 live_inbox_by_seq = new Map();
+live_inbox_handshake_buffer_by_seq = new Map();
 live_inbox_last_ingested_seq = null;
 set_live_inbox_expected_seq(1);
 set_group_id_input();
@@ -1877,6 +1995,7 @@ bob_participant_b64 = result.participant_b64;
 bob_has_joined = true;
 set_status('bob joined');
 log_output('bob applied welcome');
+await drain_handshake_buffer('handshake (post-welcome)');
 return true;
 };
 
@@ -2036,10 +2155,10 @@ if (env_b64 === last_local_commit_env_b64 && last_local_commit_env_b64) {
 set_commit_echo_state('received', seq);
 set_status(`commit echo received (seq=${seq})`);
 log_output(`commit echo received at seq=${seq}`);
-await maybe_auto_apply_commit(seq, 'auto-applied commit after echo');
-} else {
-handle_import_commit_env({ seq });
-await maybe_auto_apply_commit(seq, 'auto-applied commit after ingest');
+}
+const apply_result = await apply_handshake_env(seq, env_b64, { context_label: 'handshake' });
+if (!apply_result.ok && !apply_result.buffered) {
+update_live_inbox_status(`handshake apply failed at seq=${seq}`);
 }
 } else {
 last_app_seq = seq;
@@ -2451,7 +2570,7 @@ welcome_seq = seq;
 welcome_env_b64 = event.env;
 }
 } else if (kind === 2) {
-if (commit_seq === null || seq < commit_seq) {
+if (commit_seq === null || seq > commit_seq) {
 commit_seq = seq;
 commit_env_b64 = event.env;
 }
