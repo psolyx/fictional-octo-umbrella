@@ -16,6 +16,7 @@ This static demo exercises the gateway v1 WebSocket protocol without any build t
      - `python clients/web/tools/csp_dev_server.py --serve`
      - `open http://127.0.0.1:8081/index.html`
    - **Tip:** If you see a 404 for `/clients/web/...`, you likely started the server inside `clients/web/`; use `/index.html` instead.
+   - **Tip:** The CSP dev server serves the `clients/web` directory root, so `/index.html` works while `clients/web/index.html` returns `Not found`.
 3. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
 4. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
 5. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
