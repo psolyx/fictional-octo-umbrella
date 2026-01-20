@@ -949,6 +949,141 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to wait for gateway /healthz (default: 10)",
     )
 
+    gw_phase5_coexist_proof = subparsers.add_parser(
+        "gw-phase5-coexist-proof",
+        help="Phase 5 co-existence proof (DM + room) in one local gateway session",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--dm-conv-id",
+        default="phase5-dm-proof",
+        help="DM conversation id (default: phase5-dm-proof)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-conv-id",
+        default="phase5-room-proof",
+        help="Room conversation id (default: phase5-room-proof)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--dm-group-id-b64",
+        default=_default_dm_group_id_b64(),
+        help='DM group id (base64, default: base64("dm-group"))',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-group-id-b64",
+        default=_default_room_group_id_b64(),
+        help='Room group id (base64, default: base64("room-group"))',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--cli-auth-token",
+        default="cli",
+        help='CLI auth token (default: "cli")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--cli-device-id",
+        default="cli_d1",
+        help='CLI device id (default: "cli_d1")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--cli-user-id",
+        default="cli",
+        help='CLI user id (default: "cli")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--web-auth-token",
+        default="web",
+        help='Web auth token (default: "web")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--web-device-id",
+        default="web_d1",
+        help='Web device id (default: "web_d1")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--web-user-id",
+        default="web",
+        help='Web user id (default: "web")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--kp-poll-seconds",
+        type=int,
+        default=60,
+        help="Seconds to poll for web KeyPackages (default: 60)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--kp-poll-interval-ms",
+        type=int,
+        default=500,
+        help="Poll interval in milliseconds (default: 500)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--seed-keypackage",
+        type=int,
+        default=71001,
+        help="Seed for dm-keypackage if initiator state is missing (default: 71001)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--seed-dm-init",
+        type=int,
+        default=72001,
+        help="Seed for dm-init (default: 72001)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--seed-group-init",
+        type=int,
+        default=62001,
+        help="Seed for group-init (default: 62001)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--dm-plaintext",
+        default="phase5-dm-proof",
+        help='Plaintext for the DM app message (default: "phase5-dm-proof")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-plaintext",
+        default="phase5-room-proof",
+        help='Plaintext for the room app message (default: "phase5-room-proof")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--auto-reply-hint",
+        help="Optional hint to print for enabling auto-reply in the web UI",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--wait-peer-app",
+        action="store_true",
+        help="Wait for peer app messages for both DM and room, then decrypt",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--peer-app-timeout-s",
+        type=float,
+        default=90.0,
+        help="Seconds to wait for peer app message (default: 90)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--peer-app-idle-timeout-s",
+        type=float,
+        default=2.5,
+        help="SSE idle timeout while waiting for peer app (default: 2.5)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--gateway-ready-timeout-s",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for gateway /healthz (default: 10)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--dm-transcript-out",
+        help="Write the DM transcript JSON to this path",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-transcript-out",
+        help="Write the room transcript JSON to this path",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--print-web-cli-block",
+        action="store_true",
+        help="Print key=value lines for the web Parse CLI block helper (DM + room)",
+    )
+
     gw_dm_tail = subparsers.add_parser("gw-dm-tail", help="Tail and apply DM gateway events")
     gw_dm_tail.add_argument("--conv-id", required=True, help="Conversation id (required)")
     gw_dm_tail.add_argument("--state-dir", required=True, help="Directory to store MLS state (required)")
@@ -1502,36 +1637,15 @@ def _wait_for_peer_app(
     raise RuntimeError("Timed out waiting for peer app message")
 
 
-def _handle_gw_phase5_local_proof(
+def _start_phase5_services(
     *,
-    conv_id: str,
-    group_id_b64: str,
-    cli_auth_token: str,
-    cli_device_id: str,
-    cli_user_id: str,
-    web_auth_token: str,
-    web_device_id: str,
-    web_user_id: str,
-    kp_poll_seconds: int,
-    kp_poll_interval_ms: int,
-    seed_keypackage: int,
-    seed_init: int,
-    plaintext: str,
-    wait_peer_app: bool,
-    peer_app_timeout_s: float,
-    peer_app_idle_timeout_s: float,
+    repo_root: Path,
+    temp_root: Path,
     gateway_ready_timeout_s: float,
-    init_command: str,
-    command_label: str,
-    temp_prefix: str,
-) -> int:
-    repo_root = find_repo_root()
-    temp_root = Path(tempfile.mkdtemp(prefix=temp_prefix))
+) -> dict[str, object]:
     gateway_log = temp_root / "logs" / "gateway.log"
     web_log = temp_root / "logs" / "web.log"
     gateway_db = temp_root / "gateway.sqlite"
-    cli_state_dir = temp_root / "cli_state"
-    transcript_path = temp_root / "phase5_transcript.json"
 
     gateway_port = _reserve_local_port()
     web_port = _reserve_local_port()
@@ -1564,30 +1678,231 @@ def _handle_gw_phase5_local_proof(
         "--build-wasm-if-missing",
     ]
 
+    gateway_process, gateway_log_file = _start_daemon_process(
+        cmd=gateway_cmd,
+        cwd=repo_root,
+        env=env,
+        log_path=gateway_log,
+    )
+    _poll_gateway_health(
+        base_url=gateway_url,
+        timeout_s=gateway_ready_timeout_s,
+        interval_s=0.25,
+        process=gateway_process,
+        log_file=gateway_log_file,
+    )
+    web_process, web_log_file = _start_daemon_process(
+        cmd=web_cmd,
+        cwd=repo_root,
+        env=None,
+        log_path=web_log,
+    )
+
+    return {
+        "gateway_db": gateway_db,
+        "gateway_log": gateway_log,
+        "web_log": web_log,
+        "gateway_url": gateway_url,
+        "web_url": web_url,
+        "gateway_process": gateway_process,
+        "web_process": web_process,
+        "gateway_log_file": gateway_log_file,
+        "web_log_file": web_log_file,
+    }
+
+
+def _phase5_proof_step(
+    *,
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    group_id_b64: str,
+    cli_state_dir: str,
+    cli_user_id: str,
+    web_user_id: str,
+    kp_poll_seconds: int,
+    kp_poll_interval_ms: int,
+    seed_keypackage: int,
+    seed_init: int,
+    plaintext: str,
+    wait_peer_app: bool,
+    peer_app_timeout_s: float,
+    peer_app_idle_timeout_s: float,
+    init_command: str,
+    command_label: str,
+    transcript_path: Path,
+    print_web_cli_block: bool,
+    web_cli_header: str | None,
+) -> dict[str, object]:
+    transcript_events: list[dict[str, object]] = []
+
+    _ensure_initiator_state(cli_state_dir, seed_keypackage)
+    web_keypackage = _poll_keypackage(
+        base_url,
+        session_token,
+        web_user_id,
+        kp_poll_seconds,
+        kp_poll_interval_ms,
+    )
+    gateway_client.room_create(
+        base_url,
+        session_token,
+        conv_id,
+        [cli_user_id, web_user_id],
+    )
+
+    output = _run_harness_capture(
+        init_command,
+        [
+            "--state-dir",
+            cli_state_dir,
+            "--peer-keypackage",
+            web_keypackage,
+            "--group-id",
+            group_id_b64,
+            "--seed",
+            str(seed_init),
+        ],
+    )
+    payload = json.loads(_first_nonempty_line(output))
+    welcome_env = dm_envelope.pack(0x01, str(payload["welcome"]))
+
+    welcome_seq = _send_envelope(base_url, session_token, conv_id, welcome_env)
+    _append_transcript_event(transcript_events, welcome_seq, welcome_env)
+
+    proposals = _extract_proposals(payload)
+    proposal_seqs = _send_proposals_with_events(
+        base_url,
+        session_token,
+        conv_id,
+        proposals,
+        transcript_events,
+    )
+
+    commit_env = None
+    commit_seq = None
+    if "commit" in payload:
+        commit_env = dm_envelope.pack(0x02, str(payload["commit"]))
+        commit_seq = _send_envelope(base_url, session_token, conv_id, commit_env)
+        _append_transcript_event(transcript_events, commit_seq, commit_env)
+
+    app_output = _run_harness_capture(
+        "dm-encrypt",
+        [
+            "--state-dir",
+            cli_state_dir,
+            "--plaintext",
+            plaintext,
+        ],
+    )
+    app_ciphertext = _first_nonempty_line(app_output)
+    app_env = dm_envelope.pack(0x03, app_ciphertext)
+    app_seq = _send_envelope(base_url, session_token, conv_id, app_env)
+    _append_transcript_event(transcript_events, app_seq, app_env)
+
+    transcript_payload = _build_transcript_payload(conv_id, transcript_events)
+    _atomic_write_json(transcript_path, transcript_payload)
+
+    if print_web_cli_block:
+        if web_cli_header:
+            sys.stdout.write(f"{web_cli_header}\n")
+        _emit_web_cli_block(
+            conv_id=conv_id,
+            welcome_env=welcome_env,
+            commit_env=commit_env,
+            app_env=app_env,
+            expected_plaintext=plaintext,
+        )
+
+    peer_app_plaintext = None
+    if wait_peer_app:
+        sys.stdout.write("Waiting for peer app message...\n")
+        peer_app_plaintext = _wait_for_peer_app(
+            base_url=base_url,
+            session_token=session_token,
+            conv_id=conv_id,
+            from_seq=app_seq + 1,
+            state_dir=cli_state_dir,
+            timeout_s=peer_app_timeout_s,
+            idle_timeout_s=peer_app_idle_timeout_s,
+        )
+        sys.stdout.write(f"peer_app_plaintext: {peer_app_plaintext}\n")
+
+    handshake_candidates = list(proposal_seqs)
+    if commit_seq is not None:
+        handshake_candidates.append(commit_seq)
+    if not handshake_candidates:
+        handshake_candidates.append(welcome_seq)
+    last_handshake_seq = max(handshake_candidates)
+
+    summary: dict[str, object] = {
+        "app_seq": app_seq,
+        "command": command_label,
+        "conv_id": conv_id,
+        "digest_sha256_b64": transcript_payload.get("digest_sha256_b64"),
+        "last_handshake_seq": last_handshake_seq,
+        "welcome_seq": welcome_seq,
+    }
+    if commit_seq is not None:
+        summary["commit_seq"] = commit_seq
+    if proposal_seqs:
+        summary["proposal_seqs"] = proposal_seqs
+    if peer_app_plaintext is not None:
+        summary["peer_app_plaintext"] = peer_app_plaintext
+        summary["peer_app_decrypted"] = True
+    elif wait_peer_app:
+        summary["peer_app_decrypted"] = False
+    return summary
+
+
+def _handle_gw_phase5_local_proof(
+    *,
+    conv_id: str,
+    group_id_b64: str,
+    cli_auth_token: str,
+    cli_device_id: str,
+    cli_user_id: str,
+    web_auth_token: str,
+    web_device_id: str,
+    web_user_id: str,
+    kp_poll_seconds: int,
+    kp_poll_interval_ms: int,
+    seed_keypackage: int,
+    seed_init: int,
+    plaintext: str,
+    wait_peer_app: bool,
+    peer_app_timeout_s: float,
+    peer_app_idle_timeout_s: float,
+    gateway_ready_timeout_s: float,
+    init_command: str,
+    command_label: str,
+    temp_prefix: str,
+) -> int:
+    repo_root = find_repo_root()
+    temp_root = Path(tempfile.mkdtemp(prefix=temp_prefix))
+    cli_state_dir = temp_root / "cli_state"
+    transcript_path = temp_root / "phase5_transcript.json"
+
     gateway_process = None
     web_process = None
     gateway_log_file = None
     web_log_file = None
+    gateway_log = None
+    web_log = None
     try:
-        gateway_process, gateway_log_file = _start_daemon_process(
-            cmd=gateway_cmd,
-            cwd=repo_root,
-            env=env,
-            log_path=gateway_log,
+        services = _start_phase5_services(
+            repo_root=repo_root,
+            temp_root=temp_root,
+            gateway_ready_timeout_s=gateway_ready_timeout_s,
         )
-        _poll_gateway_health(
-            base_url=gateway_url,
-            timeout_s=gateway_ready_timeout_s,
-            interval_s=0.25,
-            process=gateway_process,
-            log_file=gateway_log_file,
-        )
-        web_process, web_log_file = _start_daemon_process(
-            cmd=web_cmd,
-            cwd=repo_root,
-            env=None,
-            log_path=web_log,
-        )
+        gateway_process = services["gateway_process"]
+        web_process = services["web_process"]
+        gateway_log_file = services["gateway_log_file"]
+        web_log_file = services["web_log_file"]
+        gateway_url = services["gateway_url"]
+        web_url = services["web_url"]
+        gateway_log = services["gateway_log"]
+        web_log = services["web_log"]
 
         sys.stdout.write(f"Gateway URL: {gateway_url}\n")
         sys.stdout.write(f"Web URL: {web_url}\n")
@@ -1599,7 +1914,6 @@ def _handle_gw_phase5_local_proof(
             web_auth_token=web_auth_token,
             web_device_id=web_device_id,
         )
-        sys.stdout.write("Waiting for web KeyPackage...\n")
 
         session = gateway_client.session_start(
             gateway_url,
@@ -1607,109 +1921,43 @@ def _handle_gw_phase5_local_proof(
             cli_device_id,
         )
         session_token = session["session_token"]
-
-        _ensure_initiator_state(str(cli_state_dir), seed_keypackage)
-        web_keypackage = _poll_keypackage(
-            gateway_url,
-            session_token,
-            web_user_id,
-            kp_poll_seconds,
-            kp_poll_interval_ms,
-        )
-
-        gateway_client.room_create(
-            gateway_url,
-            session_token,
-            conv_id,
-            [cli_user_id, web_user_id],
-        )
-
-        output = _run_harness_capture(
-            init_command,
-            [
-                "--state-dir",
-                str(cli_state_dir),
-                "--peer-keypackage",
-                web_keypackage,
-                "--group-id",
-                group_id_b64,
-                "--seed",
-                str(seed_init),
-            ],
-        )
-        payload = json.loads(_first_nonempty_line(output))
-        welcome_env = dm_envelope.pack(0x01, str(payload["welcome"]))
-
-        transcript_events: list[dict[str, object]] = []
-        welcome_seq = _send_envelope(gateway_url, session_token, conv_id, welcome_env)
-        _append_transcript_event(transcript_events, welcome_seq, welcome_env)
-
-        proposals = _extract_proposals(payload)
-        proposal_seqs = _send_proposals_with_events(
-            gateway_url,
-            session_token,
-            conv_id,
-            proposals,
-            transcript_events,
-        )
-
-        commit_env = None
-        commit_seq = None
-        if "commit" in payload:
-            commit_env = dm_envelope.pack(0x02, str(payload["commit"]))
-            commit_seq = _send_envelope(gateway_url, session_token, conv_id, commit_env)
-            _append_transcript_event(transcript_events, commit_seq, commit_env)
-
-        app_output = _run_harness_capture(
-            "dm-encrypt",
-            [
-                "--state-dir",
-                str(cli_state_dir),
-                "--plaintext",
-                plaintext,
-            ],
-        )
-        app_ciphertext = _first_nonempty_line(app_output)
-        app_env = dm_envelope.pack(0x03, app_ciphertext)
-        app_seq = _send_envelope(gateway_url, session_token, conv_id, app_env)
-        _append_transcript_event(transcript_events, app_seq, app_env)
-
-        transcript_payload = _build_transcript_payload(conv_id, transcript_events)
-        _atomic_write_json(transcript_path, transcript_payload)
+        sys.stdout.write("Waiting for web KeyPackage...\n")
 
         sys.stdout.write("Web CLI block:\n")
-        _emit_web_cli_block(
+        summary = _phase5_proof_step(
+            base_url=gateway_url,
+            session_token=session_token,
             conv_id=conv_id,
-            welcome_env=welcome_env,
-            commit_env=commit_env,
-            app_env=app_env,
-            expected_plaintext=plaintext,
+            group_id_b64=group_id_b64,
+            cli_state_dir=str(cli_state_dir),
+            cli_user_id=cli_user_id,
+            web_user_id=web_user_id,
+            kp_poll_seconds=kp_poll_seconds,
+            kp_poll_interval_ms=kp_poll_interval_ms,
+            seed_keypackage=seed_keypackage,
+            seed_init=seed_init,
+            plaintext=plaintext,
+            wait_peer_app=wait_peer_app,
+            peer_app_timeout_s=peer_app_timeout_s,
+            peer_app_idle_timeout_s=peer_app_idle_timeout_s,
+            init_command=init_command,
+            command_label=command_label,
+            transcript_path=transcript_path,
+            print_web_cli_block=True,
+            web_cli_header=None,
         )
 
-        summary: dict[str, object] = {
-            "app_seq": app_seq,
-            "command": command_label,
-            "conv_id": conv_id,
-            "welcome_seq": welcome_seq,
+        summary_output = {
+            "app_seq": summary["app_seq"],
+            "command": summary["command"],
+            "conv_id": summary["conv_id"],
+            "welcome_seq": summary["welcome_seq"],
         }
-        if commit_seq is not None:
-            summary["commit_seq"] = commit_seq
-        if proposal_seqs:
-            summary["proposal_seqs"] = proposal_seqs
-        sys.stdout.write(f"{json.dumps(summary, sort_keys=True)}\n")
-
-        if wait_peer_app:
-            sys.stdout.write("Waiting for peer app message...\n")
-            plaintext = _wait_for_peer_app(
-                base_url=gateway_url,
-                session_token=session_token,
-                conv_id=conv_id,
-                from_seq=app_seq + 1,
-                state_dir=str(cli_state_dir),
-                timeout_s=peer_app_timeout_s,
-                idle_timeout_s=peer_app_idle_timeout_s,
-            )
-            sys.stdout.write(f"peer_app_plaintext: {plaintext}\n")
+        if "commit_seq" in summary:
+            summary_output["commit_seq"] = summary["commit_seq"]
+        if "proposal_seqs" in summary:
+            summary_output["proposal_seqs"] = summary["proposal_seqs"]
+        sys.stdout.write(f"{json.dumps(summary_output, sort_keys=True)}\n")
         return 0
     finally:
         for process in [web_process, gateway_process]:
@@ -1774,6 +2022,167 @@ def handle_gw_phase5_room_proof(args: argparse.Namespace) -> int:
         command_label="gw-phase5-room-proof",
         temp_prefix="phase5-room-proof-",
     )
+
+
+def _emit_phase5_coexist_report(
+    *,
+    label: str,
+    summary: dict[str, object],
+    wait_peer_app: bool,
+) -> bool:
+    conv_id = summary.get("conv_id", "")
+    digest = summary.get("digest_sha256_b64")
+    digest_status = "present" if isinstance(digest, str) and digest else "missing"
+    status_ok = not wait_peer_app or summary.get("peer_app_decrypted") is True
+    status_text = "PASS" if status_ok else "FAIL"
+
+    sys.stdout.write(f"{label}:\n")
+    sys.stdout.write(f"  conv_id: {conv_id}\n")
+    sys.stdout.write(f"  digest_status: {digest_status}\n")
+    if digest_status == "present":
+        sys.stdout.write(f"  digest_sha256_b64: {digest}\n")
+    sys.stdout.write(f"  welcome_seq: {summary.get('welcome_seq')}\n")
+    sys.stdout.write(f"  last_handshake_seq: {summary.get('last_handshake_seq')}\n")
+    sys.stdout.write(f"  app_seq: {summary.get('app_seq')}\n")
+    sys.stdout.write(f"  status: {status_text}\n")
+    return status_ok
+
+
+def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
+    repo_root = find_repo_root()
+    temp_root = Path(tempfile.mkdtemp(prefix="phase5-coexist-proof-"))
+    dm_state_dir = temp_root / "dm_state"
+    room_state_dir = temp_root / "room_state"
+    dm_transcript_path = (
+        Path(args.dm_transcript_out) if args.dm_transcript_out else temp_root / "phase5_dm_transcript.json"
+    )
+    room_transcript_path = (
+        Path(args.room_transcript_out) if args.room_transcript_out else temp_root / "phase5_room_transcript.json"
+    )
+
+    gateway_process = None
+    web_process = None
+    gateway_log_file = None
+    web_log_file = None
+    gateway_log = None
+    web_log = None
+    start_time = time.time()
+    try:
+        services = _start_phase5_services(
+            repo_root=repo_root,
+            temp_root=temp_root,
+            gateway_ready_timeout_s=args.gateway_ready_timeout_s,
+        )
+        gateway_process = services["gateway_process"]
+        web_process = services["web_process"]
+        gateway_log_file = services["gateway_log_file"]
+        web_log_file = services["web_log_file"]
+        gateway_url = services["gateway_url"]
+        web_url = services["web_url"]
+        gateway_log = services["gateway_log"]
+        web_log = services["web_log"]
+
+        sys.stdout.write(f"Gateway URL: {gateway_url}\n")
+        sys.stdout.write(f"Web URL: {web_url}\n")
+        sys.stdout.write(f"DM transcript path: {dm_transcript_path}\n")
+        sys.stdout.write(f"Room transcript path: {room_transcript_path}\n")
+        sys.stdout.write(f"Logs: {gateway_log} {web_log}\n")
+        _emit_phase5_web_instructions(
+            web_url=web_url,
+            gateway_url=gateway_url,
+            web_auth_token=args.web_auth_token,
+            web_device_id=args.web_device_id,
+        )
+        if args.auto_reply_hint:
+            sys.stdout.write(f"Auto-reply hint: {args.auto_reply_hint}\n")
+
+        session = gateway_client.session_start(
+            gateway_url,
+            args.cli_auth_token,
+            args.cli_device_id,
+        )
+        session_token = session["session_token"]
+
+        sys.stdout.write("Waiting for web KeyPackage (DM)...\n")
+        dm_summary = _phase5_proof_step(
+            base_url=gateway_url,
+            session_token=session_token,
+            conv_id=args.dm_conv_id,
+            group_id_b64=args.dm_group_id_b64,
+            cli_state_dir=str(dm_state_dir),
+            cli_user_id=args.cli_user_id,
+            web_user_id=args.web_user_id,
+            kp_poll_seconds=args.kp_poll_seconds,
+            kp_poll_interval_ms=args.kp_poll_interval_ms,
+            seed_keypackage=args.seed_keypackage,
+            seed_init=args.seed_dm_init,
+            plaintext=args.dm_plaintext,
+            wait_peer_app=args.wait_peer_app,
+            peer_app_timeout_s=args.peer_app_timeout_s,
+            peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
+            init_command="dm-init",
+            command_label="gw-phase5-dm-proof",
+            transcript_path=dm_transcript_path,
+            print_web_cli_block=args.print_web_cli_block,
+            web_cli_header="DM Web CLI block:" if args.print_web_cli_block else None,
+        )
+
+        sys.stdout.write("Waiting for web KeyPackage (Room)...\n")
+        room_summary = _phase5_proof_step(
+            base_url=gateway_url,
+            session_token=session_token,
+            conv_id=args.room_conv_id,
+            group_id_b64=args.room_group_id_b64,
+            cli_state_dir=str(room_state_dir),
+            cli_user_id=args.cli_user_id,
+            web_user_id=args.web_user_id,
+            kp_poll_seconds=args.kp_poll_seconds,
+            kp_poll_interval_ms=args.kp_poll_interval_ms,
+            seed_keypackage=args.seed_keypackage,
+            seed_init=args.seed_group_init,
+            plaintext=args.room_plaintext,
+            wait_peer_app=args.wait_peer_app,
+            peer_app_timeout_s=args.peer_app_timeout_s,
+            peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
+            init_command="group-init",
+            command_label="gw-phase5-room-proof",
+            transcript_path=room_transcript_path,
+            print_web_cli_block=args.print_web_cli_block,
+            web_cli_header="Room Web CLI block:" if args.print_web_cli_block else None,
+        )
+
+        sys.stdout.write("Phase 5 co-existence report:\n")
+        dm_ok = _emit_phase5_coexist_report(
+            label="DM report",
+            summary=dm_summary,
+            wait_peer_app=args.wait_peer_app,
+        )
+        room_ok = _emit_phase5_coexist_report(
+            label="Room report",
+            summary=room_summary,
+            wait_peer_app=args.wait_peer_app,
+        )
+        duration_s = time.time() - start_time
+        sys.stdout.write(f"Total duration_s: {duration_s:.2f}\n")
+        if args.wait_peer_app:
+            both_decrypted = dm_ok and room_ok
+            sys.stdout.write(f"Both peer app messages decrypted: {both_decrypted}\n")
+        else:
+            sys.stdout.write("Both peer app messages decrypted: not requested\n")
+        return 0
+    finally:
+        for process in [web_process, gateway_process]:
+            if process and process.poll() is None:
+                process.terminate()
+        for process in [web_process, gateway_process]:
+            if process:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        for log_file in [web_log_file, gateway_log_file]:
+            if log_file:
+                log_file.close()
 
 
 def handle_gw_room_init_send(args: argparse.Namespace) -> int:
@@ -2232,6 +2641,8 @@ def main(argv: list[str] | None = None) -> int:
             return handle_gw_phase5_dm_proof(args)
         if args.command == "gw-phase5-room-proof":
             return handle_gw_phase5_room_proof(args)
+        if args.command == "gw-phase5-coexist-proof":
+            return handle_gw_phase5_coexist_proof(args)
         if args.command == "gw-dm-tail":
             return handle_gw_dm_tail(args)
     except RuntimeError as exc:  # user-facing errors
