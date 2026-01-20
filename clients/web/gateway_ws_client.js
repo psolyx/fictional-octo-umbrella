@@ -727,6 +727,20 @@
     return summary;
   };
 
+  const parse_optional_seq = (value, label) => {
+    if (value === null || value === undefined || value === '') {
+      return { value: null };
+    }
+    const number_value = typeof value === 'number' ? value : Number(value);
+    if (typeof number_value !== 'number' || Number.isNaN(number_value) || !Number.isInteger(number_value)) {
+      return { error: `${label} must be an integer` };
+    }
+    if (number_value < 1) {
+      return { error: `${label} must be >= 1` };
+    }
+    return { value: number_value };
+  };
+
   const validate_transcript_payload = (payload) => {
     if (has_uppercase_key(payload)) {
       return { error: 'camelCase keys not allowed' };
@@ -764,8 +778,16 @@
       normalized.push({ seq, msg_id, env });
     }
     normalized.sort((a, b) => a.seq - b.seq);
-    const from_seq_value = payload && typeof payload.from_seq === 'number' ? payload.from_seq : null;
-    const next_seq_value = payload && typeof payload.next_seq === 'number' ? payload.next_seq : null;
+    const from_seq_result = parse_optional_seq(payload ? payload.from_seq : null, 'from_seq');
+    if (from_seq_result.error) {
+      return { error: from_seq_result.error };
+    }
+    const next_seq_result = parse_optional_seq(payload ? payload.next_seq : null, 'next_seq');
+    if (next_seq_result.error) {
+      return { error: next_seq_result.error };
+    }
+    const from_seq_value = from_seq_result.value;
+    const next_seq_value = next_seq_result.value;
     const digest_value = payload && typeof payload.digest_sha256_b64 === 'string' ? payload.digest_sha256_b64 : null;
     const expected_plaintext =
       payload && typeof payload.expected_plaintext === 'string' ? payload.expected_plaintext : null;
