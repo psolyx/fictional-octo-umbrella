@@ -77,6 +77,7 @@ let active_conv_id = '(none)';
 const conv_state_by_id = new Map();
 let commit_apply_in_flight = false;
 let run_next_step_in_flight = false;
+let dm_phase5_proof_in_flight = false;
 let room_phase5_proof_in_flight = false;
 let bob_has_joined = false;
 let last_welcome_seq = null;
@@ -119,6 +120,11 @@ let room_phase5_proof_auto_reply_input = null;
 let room_phase5_proof_reply_input = null;
 let room_phase5_proof_timeline = null;
 let room_phase5_proof_report = null;
+let dm_phase5_proof_run_btn = null;
+let dm_phase5_proof_auto_reply_input = null;
+let dm_phase5_proof_reply_input = null;
+let dm_phase5_proof_timeline = null;
+let dm_phase5_proof_report = null;
 
 const seed_alice = 1001;
 const seed_bob = 2002;
@@ -153,6 +159,7 @@ const legacy_state_keys = [
 'parsed_app_env_b64',
 ];
 const cli_block_keys = [
+'conv_id',
 'welcome_env_b64',
 'commit_env_b64',
 'app_env_b64',
@@ -1342,11 +1349,12 @@ details: 'pending',
 },
 ]);
 
-const render_phase5_timeline = (steps) => {
-if (!room_phase5_proof_timeline) {
+const render_phase5_timeline = (steps, timeline_container) => {
+const target = timeline_container || room_phase5_proof_timeline;
+if (!target) {
 return;
 }
-room_phase5_proof_timeline.innerHTML = '';
+target.innerHTML = '';
 steps.forEach((step) => {
 const row = document.createElement('div');
 row.className = 'phase5_step';
@@ -1364,11 +1372,11 @@ row.appendChild(document.createTextNode(' '));
 row.appendChild(label);
 row.appendChild(document.createTextNode(' - '));
 row.appendChild(details);
-room_phase5_proof_timeline.appendChild(row);
+target.appendChild(row);
 });
 };
 
-const set_phase5_step_status = (steps, key, status, details) => {
+const set_phase5_step_status = (steps, key, status, details, timeline_container) => {
 const step = steps.find((entry) => entry.key === key);
 if (!step) {
 return;
@@ -1377,14 +1385,15 @@ step.status = status;
 if (details !== undefined) {
 step.details = details;
 }
-render_phase5_timeline(steps);
+render_phase5_timeline(steps, timeline_container);
 };
 
-const set_phase5_report_text = (value) => {
-if (!room_phase5_proof_report) {
+const set_phase5_report_text = (value, report_output) => {
+const target = report_output || room_phase5_proof_report;
+if (!target) {
 return;
 }
-room_phase5_proof_report.value = value || '';
+target.value = value || '';
 };
 
 const format_phase5_report = (report) => {
@@ -1426,31 +1435,50 @@ return null;
 return parsed;
 };
 
-const resolve_phase5_inputs = async () => {
-const conv_id = get_room_conv_id_for_send();
+const resolve_phase5_inputs = async (options) => {
+const cli_block = resolve_phase5_cli_block();
+const status_prefix = options.status_prefix || 'proof';
+const conv_id_resolver = options.conv_id_resolver;
+let transcript = null;
+let source_note = '';
+let conv_id = conv_id_resolver();
+if (last_imported_transcript) {
+const allow_import = Boolean(options.allow_imported_any);
+if (allow_import || last_imported_transcript.conv_id === conv_id) {
+transcript = last_imported_transcript;
+conv_id = last_imported_transcript.conv_id;
+source_note = `imported transcript (${last_imported_digest_note})`;
+}
+}
+if (!transcript) {
+if (!conv_id && cli_block && cli_block.conv_id) {
+conv_id = normalize_conv_id(cli_block.conv_id);
+}
 if (!conv_id) {
 return { ok: false, error: 'missing conv_id' };
 }
-let transcript = null;
-let source_note = '';
-if (last_imported_transcript && last_imported_transcript.conv_id === conv_id) {
-transcript = last_imported_transcript;
-source_note = `imported transcript (${last_imported_digest_note})`;
-} else {
-set_room_status('room proof: loading transcript from db...');
+options.set_status_fn(`${status_prefix}: loading transcript from db...`);
 let records = [];
 try {
 records = await read_transcript_records_by_conv_id(conv_id);
 } catch (error) {
-set_room_status('room proof: transcript db read failed');
-log_output(`room proof transcript read failed: ${error}`);
+options.set_status_fn(`${status_prefix}: transcript db read failed`);
+log_output(`${status_prefix} transcript read failed: ${error}`);
 }
 if (records.length) {
 transcript = build_transcript_from_records(conv_id, records);
 source_note = `transcript db (${records.length} events)`;
 }
 }
-const cli_block = resolve_phase5_cli_block();
+if (cli_block && cli_block.conv_id) {
+const normalized = normalize_conv_id(cli_block.conv_id);
+if (normalized !== '(none)') {
+if (source_note) {
+source_note = `${source_note}; cli_block conv_id override`;
+}
+conv_id = normalized;
+}
+}
 if (!transcript && !cli_block) {
 return { ok: false, error: 'missing transcript or cli block' };
 }
@@ -1470,18 +1498,19 @@ return cli_block.expected_plaintext;
 return expected_plaintext || '';
 };
 
-const run_room_phase5_proof_wizard = async () => {
-if (room_phase5_proof_in_flight) {
+const run_phase5_proof_wizard = async (options) => {
+const status_prefix = options.status_prefix;
+if (options.get_in_flight()) {
 return;
 }
-room_phase5_proof_in_flight = true;
-if (room_phase5_proof_run_btn) {
-room_phase5_proof_run_btn.disabled = true;
+options.set_in_flight(true);
+if (options.run_btn) {
+options.run_btn.disabled = true;
 }
 const proof_start_ms = Date.now();
 const steps = build_phase5_steps();
-render_phase5_timeline(steps);
-set_phase5_report_text('');
+render_phase5_timeline(steps, options.timeline_container);
+set_phase5_report_text('', options.report_output);
 const proof_report = {
 conv_id: '',
 digest_status: 'digest missing',
@@ -1498,30 +1527,36 @@ end_ms: null,
 duration_ms: null,
 error: '',
 };
+const set_status_prefixed = (message) => {
+options.set_status_fn(`${status_prefix}: ${message}`);
+};
+const set_step = (key, status, details) => {
+set_phase5_step_status(steps, key, status, details, options.timeline_container);
+};
 const finalize_report = () => {
 proof_report.end_ms = Date.now();
 proof_report.duration_ms =
 Number.isInteger(proof_report.end_ms) && Number.isInteger(proof_report.start_ms)
 ? proof_report.end_ms - proof_report.start_ms
 : null;
-set_phase5_report_text(format_phase5_report(proof_report));
-room_phase5_proof_in_flight = false;
-if (room_phase5_proof_run_btn) {
-room_phase5_proof_run_btn.disabled = false;
+set_phase5_report_text(format_phase5_report(proof_report), options.report_output);
+options.set_in_flight(false);
+if (options.run_btn) {
+options.run_btn.disabled = false;
 }
 };
 
 const run_wizard = async () => {
-const resolved = await resolve_phase5_inputs();
+const resolved = await options.resolve_inputs();
 if (!resolved.ok) {
-set_phase5_step_status(steps, 'join', 'fail', resolved.error);
+set_step('join', 'fail', resolved.error);
 proof_report.error = resolved.error;
-set_room_status(`room proof: ${resolved.error}`);
+set_status_prefixed(resolved.error);
 return;
 }
 proof_report.conv_id = resolved.conv_id;
 if (resolved.source_note) {
-set_room_status(`room proof: ${resolved.source_note}`);
+set_status_prefixed(resolved.source_note);
 }
 const transcript = resolved.transcript;
 const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
@@ -1542,7 +1577,7 @@ if (cli_envs.expected_plaintext !== undefined) {
 expected_plaintext = cli_envs.expected_plaintext;
 set_expected_plaintext_input();
 }
-set_phase5_step_status(steps, 'join', 'running', 'selecting welcome');
+set_step('join', 'running', 'selecting welcome');
 const latest_welcome = pick_latest_env(events, 1);
 const selected_welcome_env = cli_envs.welcome_env_b64 || (latest_welcome && latest_welcome.env);
 const matched_welcome =
@@ -1550,59 +1585,59 @@ selected_welcome_env && find_transcript_event_by_env(events, selected_welcome_en
 proof_report.welcome_seq =
 matched_welcome && Number.isInteger(matched_welcome.seq) ? matched_welcome.seq : null;
 if (!selected_welcome_env) {
-set_phase5_step_status(steps, 'join', 'fail', 'missing welcome env');
+set_step('join', 'fail', 'missing welcome env');
 proof_report.error = 'missing welcome env';
 proof_report.decrypted_plaintext = 'error: missing welcome env';
-set_room_status('room proof: missing welcome env');
+set_status_prefixed('missing welcome env');
 } else {
 const welcome_unpacked = unpack_dm_env(selected_welcome_env);
 if (!welcome_unpacked || welcome_unpacked.kind !== 1) {
-set_phase5_step_status(steps, 'join', 'fail', 'invalid welcome env');
+set_step('join', 'fail', 'invalid welcome env');
 proof_report.error = 'invalid welcome env';
 proof_report.decrypted_plaintext = 'error: invalid welcome env';
-set_room_status('room proof: invalid welcome env');
+set_status_prefixed('invalid welcome env');
 } else if (!bob_participant_b64) {
-set_phase5_step_status(steps, 'join', 'fail', 'missing bob participant');
+set_step('join', 'fail', 'missing bob participant');
 proof_report.error = 'missing bob participant';
 proof_report.decrypted_plaintext = 'error: missing bob participant';
-set_room_status('room proof: missing bob participant');
+set_status_prefixed('missing bob participant');
 } else {
-if (room_welcome_env_input) {
-room_welcome_env_input.value = selected_welcome_env;
+if (options.set_welcome_env_input) {
+options.set_welcome_env_input(selected_welcome_env);
 }
-set_room_status('room proof: joining bob from welcome...');
+set_status_prefixed('joining bob from welcome...');
 await ensure_wasm_ready();
 const join_result = await dm_join(bob_participant_b64, welcome_unpacked.payload_b64);
 if (!join_result || !join_result.ok) {
 const error_text = join_result && join_result.error ? join_result.error : 'unknown error';
-set_phase5_step_status(steps, 'join', 'fail', `join failed: ${error_text}`);
+set_step('join', 'fail', `join failed: ${error_text}`);
 proof_report.error = `join failed: ${error_text}`;
 proof_report.decrypted_plaintext = `error: join failed: ${error_text}`;
-set_room_status('room proof: join failed');
-log_output(`room proof join failed: ${error_text}`);
+set_status_prefixed('join failed');
+log_output(`${status_prefix}: join failed: ${error_text}`);
 } else {
 bob_participant_b64 = join_result.participant_b64;
 bob_has_joined = true;
 last_welcome_seq = proof_report.welcome_seq;
-set_phase5_step_status(steps, 'join', 'ok', 'welcome applied');
-set_room_status('room proof: welcome applied');
-log_output('room proof: welcome applied');
+set_step('join', 'ok', 'welcome applied');
+set_status_prefixed('welcome applied');
+log_output(`${status_prefix}: welcome applied`);
 }
 }
 }
 if (steps.find((step) => step.key === 'join').status !== 'ok') {
-set_phase5_step_status(steps, 'drain', 'pending', 'skipped (join failed)');
-set_phase5_step_status(steps, 'decrypt', 'pending', 'skipped (join failed)');
-set_phase5_step_status(steps, 'reply', 'pending', 'skipped (join failed)');
+set_step('drain', 'pending', 'skipped (join failed)');
+set_step('decrypt', 'pending', 'skipped (join failed)');
+set_step('reply', 'pending', 'skipped (join failed)');
 if (!proof_report.decrypted_plaintext && proof_report.error) {
 proof_report.decrypted_plaintext = `error: ${proof_report.error}`;
 }
-set_phase5_step_status(steps, 'report', 'running', 'building report');
-set_phase5_step_status(steps, 'report', 'ok', 'report ready');
+set_step('report', 'running', 'building report');
+set_step('report', 'ok', 'report ready');
 return;
 }
 
-set_phase5_step_status(steps, 'drain', 'running', 'applying handshakes');
+set_step('drain', 'running', 'applying handshakes');
 const handshake_events = [];
 for (const event of events) {
 if (!event || typeof event.env !== 'string') {
@@ -1624,16 +1659,16 @@ handshake_events.push({ seq: null, env: cli_envs.commit_env_b64 });
 let last_handshake_seq = null;
 let handshake_error = '';
 if (!handshake_events.length) {
-set_phase5_step_status(steps, 'drain', 'ok', 'no handshake envs');
+set_step('drain', 'ok', 'no handshake envs');
 } else {
 for (const handshake_event of handshake_events) {
 if (is_unechoed_local_commit_env(handshake_event.env)) {
 handshake_error = handshake_error || 'local commit pending echo';
-log_output('room proof blocked: local commit pending echo');
+log_output(`${status_prefix} blocked: local commit pending echo`);
 continue;
 }
 const apply_result = await apply_handshake_env(handshake_event.seq, handshake_event.env, {
-context_label: 'handshake (proof wizard)',
+context_label: options.handshake_context_label,
 });
 if (apply_result.ok) {
 if (Number.isInteger(handshake_event.seq)) {
@@ -1649,7 +1684,7 @@ break;
 }
 }
 if (live_inbox_handshake_buffer_by_seq.size) {
-const drained = await drain_handshake_buffer('handshake (proof wizard buffer)');
+const drained = await drain_handshake_buffer(options.handshake_buffer_label);
 if (!drained) {
 handshake_error = handshake_error || 'handshake buffer drain failed';
 }
@@ -1657,77 +1692,78 @@ handshake_error = handshake_error || 'handshake buffer drain failed';
 proof_report.last_handshake_applied_seq = last_handshake_seq;
 last_commit_seq = last_handshake_seq;
 if (handshake_error) {
-set_phase5_step_status(steps, 'drain', 'fail', handshake_error);
+set_step('drain', 'fail', handshake_error);
 proof_report.error = proof_report.error || handshake_error;
 if (!proof_report.decrypted_plaintext) {
 proof_report.decrypted_plaintext = `error: ${handshake_error}`;
 }
 } else if (steps.find((step) => step.key === 'drain').status !== 'ok') {
-set_phase5_step_status(steps, 'drain', 'ok', 'handshakes applied');
+set_step('drain', 'ok', 'handshakes applied');
 }
 
 if (steps.find((step) => step.key === 'drain').status !== 'ok') {
-set_phase5_step_status(steps, 'decrypt', 'pending', 'skipped (handshake failed)');
-set_phase5_step_status(steps, 'reply', 'pending', 'skipped (handshake failed)');
+set_step('decrypt', 'pending', 'skipped (handshake failed)');
+set_step('reply', 'pending', 'skipped (handshake failed)');
 if (!proof_report.decrypted_plaintext && proof_report.error) {
 proof_report.decrypted_plaintext = `error: ${proof_report.error}`;
 }
-set_phase5_step_status(steps, 'report', 'running', 'building report');
-set_phase5_step_status(steps, 'report', 'ok', 'report ready');
+set_step('report', 'running', 'building report');
+set_step('report', 'ok', 'report ready');
 return;
 }
 
-set_phase5_step_status(steps, 'decrypt', 'running', 'selecting app env');
+set_step('decrypt', 'running', 'selecting app env');
 const latest_app = pick_latest_env(events, 3);
 const selected_app_env = cli_envs.app_env_b64 || (latest_app && latest_app.env);
-const matched_app =
-selected_app_env && find_transcript_event_by_env(events, selected_app_env, 3);
+const matched_app = selected_app_env && find_transcript_event_by_env(events, selected_app_env, 3);
 const app_seq = matched_app && Number.isInteger(matched_app.seq) ? matched_app.seq : null;
 proof_report.app_seq = app_seq;
 if (!selected_app_env) {
-set_phase5_step_status(steps, 'decrypt', 'fail', 'no app env found');
+set_step('decrypt', 'fail', 'no app env found');
 proof_report.error = proof_report.error || 'no app env found';
 proof_report.decrypted_plaintext = 'error: no app env found';
-set_room_status('room proof: no app env found');
+set_status_prefixed('no app env found');
 } else {
 const app_unpacked = unpack_dm_env(selected_app_env);
 if (!app_unpacked || app_unpacked.kind !== 3) {
-set_phase5_step_status(steps, 'decrypt', 'fail', 'invalid app env');
+set_step('decrypt', 'fail', 'invalid app env');
 proof_report.error = proof_report.error || 'invalid app env';
 proof_report.decrypted_plaintext = 'error: invalid app env';
-set_room_status('room proof: invalid app env');
+set_status_prefixed('invalid app env');
 } else if (!bob_participant_b64) {
-set_phase5_step_status(steps, 'decrypt', 'fail', 'missing participant');
+set_step('decrypt', 'fail', 'missing participant');
 proof_report.error = proof_report.error || 'missing participant';
 proof_report.decrypted_plaintext = 'error: missing participant';
-set_room_status('room proof: missing participant for decrypt');
+set_status_prefixed('missing participant for decrypt');
 } else {
 const seq_suffix = Number.isInteger(app_seq) ? ` (seq=${app_seq})` : '';
-set_room_status(`room proof: decrypting app${seq_suffix}`);
+set_status_prefixed(`decrypting app${seq_suffix}`);
 const dec_result = await dm_decrypt(bob_participant_b64, app_unpacked.payload_b64);
 if (!dec_result || !dec_result.ok) {
 const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
-set_phase5_step_status(steps, 'decrypt', 'fail', `decrypt failed: ${error_text}`);
+set_step('decrypt', 'fail', `decrypt failed: ${error_text}`);
 proof_report.decrypted_plaintext = `decrypt error: ${error_text}`;
 proof_report.error = proof_report.error || `decrypt failed: ${error_text}`;
-set_room_status('room proof: app decrypt failed');
-log_output(`room proof app decrypt failed: ${error_text}`);
+set_status_prefixed('app decrypt failed');
+log_output(`${status_prefix} app decrypt failed: ${error_text}`);
 } else {
 bob_participant_b64 = dec_result.participant_b64;
 proof_report.decrypted_plaintext = dec_result.plaintext;
 last_app_seq = app_seq;
-set_room_decrypt_output(matched_app ? matched_app.msg_id : '', dec_result.plaintext);
-set_phase5_step_status(steps, 'decrypt', 'ok', `decrypted${seq_suffix}`);
-set_room_status(`room proof: app decrypted${seq_suffix}`);
-log_output(`room proof: app decrypted${seq_suffix}`);
+if (options.set_decrypt_output) {
+options.set_decrypt_output(matched_app ? matched_app.msg_id : '', dec_result.plaintext);
+}
+set_step('decrypt', 'ok', `decrypted${seq_suffix}`);
+set_status_prefixed(`app decrypted${seq_suffix}`);
+log_output(`${status_prefix} app decrypted${seq_suffix}`);
 const expected_value = resolved_expected_plaintext || '';
 if (expected_value) {
 proof_report.expected_plaintext_result =
 dec_result.plaintext === expected_value ? 'PASS' : 'FAIL';
 if (proof_report.expected_plaintext_result === 'PASS') {
-log_output('room proof: expected_plaintext PASS');
+log_output(`${status_prefix} expected_plaintext PASS`);
 } else {
-log_output('room proof: expected_plaintext FAIL');
+log_output(`${status_prefix} expected_plaintext FAIL`);
 }
 }
 }
@@ -1737,57 +1773,111 @@ log_output('room proof: expected_plaintext FAIL');
 const decrypt_ok = steps.find((step) => step.key === 'decrypt').status === 'ok';
 const expected_pass =
 !proof_report.expected_plaintext_result || proof_report.expected_plaintext_result === 'PASS';
-const auto_reply_enabled =
-Boolean(room_phase5_proof_auto_reply_input && room_phase5_proof_auto_reply_input.checked);
-proof_report.reply_plaintext =
-room_phase5_proof_reply_input ? room_phase5_proof_reply_input.value : '';
+const auto_reply_enabled = Boolean(options.auto_reply_input && options.auto_reply_input.checked);
+proof_report.reply_plaintext = options.reply_input ? options.reply_input.value : '';
 if (!decrypt_ok) {
-set_phase5_step_status(steps, 'reply', 'pending', 'skipped (decrypt failed)');
+set_step('reply', 'pending', 'skipped (decrypt failed)');
 } else if (!expected_pass) {
-set_phase5_step_status(steps, 'reply', 'pending', 'skipped (expected_plaintext FAIL)');
+set_step('reply', 'pending', 'skipped (expected_plaintext FAIL)');
 } else if (!auto_reply_enabled) {
-set_phase5_step_status(steps, 'reply', 'ok', 'skipped (disabled)');
+set_step('reply', 'ok', 'skipped (disabled)');
 } else if (!proof_report.reply_plaintext) {
-set_phase5_step_status(steps, 'reply', 'fail', 'reply plaintext empty');
+set_step('reply', 'fail', 'reply plaintext empty');
 proof_report.error = proof_report.error || 'reply plaintext empty';
 } else if (!bob_participant_b64) {
-set_phase5_step_status(steps, 'reply', 'fail', 'missing participant');
+set_step('reply', 'fail', 'missing participant');
 proof_report.error = proof_report.error || 'missing participant for reply';
 } else {
-set_phase5_step_status(steps, 'reply', 'running', 'encrypting reply');
+set_step('reply', 'running', 'encrypting reply');
 proof_report.auto_reply_attempted = true;
 await ensure_wasm_ready();
 const enc_result = await dm_encrypt(bob_participant_b64, proof_report.reply_plaintext);
 if (!enc_result || !enc_result.ok) {
 const error_text = enc_result && enc_result.error ? enc_result.error : 'unknown error';
-set_phase5_step_status(steps, 'reply', 'fail', `reply encrypt failed: ${error_text}`);
+set_step('reply', 'fail', `reply encrypt failed: ${error_text}`);
 proof_report.error = proof_report.error || `reply encrypt failed: ${error_text}`;
-set_room_status('room proof: reply encrypt failed');
-log_output(`room proof reply encrypt failed: ${error_text}`);
+set_status_prefixed('reply encrypt failed');
+log_output(`${status_prefix} reply encrypt failed: ${error_text}`);
 } else {
 bob_participant_b64 = enc_result.participant_b64;
 const reply_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
 dispatch_gateway_send_env(proof_report.conv_id, reply_env_b64);
-set_phase5_step_status(steps, 'reply', 'ok', 'reply sent');
-set_room_status('room proof: reply sent');
-log_output('room proof: reply env sent');
+set_step('reply', 'ok', 'reply sent');
+set_status_prefixed('reply sent');
+log_output(`${status_prefix} reply env sent`);
 }
 }
 
-set_phase5_step_status(steps, 'report', 'running', 'building report');
-set_phase5_step_status(steps, 'report', 'ok', 'report ready');
+set_step('report', 'running', 'building report');
+set_step('report', 'ok', 'report ready');
 };
 return run_wizard()
 .catch((error) => {
-set_room_status('room proof: error');
-log_output(`room proof failed: ${error}`);
-set_phase5_step_status(steps, 'report', 'fail', 'report failed');
+set_status_prefixed('error');
+log_output(`${status_prefix} failed: ${error}`);
+set_step('report', 'fail', 'report failed');
 proof_report.error = proof_report.error || String(error);
 })
 .finally(() => {
 finalize_report();
 });
 };
+
+const run_dm_phase5_proof_wizard = async () => run_phase5_proof_wizard({
+status_prefix: 'dm proof',
+resolve_inputs: () => resolve_phase5_inputs({
+conv_id_resolver: get_active_conv_id_for_send,
+set_status_fn: set_status,
+status_prefix: 'dm proof',
+allow_imported_any: true,
+}),
+set_status_fn: set_status,
+timeline_container: dm_phase5_proof_timeline,
+report_output: dm_phase5_proof_report,
+run_btn: dm_phase5_proof_run_btn,
+get_in_flight: () => dm_phase5_proof_in_flight,
+set_in_flight: (value) => {
+dm_phase5_proof_in_flight = value;
+},
+set_welcome_env_input: (env_b64) => {
+set_incoming_env_input(env_b64);
+},
+set_decrypt_output: (_msg_id, plaintext) => {
+set_decrypted_output(plaintext);
+},
+auto_reply_input: dm_phase5_proof_auto_reply_input,
+reply_input: dm_phase5_proof_reply_input,
+handshake_context_label: 'handshake (dm proof)',
+handshake_buffer_label: 'handshake (dm proof buffer)',
+});
+
+const run_room_phase5_proof_wizard = async () => run_phase5_proof_wizard({
+status_prefix: 'room proof',
+resolve_inputs: () => resolve_phase5_inputs({
+conv_id_resolver: get_room_conv_id_for_send,
+set_status_fn: set_room_status,
+status_prefix: 'room proof',
+allow_imported_any: false,
+}),
+set_status_fn: set_room_status,
+timeline_container: room_phase5_proof_timeline,
+report_output: room_phase5_proof_report,
+run_btn: room_phase5_proof_run_btn,
+get_in_flight: () => room_phase5_proof_in_flight,
+set_in_flight: (value) => {
+room_phase5_proof_in_flight = value;
+},
+set_welcome_env_input: (env_b64) => {
+if (room_welcome_env_input) {
+room_welcome_env_input.value = env_b64;
+}
+},
+set_decrypt_output: set_room_decrypt_output,
+auto_reply_input: room_phase5_proof_auto_reply_input,
+reply_input: room_phase5_proof_reply_input,
+handshake_context_label: 'handshake (proof wizard)',
+handshake_buffer_label: 'handshake (proof wizard buffer)',
+});
 
 const handle_room_init = async () => {
 const conv_id = get_room_conv_id_for_send();
@@ -2914,6 +3004,7 @@ log_output(`app_env_b64: ${app_env_b64}`);
 
 const parse_cli_block = (block_text) => {
 const parsed = {
+conv_id: '',
 welcome_env_b64: '',
 commit_env_b64: '',
 app_env_b64: '',
@@ -3181,6 +3272,15 @@ parsed_app_env_b64 = parsed.app_env_b64;
 if (parsed.expected_plaintext !== '') {
 expected_plaintext = parsed.expected_plaintext;
 set_expected_plaintext_input();
+}
+if (parsed.conv_id) {
+const normalized_conv_id = normalize_conv_id(parsed.conv_id);
+if (normalized_conv_id !== '(none)' && active_conv_id === '(none)') {
+save_active_conv_state();
+active_conv_id = normalized_conv_id;
+apply_conv_state(get_conv_state(active_conv_id));
+update_conv_status_label();
+}
 }
 const missing_keys = cli_block_keys.filter((key) => !parsed[key]);
 const missing_summary = missing_keys.length ? `; missing: ${missing_keys.join(', ')}` : '';
@@ -3588,6 +3688,65 @@ dm_fieldset.appendChild(outbox_container);
 }
 update_outbox_ui();
 
+const dm_phase5_proof_panel = document.createElement('div');
+dm_phase5_proof_panel.className = 'dm_phase5_proof_panel';
+const dm_phase5_proof_title = document.createElement('div');
+dm_phase5_proof_title.textContent = 'Run DM Proof';
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_title);
+
+const dm_phase5_proof_controls = document.createElement('div');
+dm_phase5_proof_controls.className = 'button-row';
+dm_phase5_proof_run_btn = document.createElement('button');
+dm_phase5_proof_run_btn.type = 'button';
+dm_phase5_proof_run_btn.textContent = 'Run DM Proof';
+dm_phase5_proof_run_btn.addEventListener('click', () => {
+void run_dm_phase5_proof_wizard();
+});
+dm_phase5_proof_controls.appendChild(dm_phase5_proof_run_btn);
+
+const dm_phase5_proof_auto_reply_label = document.createElement('label');
+dm_phase5_proof_auto_reply_label.textContent = 'Auto-reply after PASS';
+dm_phase5_proof_auto_reply_input = document.createElement('input');
+dm_phase5_proof_auto_reply_input.type = 'checkbox';
+dm_phase5_proof_auto_reply_label.appendChild(dm_phase5_proof_auto_reply_input);
+dm_phase5_proof_controls.appendChild(dm_phase5_proof_auto_reply_label);
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_controls);
+
+const dm_phase5_proof_reply_label = document.createElement('label');
+dm_phase5_proof_reply_label.textContent = 'Reply plaintext';
+dm_phase5_proof_reply_input = document.createElement('input');
+dm_phase5_proof_reply_input.type = 'text';
+dm_phase5_proof_reply_input.size = 48;
+dm_phase5_proof_reply_input.value = 'phase5-peer-reply';
+dm_phase5_proof_reply_label.appendChild(dm_phase5_proof_reply_input);
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_reply_label);
+
+const dm_phase5_proof_timeline_label = document.createElement('div');
+dm_phase5_proof_timeline_label.textContent = 'Proof steps';
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_timeline_label);
+dm_phase5_proof_timeline = document.createElement('div');
+dm_phase5_proof_timeline.className = 'dm_room_phase5_timeline';
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_timeline);
+
+const dm_phase5_proof_report_label = document.createElement('label');
+dm_phase5_proof_report_label.textContent = 'Proof report';
+dm_phase5_proof_report = document.createElement('textarea');
+dm_phase5_proof_report.rows = 10;
+dm_phase5_proof_report.cols = 70;
+dm_phase5_proof_report.readOnly = true;
+dm_phase5_proof_report_label.appendChild(dm_phase5_proof_report);
+dm_phase5_proof_panel.appendChild(dm_phase5_proof_report_label);
+
+if (outbox_container.parentNode) {
+if (outbox_container.nextSibling) {
+outbox_container.parentNode.insertBefore(dm_phase5_proof_panel, outbox_container.nextSibling);
+} else {
+outbox_container.parentNode.appendChild(dm_phase5_proof_panel);
+}
+} else {
+dm_fieldset.appendChild(dm_phase5_proof_panel);
+}
+
 const room_container = document.createElement('div');
 room_container.className = 'dm_room';
 room_container.id = 'dm_room_panel';
@@ -3898,11 +4057,12 @@ room_status_line.className = 'dm_room_status';
 room_status_line.textContent = 'room: idle';
 room_container.appendChild(room_status_line);
 
-if (outbox_container.parentNode) {
-if (outbox_container.nextSibling) {
-outbox_container.parentNode.insertBefore(room_container, outbox_container.nextSibling);
+const room_anchor = dm_phase5_proof_panel || outbox_container;
+if (room_anchor.parentNode) {
+if (room_anchor.nextSibling) {
+room_anchor.parentNode.insertBefore(room_container, room_anchor.nextSibling);
 } else {
-outbox_container.parentNode.appendChild(room_container);
+room_anchor.parentNode.appendChild(room_container);
 }
 } else {
 dm_fieldset.appendChild(room_container);
