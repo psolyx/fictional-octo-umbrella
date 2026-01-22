@@ -51,6 +51,7 @@ let transcript_textarea = null;
 let transcript_status_line = null;
 let last_imported_transcript = null;
 let last_imported_digest_note = 'digest missing';
+let last_imported_coexist_bundle = null;
 let outbox_welcome_textarea = null;
 let outbox_commit_textarea = null;
 let outbox_app_textarea = null;
@@ -123,6 +124,10 @@ let room_phase5_proof_timeline = null;
 let room_phase5_proof_report = null;
 let coexist_phase5_proof_run_btn = null;
 let coexist_phase5_proof_cli_input = null;
+let coexist_phase5_bundle_file_input = null;
+let coexist_phase5_bundle_import_btn = null;
+let coexist_phase5_bundle_status_line = null;
+let coexist_phase5_bundle_auto_run_input = null;
 let coexist_phase5_proof_auto_reply_input = null;
 let coexist_phase5_proof_reply_input = null;
 let coexist_phase5_proof_timeline = null;
@@ -1635,6 +1640,29 @@ source_note,
 };
 };
 
+const build_phase5_bundle_cli_block = (bundle_section) => ({
+conv_id: bundle_section.transcript.conv_id,
+});
+
+const resolve_phase5_bundle_inputs = (bundle_section) => {
+if (!bundle_section || !bundle_section.transcript) {
+return { ok: false, error: 'bundle transcript missing' };
+}
+const conv_id = normalize_conv_id(bundle_section.transcript.conv_id);
+if (!conv_id || conv_id === '(none)') {
+return { ok: false, error: 'bundle conv_id missing' };
+}
+expected_plaintext = bundle_section.expected_plaintext || '';
+set_expected_plaintext_input();
+return {
+ok: true,
+conv_id,
+transcript: bundle_section.transcript,
+cli_block: null,
+source_note: 'coexist bundle',
+};
+};
+
 const resolve_phase5_expected_plaintext = (cli_block) => {
 if (cli_block && cli_block.expected_plaintext !== undefined) {
 return cli_block.expected_plaintext;
@@ -2130,7 +2158,19 @@ const resolved_blocks = resolve_coexist_cli_blocks(block_text);
 const has_cli_blocks = resolved_blocks.ok && resolved_blocks.room_block;
 let dm_block = null;
 let room_block = null;
-if (has_cli_blocks) {
+const coexist_bundle = last_imported_coexist_bundle;
+if (coexist_bundle) {
+const dm_conv_id = coexist_bundle.dm.transcript.conv_id;
+const room_conv_id_value = coexist_bundle.room.transcript.conv_id;
+set_coexist_step(
+'parse',
+'ok',
+`bundle mode (dm conv_id=${dm_conv_id}, room conv_id=${room_conv_id_value})`
+);
+set_coexist_step('subscribe_wait', 'ok', 'skipped (bundle mode)');
+dm_block = build_phase5_bundle_cli_block(coexist_bundle.dm);
+room_block = build_phase5_bundle_cli_block(coexist_bundle.room);
+} else if (has_cli_blocks) {
 set_coexist_step('parse', 'ok', 'cli blocks ready');
 set_coexist_step('subscribe_wait', 'ok', 'skipped (cli mode)');
 dm_block = resolved_blocks.dm_block;
@@ -2183,14 +2223,14 @@ dm_block = dm_wait ? build_phase5_cli_block_from_envs(dm_conv_id, dm_wait.envs) 
 }
 const run_block = async (label, cli_block, options) => run_phase5_proof_wizard({
 status_prefix: `coexist ${label}`,
-resolve_inputs: () => resolve_phase5_inputs({
+resolve_inputs: options.resolve_inputs || (() => resolve_phase5_inputs({
 conv_id_resolver: () => normalize_conv_id(cli_block ? cli_block.conv_id : ''),
 set_status_fn: options.set_status_fn,
 status_prefix: `coexist ${label}`,
 allow_imported_any: false,
 cli_block_override: cli_block,
 allow_cli_block_input: false,
-}),
+})),
 set_status_fn: options.set_status_fn,
 timeline_container: null,
 report_output: null,
@@ -2221,6 +2261,7 @@ set_incoming_env_input(env_b64);
 set_decrypt_output: (_msg_id, plaintext) => {
 set_decrypted_output(plaintext);
 },
+resolve_inputs: coexist_bundle ? () => resolve_phase5_bundle_inputs(coexist_bundle.dm) : null,
 });
 const dm_result = compute_phase5_result_label(dm_report);
 set_coexist_step('dm', dm_result === 'PASS' ? 'ok' : 'fail', `result ${dm_result}`);
@@ -2236,6 +2277,7 @@ room_welcome_env_input.value = env_b64;
 }
 },
 set_decrypt_output: set_room_decrypt_output,
+resolve_inputs: coexist_bundle ? () => resolve_phase5_bundle_inputs(coexist_bundle.room) : null,
 });
 const dm_result = dm_report ? compute_phase5_result_label(dm_report) : 'SKIP';
 const room_result = room_report ? compute_phase5_result_label(room_report) : 'FAIL';
@@ -3578,6 +3620,60 @@ digest_sha256_b64: transcript.digest_sha256_b64,
 };
 };
 
+const parse_coexist_bundle_json = (payload_text) => {
+if (!payload_text || !payload_text.trim()) {
+return { ok: false, error: 'bundle input is empty' };
+}
+try {
+const parsed = JSON.parse(payload_text);
+return { ok: true, bundle: parsed };
+} catch (error) {
+return { ok: false, error: 'invalid bundle json' };
+}
+};
+
+const validate_coexist_bundle = (bundle) => {
+if (!bundle || typeof bundle !== 'object') {
+return { ok: false, error: 'bundle must be an object' };
+}
+if (bundle.schema_version !== 'phase5_coexist_bundle_v1') {
+return { ok: false, error: 'unsupported bundle schema_version' };
+}
+const dm_section = bundle.dm && typeof bundle.dm === 'object' ? bundle.dm : null;
+const room_section = bundle.room && typeof bundle.room === 'object' ? bundle.room : null;
+if (!dm_section || !room_section) {
+return { ok: false, error: 'bundle must include dm and room sections' };
+}
+if (typeof dm_section.expected_plaintext !== 'string') {
+return { ok: false, error: 'dm expected_plaintext must be a string' };
+}
+if (typeof room_section.expected_plaintext !== 'string') {
+return { ok: false, error: 'room expected_plaintext must be a string' };
+}
+const dm_validated = validate_transcript(dm_section.transcript);
+if (!dm_validated.ok) {
+return { ok: false, error: `dm transcript invalid: ${dm_validated.error}` };
+}
+const room_validated = validate_transcript(room_section.transcript);
+if (!room_validated.ok) {
+return { ok: false, error: `room transcript invalid: ${room_validated.error}` };
+}
+return {
+ok: true,
+bundle: {
+schema_version: 'phase5_coexist_bundle_v1',
+dm: {
+expected_plaintext: dm_section.expected_plaintext,
+transcript: dm_validated.transcript,
+},
+room: {
+expected_plaintext: room_section.expected_plaintext,
+transcript: room_validated.transcript,
+},
+},
+};
+};
+
 const extract_transcript_envs = (events) => {
 let welcome_env_b64 = '';
 let welcome_seq = null;
@@ -3755,6 +3851,56 @@ const expected_short = truncate_text(expected, 120);
 const actual_short = truncate_text(actual, 120);
 set_status('verify failed');
 log_output(`verify failed: expected="${expected_short}" actual="${actual_short}"`);
+};
+
+const set_coexist_bundle_status = (message) => {
+if (!coexist_phase5_bundle_status_line) {
+return;
+}
+coexist_phase5_bundle_status_line.textContent = message;
+};
+
+const handle_import_coexist_bundle = async () => {
+const file = coexist_phase5_bundle_file_input && coexist_phase5_bundle_file_input.files
+? coexist_phase5_bundle_file_input.files[0]
+: null;
+if (!file) {
+set_coexist_bundle_status('no bundle file selected');
+set_status('error');
+return;
+}
+let bundle_text = '';
+try {
+bundle_text = await file.text();
+} catch (error) {
+set_coexist_bundle_status('failed reading bundle file');
+set_status('error');
+return;
+}
+const parsed = parse_coexist_bundle_json(bundle_text);
+if (!parsed.ok) {
+set_coexist_bundle_status(parsed.error);
+set_status('error');
+last_imported_coexist_bundle = null;
+return;
+}
+const validated = validate_coexist_bundle(parsed.bundle);
+if (!validated.ok) {
+set_coexist_bundle_status(validated.error);
+set_status('error');
+last_imported_coexist_bundle = null;
+return;
+}
+last_imported_coexist_bundle = validated.bundle;
+const dm_conv_id = validated.bundle.dm.transcript.conv_id;
+const room_conv_id_value = validated.bundle.room.transcript.conv_id;
+set_coexist_bundle_status(
+`coexist bundle imported (dm conv_id=${dm_conv_id}, room conv_id=${room_conv_id_value})`
+);
+set_status('coexist bundle imported');
+if (coexist_phase5_bundle_auto_run_input && coexist_phase5_bundle_auto_run_input.checked) {
+void run_coexist_phase5_proof_wizard();
+}
 };
 
 const handle_import_transcript = async () => {
@@ -4384,6 +4530,36 @@ coexist_phase5_proof_auto_reply_input.type = 'checkbox';
 coexist_phase5_auto_reply_label.appendChild(coexist_phase5_proof_auto_reply_input);
 coexist_phase5_controls.appendChild(coexist_phase5_auto_reply_label);
 coexist_phase5_panel.appendChild(coexist_phase5_controls);
+
+const coexist_bundle_label = document.createElement('label');
+coexist_bundle_label.textContent = 'Coexist bundle JSON';
+coexist_phase5_bundle_file_input = document.createElement('input');
+coexist_phase5_bundle_file_input.type = 'file';
+coexist_phase5_bundle_file_input.accept = 'application/json';
+coexist_bundle_label.appendChild(coexist_phase5_bundle_file_input);
+coexist_phase5_panel.appendChild(coexist_bundle_label);
+
+const coexist_bundle_controls = document.createElement('div');
+coexist_bundle_controls.className = 'button-row';
+coexist_phase5_bundle_import_btn = document.createElement('button');
+coexist_phase5_bundle_import_btn.type = 'button';
+coexist_phase5_bundle_import_btn.textContent = 'Import bundle';
+coexist_phase5_bundle_import_btn.addEventListener('click', () => {
+void handle_import_coexist_bundle();
+});
+coexist_bundle_controls.appendChild(coexist_phase5_bundle_import_btn);
+const coexist_bundle_auto_run_label = document.createElement('label');
+coexist_bundle_auto_run_label.textContent = 'Auto-run after import';
+coexist_phase5_bundle_auto_run_input = document.createElement('input');
+coexist_phase5_bundle_auto_run_input.type = 'checkbox';
+coexist_bundle_auto_run_label.appendChild(coexist_phase5_bundle_auto_run_input);
+coexist_bundle_controls.appendChild(coexist_bundle_auto_run_label);
+coexist_phase5_panel.appendChild(coexist_bundle_controls);
+
+coexist_phase5_bundle_status_line = document.createElement('div');
+coexist_phase5_bundle_status_line.className = 'dm_room_status';
+coexist_phase5_bundle_status_line.textContent = 'coexist bundle: idle';
+coexist_phase5_panel.appendChild(coexist_phase5_bundle_status_line);
 
 const coexist_phase5_cli_label = document.createElement('label');
 coexist_phase5_cli_label.textContent = 'Paste coexist CLI output';

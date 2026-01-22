@@ -289,6 +289,20 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     os.replace(tmp_path, path)
 
 
+def _load_json_payload(path: Path) -> dict[str, object]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Missing JSON file: {path}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON in {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected JSON object in {path}")
+    return payload
+
+
 def _save_pending_commits(path: Path, pending: dict[int, str]) -> None:
     if not pending:
         if path.exists():
@@ -1077,6 +1091,10 @@ def build_parser() -> argparse.ArgumentParser:
     gw_phase5_coexist_proof.add_argument(
         "--room-transcript-out",
         help="Write the room transcript JSON to this path",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--coexist-bundle-out",
+        help="Write the combined coexist bundle JSON to this path",
     )
     gw_phase5_coexist_proof.add_argument(
         "--print-web-cli-block",
@@ -2059,6 +2077,9 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
     room_transcript_path = (
         Path(args.room_transcript_out) if args.room_transcript_out else temp_root / "phase5_room_transcript.json"
     )
+    coexist_bundle_path = (
+        Path(args.coexist_bundle_out) if args.coexist_bundle_out else temp_root / "phase5_coexist_bundle_v1.json"
+    )
 
     gateway_process = None
     web_process = None
@@ -2150,6 +2171,23 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             print_web_cli_block=args.print_web_cli_block,
             web_cli_header="Room Web CLI block:" if args.print_web_cli_block else None,
         )
+
+        dm_transcript_payload = _load_json_payload(dm_transcript_path)
+        room_transcript_payload = _load_json_payload(room_transcript_path)
+        coexist_bundle = {
+            "schema_version": "phase5_coexist_bundle_v1",
+            "dm": {
+                "expected_plaintext": args.dm_plaintext,
+                "transcript": dm_transcript_payload,
+            },
+            "room": {
+                "expected_plaintext": args.room_plaintext,
+                "transcript": room_transcript_payload,
+            },
+        }
+        _atomic_write_json(coexist_bundle_path, coexist_bundle)
+        sys.stdout.write(f"Coexist bundle written to: {coexist_bundle_path}\n")
+        sys.stdout.write("In the web UI: Phase 5 Coexist Proof → Import bundle → Run\n")
 
         sys.stdout.write("Phase 5 co-existence report:\n")
         dm_ok = _emit_phase5_coexist_report(
