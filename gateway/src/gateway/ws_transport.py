@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 from email.utils import formatdate
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, List, Tuple, TypedDict, Union
 
 _aiohttp_spec = importlib.util.find_spec("aiohttp")
 if _aiohttp_spec is not None:  # pragma: no cover - exercised in CI with deps
@@ -29,6 +29,12 @@ from .sqlite_sessions import Session, SQLiteSessionStore, _now_ms
 
 
 _KEYPACKAGE_FETCH_LIMIT_PER_MIN = 60
+
+
+class WsConfig(TypedDict):
+    ping_interval_s: int
+    ping_miss_limit: int
+    max_msg_size: int
 
 
 class SessionStore:
@@ -130,6 +136,14 @@ class Runtime:
         self.social = social
 
 
+if hasattr(web, "AppKey"):
+    RUNTIME_KEY: web.AppKey[Runtime] = web.AppKey("runtime", Runtime)
+    WS_CONFIG_KEY: web.AppKey[WsConfig] = web.AppKey("ws_config", WsConfig)
+else:  # pragma: no cover - aiohttp stub fallback
+    RUNTIME_KEY = "runtime"
+    WS_CONFIG_KEY = "ws_config"
+
+
 async def handle_health(_: web.Request) -> web.Response:
     return web.Response(text="ok")
 
@@ -177,6 +191,27 @@ def _with_cache(response: web.Response, *, etag: str | None, last_modified_ms: i
     return response
 
 
+class SSEWriter:
+    def __init__(self, response: web.StreamResponse, on_disconnect: Callable[[], None]) -> None:
+        self._response = response
+        self._on_disconnect = on_disconnect
+
+    async def send_event(self, event_type: str, data: str) -> bool:
+        frame = f"event: {event_type}\n" f"data: {data}\n\n"
+        return await self._write(frame.encode("utf-8"))
+
+    async def send_ping(self) -> bool:
+        return await self._write(b": ping\n\n")
+
+    async def _write(self, payload: bytes) -> bool:
+        try:
+            await self._response.write(payload)
+            return True
+        except ConnectionResetError:
+            self._on_disconnect()
+            return False
+
+
 def _derive_user_id(auth_token: str) -> str:
     if auth_token.startswith("Bearer "):
         return auth_token[len("Bearer ") :].strip()
@@ -184,7 +219,7 @@ def _derive_user_id(auth_token: str) -> str:
 
 
 def _authenticate_request(request: web.Request) -> Session | None:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
@@ -276,7 +311,7 @@ def _process_conv_ack(runtime: Runtime, session: Session, body: dict[str, Any]) 
 
 
 async def handle_keypackage_publish(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -304,7 +339,7 @@ async def handle_keypackage_publish(request: web.Request) -> web.Response:
 
 
 async def handle_keypackage_fetch(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -332,7 +367,7 @@ async def handle_keypackage_fetch(request: web.Request) -> web.Response:
 
 
 async def handle_keypackage_rotate(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -368,7 +403,7 @@ def _no_store_response(data: dict[str, Any], status: int = 200) -> web.Response:
 
 
 async def handle_session_start_http(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     try:
         body = await request.json()
     except Exception:
@@ -386,7 +421,7 @@ async def handle_session_start_http(request: web.Request) -> web.Response:
 
 
 async def handle_session_resume_http(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     try:
         body = await request.json()
     except Exception:
@@ -407,7 +442,7 @@ async def handle_session_resume_http(request: web.Request) -> web.Response:
 
 
 async def handle_presence_lease(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -431,7 +466,7 @@ async def handle_presence_lease(request: web.Request) -> web.Response:
 
 
 async def handle_presence_renew(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -457,7 +492,7 @@ async def handle_presence_renew(request: web.Request) -> web.Response:
 
 
 async def handle_presence_watch(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -479,7 +514,7 @@ async def handle_presence_watch(request: web.Request) -> web.Response:
 
 
 async def handle_presence_unwatch(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -499,7 +534,7 @@ async def handle_presence_unwatch(request: web.Request) -> web.Response:
 
 
 async def handle_presence_block(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -521,7 +556,7 @@ async def handle_presence_block(request: web.Request) -> web.Response:
 
 
 async def handle_presence_unblock(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _with_no_store(_unauthorized())
@@ -541,7 +576,7 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
 
 
 async def handle_inbox(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -578,7 +613,7 @@ async def handle_inbox(request: web.Request) -> web.Response:
 
 
 async def handle_sse(request: web.Request) -> web.StreamResponse:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -655,6 +690,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
         buffering_enqueue(event, subscription)
 
     subscription = runtime.hub.subscribe(session.device_id, conv_id, subscription_callback)
+    sse_writer = SSEWriter(response, lambda: stop_subscription(subscription))
 
     events = runtime.log.list_from(conv_id, from_seq)
     for event in events:
@@ -670,11 +706,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
                 await asyncio.sleep(15)
                 if stop_event.is_set():
                     break
-                try:
-                    await response.write(b": ping\n\n")
-                    await response.drain()
-                except ConnectionResetError:
-                    stop_subscription(subscription)
+                if not await sse_writer.send_ping():
                     break
         except asyncio.CancelledError:
             return
@@ -707,12 +739,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
                 },
             }
             data = json.dumps(payload)
-            try:
-                await response.write(b"event: conv.event\n")
-                await response.write(f"data: {data}\n\n".encode("utf-8"))
-                await response.drain()
-            except ConnectionResetError:
-                stop_subscription(subscription)
+            if not await sse_writer.send_event("conv.event", data):
                 break
     finally:
         stop_event.set()
@@ -738,7 +765,7 @@ async def _parse_room_members(body: dict[str, Any]) -> list[str] | None:
 
 
 async def handle_room_create(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -765,7 +792,7 @@ async def handle_room_create(request: web.Request) -> web.Response:
 
 
 async def handle_room_invite(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -794,7 +821,7 @@ async def handle_room_invite(request: web.Request) -> web.Response:
 
 
 async def handle_room_remove(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -823,7 +850,7 @@ async def handle_room_remove(request: web.Request) -> web.Response:
 
 
 async def handle_room_promote(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -848,7 +875,7 @@ async def handle_room_promote(request: web.Request) -> web.Response:
 
 
 async def handle_room_demote(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -873,7 +900,7 @@ async def handle_room_demote(request: web.Request) -> web.Response:
 
 
 async def handle_social_publish(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
@@ -922,7 +949,7 @@ async def handle_social_publish(request: web.Request) -> web.Response:
 
 
 async def handle_social_events(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     user_id = request.query.get("user_id")
     if not user_id:
         return _invalid_request("user_id required")
@@ -953,7 +980,7 @@ async def handle_social_events(request: web.Request) -> web.Response:
 
 
 async def handle_gateway_resolve(request: web.Request) -> web.Response:
-    runtime: Runtime = request.app["runtime"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
     gateway_id = request.query.get("gateway_id")
     if not gateway_id:
         return _invalid_request("gateway_id required")
@@ -1024,8 +1051,8 @@ def create_app(
         social=social,
     )
     app = web.Application()
-    app["runtime"] = runtime
-    app["ws_config"] = {
+    app[RUNTIME_KEY] = runtime
+    app[WS_CONFIG_KEY] = {
         "ping_interval_s": ping_interval_s,
         "ping_miss_limit": ping_miss_limit,
         "max_msg_size": max_msg_size,
@@ -1076,8 +1103,8 @@ def _error_frame(code: str, message: str, *, request_id: str | None = None) -> d
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
-    runtime: Runtime = request.app["runtime"]
-    ws_config: dict[str, Any] = request.app["ws_config"]
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    ws_config: WsConfig = request.app[WS_CONFIG_KEY]
 
     ws = web.WebSocketResponse(max_msg_size=ws_config["max_msg_size"])
     await ws.prepare(request)

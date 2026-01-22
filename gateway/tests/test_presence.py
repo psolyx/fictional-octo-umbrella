@@ -19,7 +19,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
 
 from gateway.presence import Presence, PresenceConfig
 from ws_receive_util import assert_no_app_messages, recv_json_until
-from gateway.ws_transport import create_app
+from gateway.ws_transport import RUNTIME_KEY, create_app
 
 
 class FakeClock:
@@ -56,7 +56,7 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         return ws
 
     async def _create_session(self, user_id: str, device_id: str):
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
         return runtime.sessions.create(user_id, device_id)
 
     async def test_lease_clamps_and_sets_online(self):

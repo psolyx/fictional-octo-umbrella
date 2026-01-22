@@ -18,7 +18,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
         f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway HTTP tests, found {_installed_aiohttp}"
     )
 
-from gateway.ws_transport import create_app
+from gateway.ws_transport import RUNTIME_KEY, create_app
 
 
 class FakeClock:
@@ -67,7 +67,7 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_persistence_across_restart(self):
         app1 = await self._start_server()
-        runtime1 = app1["runtime"]
+        runtime1 = app1[RUNTIME_KEY]
         user_id = "user-sql"
         device_id = "device-sql"
         session = runtime1.sessions.create(user_id, device_id)
@@ -113,7 +113,7 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_across_devices_sqlite(self):
         app = await self._start_server()
-        runtime = app["runtime"]
+        runtime = app[RUNTIME_KEY]
         user_id = "user-sql"
         device_one = runtime.sessions.create(user_id, "device-1")
         device_two = runtime.sessions.create(user_id, "device-2")
@@ -140,7 +140,7 @@ class KeyPackageSQLiteTests(unittest.IsolatedAsyncioTestCase):
         app = await self._start_server(
             keypackage_fetch_limit_per_min=2, keypackage_now_func=clock.now
         )
-        runtime = app["runtime"]
+        runtime = app[RUNTIME_KEY]
         user_id = "user-sql"
         device_session = runtime.sessions.create(user_id, "device-1")
         headers = {"Authorization": f"Bearer {device_session.session_token}"}

@@ -19,7 +19,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
         f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway WS tests, found {_installed_aiohttp}"
     )
 
-from gateway.ws_transport import SessionStore, _process_conv_send, create_app
+from gateway.ws_transport import RUNTIME_KEY, SessionStore, _process_conv_send, create_app
 
 
 class ResumeTokenRotationTests(unittest.TestCase):
@@ -170,7 +170,7 @@ class ResumeChaosTests(unittest.IsolatedAsyncioTestCase):
 class ResumeStormInvariantTests(unittest.TestCase):
     def test_resume_storm_preserves_order_and_idempotency(self):
         app = create_app(ping_interval_s=3600, start_presence_sweeper=False)
-        runtime = app["runtime"]
+        runtime = app[RUNTIME_KEY]
 
         user_id = "user"
         device_id = "device"
