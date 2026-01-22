@@ -611,6 +611,20 @@ env_b64,
 );
 };
 
+const dispatch_gateway_subscribe = (conv_id, from_seq) => {
+const detail = {
+conv_id,
+};
+if (typeof from_seq === 'number' && !Number.isNaN(from_seq)) {
+detail.from_seq = from_seq;
+}
+window.dispatchEvent(
+new CustomEvent('gateway.subscribe', {
+detail,
+})
+);
+};
+
 const dispatch_outbox_update = () => {
 window.dispatchEvent(
 new CustomEvent('dm.outbox.updated', {
@@ -1364,6 +1378,12 @@ status: 'pending',
 details: 'pending',
 },
 {
+key: 'subscribe_wait',
+label: 'Subscribe / wait',
+status: 'pending',
+details: 'pending',
+},
+{
 key: 'dm',
 label: 'Run DM proof',
 status: 'pending',
@@ -1620,6 +1640,58 @@ if (cli_block && cli_block.expected_plaintext !== undefined) {
 return cli_block.expected_plaintext;
 }
 return expected_plaintext || '';
+};
+
+const build_phase5_cli_block_from_envs = (conv_id, envs) => ({
+conv_id,
+welcome_env_b64: envs.welcome_env_b64 || '',
+commit_env_b64: envs.commit_env_b64 || '',
+app_env_b64: envs.app_env_b64 || '',
+expected_plaintext: '',
+});
+
+const extract_phase5_envs_from_records = (conv_id, records) => {
+const transcript = build_transcript_from_records(conv_id, records);
+const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
+const latest_welcome = pick_latest_env(events, 1);
+const latest_commit = pick_latest_env(events, 2);
+const latest_app = pick_latest_env(events, 3);
+return {
+transcript,
+events,
+welcome_env_b64: latest_welcome ? latest_welcome.env : '',
+commit_env_b64: latest_commit ? latest_commit.env : '',
+app_env_b64: latest_app ? latest_app.env : '',
+};
+};
+
+const wait_for_transcript_envs = async (conv_id, options) => {
+const timeout_ms = Number.isInteger(options.timeout_ms) ? options.timeout_ms : 8000;
+const poll_interval_ms = Number.isInteger(options.poll_interval_ms) ? options.poll_interval_ms : 400;
+const start_ms = Date.now();
+let last_error = '';
+while (Date.now() - start_ms < timeout_ms) {
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+last_error = error && error.message ? error.message : String(error);
+}
+if (records.length) {
+const envs = extract_phase5_envs_from_records(conv_id, records);
+if (envs.welcome_env_b64 && envs.app_env_b64) {
+return { ok: true, envs };
+}
+}
+await new Promise((resolve) => {
+setTimeout(resolve, poll_interval_ms);
+});
+}
+const error_suffix = last_error ? ` (last error: ${last_error})` : '';
+return {
+ok: false,
+error: `timeout waiting for transcript events for conv_id ${conv_id}${error_suffix}`,
+};
 };
 
 const run_phase5_proof_wizard = async (options) => {
@@ -2051,24 +2123,64 @@ if (coexist_phase5_proof_run_btn) {
 coexist_phase5_proof_run_btn.disabled = false;
 }
 };
-set_coexist_step('parse', 'running', 'parsing CLI blocks');
+set_coexist_step('parse', 'running', 'checking CLI blocks');
 const block_text = coexist_phase5_proof_cli_input ? coexist_phase5_proof_cli_input.value : '';
+const trimmed_block_text = block_text ? block_text.trim() : '';
 const resolved_blocks = resolve_coexist_cli_blocks(block_text);
-if (!resolved_blocks.ok) {
-set_room_status(`coexist proof: ${resolved_blocks.error}`);
-set_coexist_step('parse', 'fail', resolved_blocks.error);
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: resolved_blocks.error });
-return;
-}
-if (!resolved_blocks.room_block) {
-set_room_status('coexist proof: missing room block');
-set_coexist_step('parse', 'fail', 'missing room block');
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: 'missing room block' });
-return;
-}
+const has_cli_blocks = resolved_blocks.ok && resolved_blocks.room_block;
+let dm_block = null;
+let room_block = null;
+if (has_cli_blocks) {
 set_coexist_step('parse', 'ok', 'cli blocks ready');
+set_coexist_step('subscribe_wait', 'ok', 'skipped (cli mode)');
+dm_block = resolved_blocks.dm_block;
+room_block = resolved_blocks.room_block;
+} else {
+const fallback_reason = trimmed_block_text
+? resolved_blocks.error || 'invalid cli block'
+: 'no cli block provided';
+set_coexist_step('parse', 'ok', `using transcript mode (${fallback_reason})`);
+const dm_conv_id = get_active_conv_id_for_send();
+const room_conv_id_value = get_room_conv_id_for_send();
+if (!room_conv_id_value) {
+set_room_status('coexist proof: room conv_id required');
+set_coexist_step('subscribe_wait', 'fail', 'room conv_id required');
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: 'room conv_id required' });
+return;
+}
+set_coexist_step('subscribe_wait', 'running', 'subscribing and waiting for transcript events');
+dispatch_gateway_subscribe(room_conv_id_value);
+if (dm_conv_id) {
+dispatch_gateway_subscribe(dm_conv_id);
+}
+const wait_options = {
+timeout_ms: 8000,
+poll_interval_ms: 400,
+};
+const room_wait = await wait_for_transcript_envs(room_conv_id_value, wait_options);
+if (!room_wait.ok) {
+set_room_status(`coexist proof: ${room_wait.error}`);
+set_coexist_step('subscribe_wait', 'fail', room_wait.error);
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: room_wait.error });
+return;
+}
+let dm_wait = null;
+if (dm_conv_id) {
+dm_wait = await wait_for_transcript_envs(dm_conv_id, wait_options);
+if (!dm_wait.ok) {
+set_status(`coexist proof: ${dm_wait.error}`);
+set_coexist_step('subscribe_wait', 'fail', dm_wait.error);
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: dm_wait.error });
+return;
+}
+}
+set_coexist_step('subscribe_wait', 'ok', 'transcript events ready');
+room_block = build_phase5_cli_block_from_envs(room_conv_id_value, room_wait.envs);
+dm_block = dm_wait ? build_phase5_cli_block_from_envs(dm_conv_id, dm_wait.envs) : null;
+}
 const run_block = async (label, cli_block, options) => run_phase5_proof_wizard({
 status_prefix: `coexist ${label}`,
 resolve_inputs: () => resolve_phase5_inputs({
@@ -2098,10 +2210,10 @@ try {
 set_coexist_step(
 'dm',
 'running',
-resolved_blocks.dm_block ? 'running dm proof' : 'skipped (room-only)'
+dm_block ? 'running dm proof' : 'skipped (room-only)'
 );
-if (resolved_blocks.dm_block) {
-dm_report = await run_block('dm', resolved_blocks.dm_block, {
+if (dm_block) {
+dm_report = await run_block('dm', dm_block, {
 set_status_fn: set_status,
 set_welcome_env_input: (env_b64) => {
 set_incoming_env_input(env_b64);
@@ -2116,7 +2228,7 @@ set_coexist_step('dm', dm_result === 'PASS' ? 'ok' : 'fail', `result ${dm_result
 set_coexist_step('dm', 'ok', 'skipped (room-only)');
 }
 set_coexist_step('room', 'running', 'running room proof');
-room_report = await run_block('room', resolved_blocks.room_block, {
+room_report = await run_block('room', room_block, {
 set_status_fn: set_room_status,
 set_welcome_env_input: (env_b64) => {
 if (room_welcome_env_input) {

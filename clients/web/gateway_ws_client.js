@@ -1890,6 +1890,32 @@
     );
   };
 
+  const handle_gateway_subscribe = (event) => {
+    const detail = event && event.detail ? event.detail : null;
+    if (!detail || typeof detail !== 'object') {
+      return;
+    }
+    const conv_id = normalize_conv_id(detail.conv_id);
+    if (!conv_id) {
+      append_log('gateway.subscribe missing conv_id');
+      return;
+    }
+    maybe_dispatch_conv_selected(conv_id);
+    const from_seq_value = detail.from_seq;
+    if (typeof from_seq_value === 'number' && !Number.isNaN(from_seq_value)) {
+      last_from_seq_by_conv_id[conv_id] = from_seq_value;
+      client.subscribe(conv_id, from_seq_value);
+      return;
+    }
+    read_cursor(conv_id)
+      .then((stored_next_seq) => {
+        const resolved_from_seq = stored_next_seq ?? 1;
+        last_from_seq_by_conv_id[conv_id] = resolved_from_seq;
+        client.subscribe(conv_id, resolved_from_seq);
+      })
+      .catch((err) => append_log(`gateway.subscribe cursor read failed: ${err.message}`));
+  };
+
   subscribe_btn.addEventListener('click', async () => {
     const conv_id = conv_id_input.value.trim();
     maybe_dispatch_conv_selected(conv_id);
@@ -1938,6 +1964,8 @@
   if (initial_conv_id) {
     maybe_dispatch_conv_selected(initial_conv_id);
   }
+
+  window.addEventListener('gateway.subscribe', handle_gateway_subscribe);
 
   window.addEventListener('dm.outbox.updated', (event) => {
     const detail = event && event.detail ? event.detail : null;
