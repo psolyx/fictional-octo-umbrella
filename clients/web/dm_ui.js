@@ -125,6 +125,7 @@ let coexist_phase5_proof_run_btn = null;
 let coexist_phase5_proof_cli_input = null;
 let coexist_phase5_proof_auto_reply_input = null;
 let coexist_phase5_proof_reply_input = null;
+let coexist_phase5_proof_timeline = null;
 let coexist_phase5_proof_report = null;
 let dm_phase5_proof_run_btn = null;
 let dm_phase5_proof_auto_reply_input = null;
@@ -1355,6 +1356,33 @@ details: 'pending',
 },
 ]);
 
+const build_phase5_coexist_steps = () => ([
+{
+key: 'parse',
+label: 'Parse CLI blocks',
+status: 'pending',
+details: 'pending',
+},
+{
+key: 'dm',
+label: 'Run DM proof',
+status: 'pending',
+details: 'pending',
+},
+{
+key: 'room',
+label: 'Run room proof',
+status: 'pending',
+details: 'pending',
+},
+{
+key: 'report',
+label: 'Combined report',
+status: 'pending',
+details: 'pending',
+},
+]);
+
 const render_phase5_timeline = (steps, timeline_container) => {
 if (timeline_container === null) {
 return;
@@ -1460,19 +1488,61 @@ return 'FAIL';
 return 'PASS';
 };
 
+const format_phase5_coexist_section = (label, report, result_label) => {
+const conv_id = report && report.conv_id ? report.conv_id : '(none)';
+const digest = report && report.digest_status ? report.digest_status : 'digest missing';
+const welcome_seq =
+report && Number.isInteger(report.welcome_seq) ? report.welcome_seq : 'n/a';
+const handshake_seq =
+report && Number.isInteger(report.last_handshake_applied_seq)
+? report.last_handshake_applied_seq
+: 'n/a';
+const app_seq = report && Number.isInteger(report.app_seq) ? report.app_seq : 'n/a';
+const plaintext_or_error =
+report && report.error
+? `error: ${report.error}`
+: report && report.decrypted_plaintext
+? report.decrypted_plaintext
+: '(none)';
+const lines = [
+`${label}:`,
+`result: ${result_label}`,
+`conv_id: ${conv_id}`,
+`digest: ${digest}`,
+`welcome_seq: ${welcome_seq}`,
+`last_handshake_applied_seq: ${handshake_seq}`,
+`app_seq: ${app_seq}`,
+`plaintext_or_error: ${plaintext_or_error}`,
+`auto_reply_attempted: ${report && report.auto_reply_attempted ? 'yes' : 'no'}`,
+`duration_ms: ${report && Number.isInteger(report.duration_ms) ? report.duration_ms : 'n/a'}`,
+];
+return lines.join('\n');
+};
+
 const format_phase5_coexist_report = (summary) => {
-const dm_label = summary.dm_report
-? format_phase5_summary_line('DM', summary.dm_report, summary.dm_result)
-: 'DM: skipped (room-only)';
-const room_label = summary.room_report
-? format_phase5_summary_line('ROOM', summary.room_report, summary.room_result)
-: 'ROOM: missing';
+const dm_result = summary.dm_report ? summary.dm_result : 'SKIP';
+const room_result = summary.room_report ? summary.room_result : 'FAIL';
+const overall_result = summary.overall_result || 'FAIL';
 const lines = [
 'phase5 coexist proof report:',
-dm_label,
-room_label,
-`overall: ${summary.overall_result}`,
+`start_ms: ${Number.isInteger(summary.start_ms) ? summary.start_ms : 'n/a'}`,
+`end_ms: ${Number.isInteger(summary.end_ms) ? summary.end_ms : 'n/a'}`,
+`duration_ms: ${Number.isInteger(summary.duration_ms) ? summary.duration_ms : 'n/a'}`,
+`auto_reply_attempted: ${summary.auto_reply_attempted ? 'yes' : 'no'}`,
+`overall: ${overall_result}`,
+'',
+summary.dm_report
+? format_phase5_coexist_section('DM', summary.dm_report, dm_result)
+: 'DM: skipped (room-only)',
+'',
+summary.room_report
+? format_phase5_coexist_section('ROOM', summary.room_report, room_result)
+: 'ROOM: missing',
 ];
+if (summary.error) {
+lines.push('');
+lines.push(`error: ${summary.error}`);
+}
 return lines.join('\n');
 };
 
@@ -1944,50 +2014,79 @@ if (coexist_phase5_proof_run_btn) {
 coexist_phase5_proof_run_btn.disabled = true;
 }
 set_phase5_report_text('', coexist_phase5_proof_report);
+const coexist_start_ms = Date.now();
+const coexist_steps = build_phase5_coexist_steps();
+render_phase5_timeline(coexist_steps, coexist_phase5_proof_timeline);
+const set_coexist_step = (key, status, details) => {
+set_phase5_step_status(coexist_steps, key, status, details, coexist_phase5_proof_timeline);
+};
+const finalize_coexist = (summary) => {
+const end_ms = Date.now();
+const duration_ms = Number.isInteger(end_ms) && Number.isInteger(coexist_start_ms)
+? end_ms - coexist_start_ms
+: null;
+const resolved_summary = {
+start_ms: coexist_start_ms,
+end_ms,
+duration_ms,
+auto_reply_attempted: false,
+dm_report: null,
+room_report: null,
+dm_result: 'SKIP',
+room_result: 'FAIL',
+overall_result: 'FAIL',
+error: '',
+...summary,
+};
+resolved_summary.auto_reply_attempted = Boolean(
+(resolved_summary.dm_report && resolved_summary.dm_report.auto_reply_attempted) ||
+(resolved_summary.room_report && resolved_summary.room_report.auto_reply_attempted)
+);
+set_phase5_report_text(
+format_phase5_coexist_report(resolved_summary),
+coexist_phase5_proof_report
+);
+coexist_phase5_proof_in_flight = false;
+if (coexist_phase5_proof_run_btn) {
+coexist_phase5_proof_run_btn.disabled = false;
+}
+};
+set_coexist_step('parse', 'running', 'parsing CLI blocks');
 const block_text = coexist_phase5_proof_cli_input ? coexist_phase5_proof_cli_input.value : '';
 const resolved_blocks = resolve_coexist_cli_blocks(block_text);
 if (!resolved_blocks.ok) {
 set_room_status(`coexist proof: ${resolved_blocks.error}`);
-set_phase5_report_text(
-`phase5 coexist proof report:\nerror: ${resolved_blocks.error}`,
-coexist_phase5_proof_report
-);
-coexist_phase5_proof_in_flight = false;
-if (coexist_phase5_proof_run_btn) {
-coexist_phase5_proof_run_btn.disabled = false;
-}
+set_coexist_step('parse', 'fail', resolved_blocks.error);
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: resolved_blocks.error });
 return;
 }
 if (!resolved_blocks.room_block) {
 set_room_status('coexist proof: missing room block');
-set_phase5_report_text(
-'phase5 coexist proof report:\nerror: missing room block',
-coexist_phase5_proof_report
-);
-coexist_phase5_proof_in_flight = false;
-if (coexist_phase5_proof_run_btn) {
-coexist_phase5_proof_run_btn.disabled = false;
-}
+set_coexist_step('parse', 'fail', 'missing room block');
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: 'missing room block' });
 return;
 }
-const run_block = async (label, cli_block) => run_phase5_proof_wizard({
+set_coexist_step('parse', 'ok', 'cli blocks ready');
+const run_block = async (label, cli_block, options) => run_phase5_proof_wizard({
 status_prefix: `coexist ${label}`,
 resolve_inputs: () => resolve_phase5_inputs({
 conv_id_resolver: () => normalize_conv_id(cli_block ? cli_block.conv_id : ''),
-set_status_fn: set_room_status,
+set_status_fn: options.set_status_fn,
 status_prefix: `coexist ${label}`,
 allow_imported_any: false,
 cli_block_override: cli_block,
 allow_cli_block_input: false,
 }),
-set_status_fn: set_room_status,
+set_status_fn: options.set_status_fn,
 timeline_container: null,
 report_output: null,
 run_btn: null,
 get_in_flight: () => false,
 set_in_flight: () => {},
-set_welcome_env_input: () => {},
-set_decrypt_output: () => {},
+set_welcome_env_input: options.set_welcome_env_input,
+set_decrypt_output: options.set_decrypt_output,
 auto_reply_input: coexist_phase5_proof_auto_reply_input,
 reply_input: coexist_phase5_proof_reply_input,
 handshake_context_label: `handshake (coexist ${label})`,
@@ -1996,31 +2095,57 @@ handshake_buffer_label: `handshake (coexist ${label} buffer)`,
 let dm_report = null;
 let room_report = null;
 try {
-if (resolved_blocks.dm_block && resolved_blocks.room_block) {
-dm_report = await run_block('dm', resolved_blocks.dm_block);
-room_report = await run_block('room', resolved_blocks.room_block);
+set_coexist_step(
+'dm',
+'running',
+resolved_blocks.dm_block ? 'running dm proof' : 'skipped (room-only)'
+);
+if (resolved_blocks.dm_block) {
+dm_report = await run_block('dm', resolved_blocks.dm_block, {
+set_status_fn: set_status,
+set_welcome_env_input: (env_b64) => {
+set_incoming_env_input(env_b64);
+},
+set_decrypt_output: (_msg_id, plaintext) => {
+set_decrypted_output(plaintext);
+},
+});
+const dm_result = compute_phase5_result_label(dm_report);
+set_coexist_step('dm', dm_result === 'PASS' ? 'ok' : 'fail', `result ${dm_result}`);
 } else {
-room_report = await run_block('room', resolved_blocks.room_block);
+set_coexist_step('dm', 'ok', 'skipped (room-only)');
 }
-} finally {
+set_coexist_step('room', 'running', 'running room proof');
+room_report = await run_block('room', resolved_blocks.room_block, {
+set_status_fn: set_room_status,
+set_welcome_env_input: (env_b64) => {
+if (room_welcome_env_input) {
+room_welcome_env_input.value = env_b64;
+}
+},
+set_decrypt_output: set_room_decrypt_output,
+});
 const dm_result = dm_report ? compute_phase5_result_label(dm_report) : 'SKIP';
 const room_result = room_report ? compute_phase5_result_label(room_report) : 'FAIL';
+set_coexist_step('room', room_result === 'PASS' ? 'ok' : 'fail', `result ${room_result}`);
 const overall_result =
 room_result === 'PASS' && (dm_report ? dm_result === 'PASS' : true) ? 'PASS' : 'FAIL';
-set_phase5_report_text(
-format_phase5_coexist_report({
+set_coexist_step('report', 'running', 'building combined report');
+set_coexist_step('report', 'ok', 'report ready');
+finalize_coexist({
 dm_report,
 room_report,
 dm_result,
 room_result,
 overall_result,
-}),
-coexist_phase5_proof_report
-);
-coexist_phase5_proof_in_flight = false;
-if (coexist_phase5_proof_run_btn) {
-coexist_phase5_proof_run_btn.disabled = false;
-}
+});
+} catch (error) {
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({
+dm_report,
+room_report,
+error: String(error),
+});
 }
 };
 
@@ -4135,7 +4260,7 @@ const coexist_phase5_controls = document.createElement('div');
 coexist_phase5_controls.className = 'button-row';
 coexist_phase5_proof_run_btn = document.createElement('button');
 coexist_phase5_proof_run_btn.type = 'button';
-coexist_phase5_proof_run_btn.textContent = 'Phase 5 Coexist Proof (DM + Room)';
+coexist_phase5_proof_run_btn.textContent = 'Run Coexist Proof (DM + Room)';
 coexist_phase5_proof_run_btn.addEventListener('click', () => {
 void run_coexist_phase5_proof_wizard();
 });
@@ -4149,7 +4274,7 @@ coexist_phase5_controls.appendChild(coexist_phase5_auto_reply_label);
 coexist_phase5_panel.appendChild(coexist_phase5_controls);
 
 const coexist_phase5_cli_label = document.createElement('label');
-coexist_phase5_cli_label.textContent = 'Coexist CLI paste';
+coexist_phase5_cli_label.textContent = 'Paste coexist CLI output';
 coexist_phase5_proof_cli_input = document.createElement('textarea');
 coexist_phase5_proof_cli_input.rows = 8;
 coexist_phase5_proof_cli_input.cols = 70;
@@ -4165,10 +4290,17 @@ coexist_phase5_proof_reply_input.value = 'phase5-coexist-peer-reply';
 coexist_phase5_reply_label.appendChild(coexist_phase5_proof_reply_input);
 coexist_phase5_panel.appendChild(coexist_phase5_reply_label);
 
+const coexist_phase5_timeline_label = document.createElement('div');
+coexist_phase5_timeline_label.textContent = 'Combined proof steps';
+coexist_phase5_panel.appendChild(coexist_phase5_timeline_label);
+coexist_phase5_proof_timeline = document.createElement('div');
+coexist_phase5_proof_timeline.className = 'dm_room_phase5_timeline';
+coexist_phase5_panel.appendChild(coexist_phase5_proof_timeline);
+
 const coexist_phase5_report_label = document.createElement('label');
-coexist_phase5_report_label.textContent = 'Coexist proof report';
+coexist_phase5_report_label.textContent = 'Combined proof report';
 coexist_phase5_proof_report = document.createElement('textarea');
-coexist_phase5_proof_report.rows = 8;
+coexist_phase5_proof_report.rows = 12;
 coexist_phase5_proof_report.cols = 70;
 coexist_phase5_proof_report.readOnly = true;
 coexist_phase5_report_label.appendChild(coexist_phase5_proof_report);
