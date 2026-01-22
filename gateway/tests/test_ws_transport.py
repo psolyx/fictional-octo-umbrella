@@ -26,7 +26,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
 
 from gateway import ws_transport as wst
 from ws_receive_util import assert_no_app_messages, recv_json_until
-from gateway.ws_transport import create_app
+from gateway.ws_transport import RUNTIME_KEY, create_app
 from mls_harness_util import HARNESS_DIR, ensure_harness_binary, make_harness_env, run_harness
 
 
@@ -259,7 +259,7 @@ class WsTransportTests(unittest.IsolatedAsyncioTestCase):
             await sub_ws.close()
 
     async def test_replay_events_flush_before_live_events(self):
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
 
         ws_sender, ready = await self._start_session()
         await self._create_room(ready["body"]["session_token"], "c1")

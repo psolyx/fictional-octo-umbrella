@@ -16,7 +16,7 @@ if _installed_aiohttp != EXPECTED_AIOHTTP_VERSION:
         f"Expected aiohttp=={EXPECTED_AIOHTTP_VERSION} for gateway HTTP tests, found {_installed_aiohttp}"
     )
 
-from gateway.ws_transport import create_app
+from gateway.ws_transport import RUNTIME_KEY, create_app
 
 
 class FakeClock:
@@ -37,7 +37,7 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         await self.server.start_server()
         self.client = TestClient(self.server)
         await self.client.start_server()
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
         self.user_id = "user-1"
         self.device_id = "device-1"
         session = runtime.sessions.create(self.user_id, self.device_id)
@@ -89,7 +89,7 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body_empty["user_home_gateway"], "gw_local")
 
     async def test_fetch_across_devices_for_user(self):
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
         second_session = runtime.sessions.create(self.user_id, "device-2")
         second_headers = {"Authorization": f"Bearer {second_session.session_token}"}
 
@@ -119,7 +119,7 @@ class KeyPackageHttpTests(unittest.IsolatedAsyncioTestCase):
             headers=self.headers,
         )
 
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
         second_session = runtime.sessions.create(self.user_id, "device-2")
         second_headers = {"Authorization": f"Bearer {second_session.session_token}"}
         await self.client.post(
@@ -168,7 +168,7 @@ class KeyPackageHttpRateLimitTests(unittest.IsolatedAsyncioTestCase):
         await self.server.start_server()
         self.client = TestClient(self.server)
         await self.client.start_server()
-        runtime = self.app["runtime"]
+        runtime = self.app[RUNTIME_KEY]
         self.user_id = "user-rl"
         self.device_id = "device-rl"
         session = runtime.sessions.create(self.user_id, self.device_id)
