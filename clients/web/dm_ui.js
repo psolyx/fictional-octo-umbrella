@@ -1472,6 +1472,11 @@ const lines = [
 'phase5 proof report:',
 `conv_id: ${report.conv_id || '(none)'}`,
 `digest: ${report.digest_status || 'digest missing'}`,
+`events_used: ${Number.isInteger(report.events_used) ? report.events_used : 'n/a'}`,
+`events_source: ${report.events_source || 'unknown'}`,
+`wait_last_seq_seen: ${
+Number.isInteger(report.wait_last_seq_seen) ? report.wait_last_seq_seen : 'n/a'
+}`,
 `welcome_seq: ${Number.isInteger(report.welcome_seq) ? report.welcome_seq : 'n/a'}`,
 `last_handshake_applied_seq: ${
 Number.isInteger(report.last_handshake_applied_seq) ? report.last_handshake_applied_seq : 'n/a'
@@ -1699,6 +1704,38 @@ app_env_b64: latest_app ? latest_app.env : '',
 };
 };
 
+const read_phase5_transcript_snapshot = async (conv_id) => {
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+return {
+ok: false,
+error: `transcript read failed for conv_id ${conv_id}`,
+transcript: null,
+events: [],
+envs: {
+welcome_env_b64: '',
+commit_env_b64: '',
+app_env_b64: '',
+},
+record_count: 0,
+};
+}
+const extracted = extract_phase5_envs_from_records(conv_id, records);
+return {
+ok: true,
+transcript: extracted.transcript,
+events: extracted.events || [],
+envs: {
+welcome_env_b64: extracted.welcome_env_b64 || '',
+commit_env_b64: extracted.commit_env_b64 || '',
+app_env_b64: extracted.app_env_b64 || '',
+},
+record_count: records.length,
+};
+};
+
 const count_phase5_envs_in_records = (records) => {
 const counts = {
 welcome: 0,
@@ -1818,7 +1855,7 @@ if (initial_result.ok) {
 return initial_result;
 }
 const initial_missing = initial_result.missing || [];
-if (initial_missing.includes('welcome')) {
+if (initial_missing.includes('welcome') || (require_app && initial_missing.includes('app'))) {
 dispatch_gateway_subscribe(conv_id, 1);
 }
 const final_result = await wait_loop(deadline_ms);
@@ -1836,18 +1873,15 @@ error: `missing ${missing_label} for conv_id ${conv_id}`,
 wait_result,
 };
 }
-let records = [];
-try {
-records = await read_transcript_records_by_conv_id(conv_id);
-} catch (error) {
+const snapshot = await read_phase5_transcript_snapshot(conv_id);
+if (!snapshot.ok) {
 return {
 ok: false,
-error: `transcript read failed for conv_id ${conv_id}`,
+error: snapshot.error || `transcript read failed for conv_id ${conv_id}`,
 wait_result,
 };
 }
-const envs = extract_phase5_envs_from_records(conv_id, records);
-return { ok: true, envs, wait_result };
+return { ok: true, ...snapshot, wait_result };
 };
 
 const run_phase5_proof_wizard = async (options) => {
@@ -1866,6 +1900,9 @@ set_phase5_report_text('', options.report_output);
 const proof_report = {
 conv_id: '',
 digest_status: 'digest missing',
+events_used: 0,
+events_source: '',
+wait_last_seq_seen: null,
 welcome_seq: null,
 last_handshake_applied_seq: null,
 app_seq: null,
@@ -1916,18 +1953,34 @@ proof_report.conv_id = resolved.conv_id;
 if (resolved.source_note) {
 set_status_prefixed(resolved.source_note);
 }
-const transcript = resolved.transcript;
-const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
-if (transcript && transcript.digest_sha256_b64) {
-const computed_digest = await compute_transcript_digest(transcript);
+const resolved_transcript = resolved.transcript;
+const resolved_events =
+resolved_transcript && Array.isArray(resolved_transcript.events) ? resolved_transcript.events : [];
+if (resolved_transcript && resolved_transcript.digest_sha256_b64) {
+const computed_digest = await compute_transcript_digest(resolved_transcript);
 proof_report.digest_status =
-computed_digest === transcript.digest_sha256_b64 ? 'digest ok' : 'digest mismatch';
+computed_digest === resolved_transcript.digest_sha256_b64 ? 'digest ok' : 'digest mismatch';
 }
 const cli_envs = resolved.cli_block || {
 welcome_env_b64: '',
 commit_env_b64: '',
 app_env_b64: '',
 expected_plaintext: '',
+};
+const resolve_events_source = (source_note) => {
+if (!source_note) {
+return 'unknown';
+}
+if (source_note.includes('coexist bundle')) {
+return 'bundle';
+}
+if (source_note.includes('imported transcript')) {
+return 'imported';
+}
+if (source_note.includes('transcript db')) {
+return 'transcript db';
+}
+return source_note;
 };
 const resolved_expected_plaintext = resolve_phase5_expected_plaintext(cli_envs);
 proof_report.expected_plaintext = resolved_expected_plaintext || '';
@@ -1961,11 +2014,36 @@ set_step('report', 'ok', 'report ready');
 return;
 }
 set_step('subscribe_wait', 'ok', format_phase5_wait_details(subscribe_wait));
+proof_report.wait_last_seq_seen = subscribe_wait.last_seq_seen;
+const refreshed_snapshot = await read_phase5_transcript_snapshot(proof_report.conv_id);
+let transcript = resolved_transcript;
+let events = resolved_events;
+if (refreshed_snapshot.ok) {
+transcript = refreshed_snapshot.transcript;
+events = refreshed_snapshot.events || [];
+proof_report.events_source = 'transcript db';
+proof_report.events_used = events.length;
+} else {
+proof_report.events_source = resolve_events_source(resolved.source_note || '');
+proof_report.events_used = events.length;
+}
+if (!proof_report.events_source) {
+proof_report.events_source = resolve_events_source(resolved.source_note || '');
+}
+const lookup_events = (env_b64, kind) => {
+const primary_match = find_transcript_event_by_env(events, env_b64, kind);
+if (primary_match) {
+return primary_match;
+}
+if (events !== resolved_events) {
+return find_transcript_event_by_env(resolved_events, env_b64, kind);
+}
+return null;
+};
 set_step('join', 'running', 'selecting welcome');
 const latest_welcome = pick_latest_env(events, 1);
 const selected_welcome_env = cli_envs.welcome_env_b64 || (latest_welcome && latest_welcome.env);
-const matched_welcome =
-selected_welcome_env && find_transcript_event_by_env(events, selected_welcome_env, 1);
+const matched_welcome = selected_welcome_env ? lookup_events(selected_welcome_env, 1) : null;
 proof_report.welcome_seq =
 matched_welcome && Number.isInteger(matched_welcome.seq) ? matched_welcome.seq : null;
 if (!selected_welcome_env) {
@@ -2035,7 +2113,7 @@ handshake_events.push({ seq: event.seq, env: event.env });
 }
 handshake_events.sort((left, right) => left.seq - right.seq);
 if (cli_envs.commit_env_b64) {
-const matched_commit = find_transcript_event_by_env(events, cli_envs.commit_env_b64, 2);
+const matched_commit = lookup_events(cli_envs.commit_env_b64, 2);
 if (!matched_commit) {
 handshake_events.push({ seq: null, env: cli_envs.commit_env_b64 });
 }
@@ -2099,7 +2177,7 @@ return;
 set_step('decrypt', 'running', 'selecting app env');
 const latest_app = pick_latest_env(events, 3);
 const selected_app_env = cli_envs.app_env_b64 || (latest_app && latest_app.env);
-const matched_app = selected_app_env && find_transcript_event_by_env(events, selected_app_env, 3);
+const matched_app = selected_app_env ? lookup_events(selected_app_env, 3) : null;
 const app_seq = matched_app && Number.isInteger(matched_app.seq) ? matched_app.seq : null;
 proof_report.app_seq = app_seq;
 if (!selected_app_env) {
