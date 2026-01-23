@@ -1477,6 +1477,8 @@ const lines = [
 `wait_last_seq_seen: ${
 Number.isInteger(report.wait_last_seq_seen) ? report.wait_last_seq_seen : 'n/a'
 }`,
+`wait_quiescent: ${report.wait_quiescent ? 'true' : 'false'}`,
+`wait_expected_handshake_seen: ${report.wait_expected_handshake_seen ? 'true' : 'false'}`,
 `welcome_seq: ${Number.isInteger(report.welcome_seq) ? report.welcome_seq : 'n/a'}`,
 `last_handshake_applied_seq: ${
 Number.isInteger(report.last_handshake_applied_seq) ? report.last_handshake_applied_seq : 'n/a'
@@ -1786,6 +1788,14 @@ const poll_interval_ms =
 Number.isInteger(options.poll_interval_ms) ? options.poll_interval_ms : 400;
 const handshake_grace_ms =
 Number.isInteger(options.handshake_grace_ms) ? options.handshake_grace_ms : 800;
+const expected_handshake_env_b64 =
+typeof options.expected_handshake_env_b64 === 'string' ? options.expected_handshake_env_b64 : '';
+const require_handshake_min =
+Number.isInteger(options.require_handshake_min) ? options.require_handshake_min : 0;
+const quiescent_polls =
+Number.isInteger(options.quiescent_polls) ? options.quiescent_polls : 0;
+const quiescent_interval_ms =
+Number.isInteger(options.quiescent_interval_ms) ? options.quiescent_interval_ms : 300;
 const deadline_ms = Date.now() + timeout_ms;
 let welcome_seen_ms = null;
 let last_counts = {
@@ -1795,6 +1805,9 @@ app: 0,
 total: 0,
 };
 let last_seq_seen = null;
+let expected_handshake_seen = false;
+let quiescent_streak = 0;
+let quiescent_seq = null;
 
 const build_missing = (counts) => {
 const missing = [];
@@ -1804,11 +1817,23 @@ missing.push('welcome');
 if (require_app && (!counts || counts.app === 0)) {
 missing.push('app');
 }
+if (require_handshake_min > 0 && (!counts || counts.handshake < require_handshake_min)) {
+missing.push('handshake');
+}
+if (expected_handshake_env_b64 && !expected_handshake_seen) {
+missing.push('expected_handshake');
+}
+if (quiescent_polls > 0 && quiescent_streak < quiescent_polls) {
+missing.push('quiescent');
+}
 return missing;
 };
 
 const should_wait_for_handshake = (counts) => {
 if (handshake_grace_ms <= 0) {
+return false;
+}
+if (require_handshake_min > 0 || expected_handshake_env_b64) {
 return false;
 }
 if (!counts || counts.handshake > 0 || welcome_seen_ms === null) {
@@ -1830,6 +1855,17 @@ last_seq_seen = summary.last_seq_seen;
 if (summary.counts.welcome > 0 && welcome_seen_ms === null) {
 welcome_seen_ms = Date.now();
 }
+expected_handshake_seen = expected_handshake_env_b64
+? records.some((record) => record && record.env === expected_handshake_env_b64)
+: false;
+if (quiescent_polls > 0) {
+if (quiescent_seq === summary.last_seq_seen) {
+quiescent_streak += 1;
+} else {
+quiescent_seq = summary.last_seq_seen;
+quiescent_streak = 1;
+}
+}
 return summary;
 };
 
@@ -1838,14 +1874,28 @@ while (Date.now() < deadline_limit_ms) {
 await read_counts();
 const missing = build_missing(last_counts);
 if (!missing.length && !should_wait_for_handshake(last_counts)) {
-return { ok: true, missing, counts: last_counts, last_seq_seen };
+return {
+ok: true,
+missing,
+counts: last_counts,
+last_seq_seen,
+wait_quiescent: quiescent_polls > 0 ? quiescent_streak >= quiescent_polls : false,
+wait_expected_handshake_seen: expected_handshake_seen,
+};
 }
 await new Promise((resolve) => {
-setTimeout(resolve, poll_interval_ms);
+setTimeout(resolve, quiescent_polls > 0 ? quiescent_interval_ms : poll_interval_ms);
 });
 }
 const missing = build_missing(last_counts);
-return { ok: false, missing, counts: last_counts, last_seq_seen };
+return {
+ok: false,
+missing,
+counts: last_counts,
+last_seq_seen,
+wait_quiescent: quiescent_polls > 0 ? quiescent_streak >= quiescent_polls : false,
+wait_expected_handshake_seen: expected_handshake_seen,
+};
 };
 
 dispatch_gateway_subscribe(conv_id);
@@ -1903,6 +1953,8 @@ digest_status: 'digest missing',
 events_used: 0,
 events_source: '',
 wait_last_seq_seen: null,
+wait_quiescent: false,
+wait_expected_handshake_seen: false,
 welcome_seq: null,
 last_handshake_applied_seq: null,
 app_seq: null,
@@ -1989,13 +2041,21 @@ expected_plaintext = cli_envs.expected_plaintext;
 set_expected_plaintext_input();
 }
 set_step('subscribe_wait', 'running', 'subscribing to transcript');
+const expected_commit_env_b64 =
+cli_envs.commit_env_b64 && cli_envs.commit_env_b64.trim() ? cli_envs.commit_env_b64 : '';
 const subscribe_wait = await subscribe_and_wait_for_phase5(proof_report.conv_id, {
 require_app: true,
 timeout_ms: 8000,
 initial_timeout_ms: 1500,
 poll_interval_ms: 400,
 handshake_grace_ms: 800,
+expected_handshake_env_b64: expected_commit_env_b64,
+require_handshake_min: expected_commit_env_b64 ? 1 : 0,
+quiescent_polls: 2,
+quiescent_interval_ms: 300,
 });
+proof_report.wait_quiescent = Boolean(subscribe_wait.wait_quiescent);
+proof_report.wait_expected_handshake_seen = Boolean(subscribe_wait.wait_expected_handshake_seen);
 if (!subscribe_wait.ok) {
 const missing_label = subscribe_wait.missing.length
 ? subscribe_wait.missing.join(', ')
@@ -2097,6 +2157,16 @@ proof_report.decrypted_plaintext = `error: ${proof_report.error}`;
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
 return;
+}
+
+const drain_snapshot = await read_phase5_transcript_snapshot(proof_report.conv_id);
+if (drain_snapshot.ok) {
+transcript = drain_snapshot.transcript;
+events = drain_snapshot.events || [];
+proof_report.events_source = 'transcript db';
+proof_report.events_used = events.length;
+} else if (!proof_report.events_source) {
+proof_report.events_source = resolve_events_source(resolved.source_note || '');
 }
 
 set_step('drain', 'running', 'applying handshakes');
@@ -2403,6 +2473,8 @@ timeout_ms: 8000,
 initial_timeout_ms: 1500,
 poll_interval_ms: 400,
 handshake_grace_ms: 800,
+quiescent_polls: 2,
+quiescent_interval_ms: 300,
 });
 if (!wait_result.ok) {
 const details = build_phase5_missing_details(wait_result);
@@ -2490,6 +2562,8 @@ poll_interval_ms: 400,
 initial_timeout_ms: 1500,
 handshake_grace_ms: 800,
 require_app: true,
+quiescent_polls: 2,
+quiescent_interval_ms: 300,
 };
 const room_wait = await wait_for_transcript_envs(room_conv_id_value, wait_options);
 if (!room_wait.ok) {
