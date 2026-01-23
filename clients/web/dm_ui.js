@@ -1344,6 +1344,12 @@ log_output(`room app decrypted (seq=${latest.seq})`);
 
 const build_phase5_steps = () => ([
 {
+key: 'subscribe_wait',
+label: 'Subscribe / wait',
+status: 'pending',
+details: 'pending',
+},
+{
 key: 'join',
 label: 'Join from welcome',
 status: 'pending',
@@ -1693,33 +1699,155 @@ app_env_b64: latest_app ? latest_app.env : '',
 };
 };
 
-const wait_for_transcript_envs = async (conv_id, options) => {
+const count_phase5_envs_in_records = (records) => {
+const counts = {
+welcome: 0,
+handshake: 0,
+app: 0,
+total: 0,
+};
+let last_seq_seen = null;
+for (const record of records) {
+if (!record || typeof record.env !== 'string') {
+continue;
+}
+counts.total += 1;
+if (Number.isInteger(record.seq)) {
+last_seq_seen = last_seq_seen === null ? record.seq : Math.max(last_seq_seen, record.seq);
+}
+const env_meta = parse_live_inbox_env(record.env);
+if (!env_meta) {
+continue;
+}
+if (env_meta.kind === 1) {
+counts.welcome += 1;
+} else if (env_meta.kind === 2) {
+counts.handshake += 1;
+} else if (env_meta.kind === 3) {
+counts.app += 1;
+}
+}
+return { counts, last_seq_seen };
+};
+
+const format_phase5_wait_details = (wait_result) => {
+if (!wait_result || !wait_result.counts) {
+return 'no transcript data';
+}
+const last_seq_text =
+Number.isInteger(wait_result.last_seq_seen) ? wait_result.last_seq_seen : 'n/a';
+return `welcome=${wait_result.counts.welcome} handshake=${wait_result.counts.handshake} app=${wait_result.counts.app} last_seq=${last_seq_text}`;
+};
+
+const subscribe_and_wait_for_phase5 = async (conv_id, opts) => {
+const options = opts || {};
+const require_app = options.require_app !== false;
 const timeout_ms = Number.isInteger(options.timeout_ms) ? options.timeout_ms : 8000;
-const poll_interval_ms = Number.isInteger(options.poll_interval_ms) ? options.poll_interval_ms : 400;
-const start_ms = Date.now();
-let last_error = '';
-while (Date.now() - start_ms < timeout_ms) {
+const initial_timeout_ms =
+Number.isInteger(options.initial_timeout_ms) ? options.initial_timeout_ms : 1500;
+const poll_interval_ms =
+Number.isInteger(options.poll_interval_ms) ? options.poll_interval_ms : 400;
+const handshake_grace_ms =
+Number.isInteger(options.handshake_grace_ms) ? options.handshake_grace_ms : 800;
+const deadline_ms = Date.now() + timeout_ms;
+let welcome_seen_ms = null;
+let last_counts = {
+welcome: 0,
+handshake: 0,
+app: 0,
+total: 0,
+};
+let last_seq_seen = null;
+
+const build_missing = (counts) => {
+const missing = [];
+if (!counts || counts.welcome === 0) {
+missing.push('welcome');
+}
+if (require_app && (!counts || counts.app === 0)) {
+missing.push('app');
+}
+return missing;
+};
+
+const should_wait_for_handshake = (counts) => {
+if (handshake_grace_ms <= 0) {
+return false;
+}
+if (!counts || counts.handshake > 0 || welcome_seen_ms === null) {
+return false;
+}
+return Date.now() - welcome_seen_ms < handshake_grace_ms;
+};
+
+const read_counts = async () => {
 let records = [];
 try {
 records = await read_transcript_records_by_conv_id(conv_id);
 } catch (error) {
-last_error = error && error.message ? error.message : String(error);
+records = [];
 }
-if (records.length) {
-const envs = extract_phase5_envs_from_records(conv_id, records);
-if (envs.welcome_env_b64 && envs.app_env_b64) {
-return { ok: true, envs };
+const summary = count_phase5_envs_in_records(records);
+last_counts = summary.counts;
+last_seq_seen = summary.last_seq_seen;
+if (summary.counts.welcome > 0 && welcome_seen_ms === null) {
+welcome_seen_ms = Date.now();
 }
+return summary;
+};
+
+const wait_loop = async (deadline_limit_ms) => {
+while (Date.now() < deadline_limit_ms) {
+await read_counts();
+const missing = build_missing(last_counts);
+if (!missing.length && !should_wait_for_handshake(last_counts)) {
+return { ok: true, missing, counts: last_counts, last_seq_seen };
 }
 await new Promise((resolve) => {
 setTimeout(resolve, poll_interval_ms);
 });
 }
-const error_suffix = last_error ? ` (last error: ${last_error})` : '';
+const missing = build_missing(last_counts);
+return { ok: false, missing, counts: last_counts, last_seq_seen };
+};
+
+dispatch_gateway_subscribe(conv_id);
+const initial_deadline_ms = Math.min(Date.now() + initial_timeout_ms, deadline_ms);
+const initial_result = await wait_loop(initial_deadline_ms);
+if (initial_result.ok) {
+return initial_result;
+}
+const initial_missing = initial_result.missing || [];
+if (initial_missing.includes('welcome')) {
+dispatch_gateway_subscribe(conv_id, 1);
+}
+const final_result = await wait_loop(deadline_ms);
+return final_result;
+};
+
+const wait_for_transcript_envs = async (conv_id, options) => {
+const wait_options = options || {};
+const wait_result = await subscribe_and_wait_for_phase5(conv_id, wait_options);
+if (!wait_result.ok) {
+const missing_label = wait_result.missing.length ? wait_result.missing.join(', ') : 'unknown';
 return {
 ok: false,
-error: `timeout waiting for transcript events for conv_id ${conv_id}${error_suffix}`,
+error: `missing ${missing_label} for conv_id ${conv_id}`,
+wait_result,
 };
+}
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+return {
+ok: false,
+error: `transcript read failed for conv_id ${conv_id}`,
+wait_result,
+};
+}
+const envs = extract_phase5_envs_from_records(conv_id, records);
+return { ok: true, envs, wait_result };
 };
 
 const run_phase5_proof_wizard = async (options) => {
@@ -1773,7 +1901,13 @@ options.run_btn.disabled = false;
 const run_wizard = async () => {
 const resolved = await options.resolve_inputs();
 if (!resolved.ok) {
-set_step('join', 'fail', resolved.error);
+set_step('subscribe_wait', 'fail', resolved.error);
+set_step('join', 'pending', 'skipped (subscribe failed)');
+set_step('drain', 'pending', 'skipped (subscribe failed)');
+set_step('decrypt', 'pending', 'skipped (subscribe failed)');
+set_step('reply', 'pending', 'skipped (subscribe failed)');
+set_step('report', 'running', 'building report');
+set_step('report', 'ok', 'report ready');
 proof_report.error = resolved.error;
 set_status_prefixed(resolved.error);
 return;
@@ -1801,6 +1935,32 @@ if (cli_envs.expected_plaintext !== undefined) {
 expected_plaintext = cli_envs.expected_plaintext;
 set_expected_plaintext_input();
 }
+set_step('subscribe_wait', 'running', 'subscribing to transcript');
+const subscribe_wait = await subscribe_and_wait_for_phase5(proof_report.conv_id, {
+require_app: true,
+timeout_ms: 8000,
+initial_timeout_ms: 1500,
+poll_interval_ms: 400,
+handshake_grace_ms: 800,
+});
+if (!subscribe_wait.ok) {
+const missing_label = subscribe_wait.missing.length
+? subscribe_wait.missing.join(', ')
+: 'unknown';
+const details = `missing ${missing_label}`;
+set_step('subscribe_wait', 'fail', details);
+proof_report.error = details;
+proof_report.decrypted_plaintext = `error: ${details}`;
+set_status_prefixed(details);
+set_step('join', 'pending', 'skipped (subscribe failed)');
+set_step('drain', 'pending', 'skipped (subscribe failed)');
+set_step('decrypt', 'pending', 'skipped (subscribe failed)');
+set_step('reply', 'pending', 'skipped (subscribe failed)');
+set_step('report', 'running', 'building report');
+set_step('report', 'ok', 'report ready');
+return;
+}
+set_step('subscribe_wait', 'ok', format_phase5_wait_details(subscribe_wait));
 set_step('join', 'running', 'selecting welcome');
 const latest_welcome = pick_latest_env(events, 1);
 const selected_welcome_env = cli_envs.welcome_env_b64 || (latest_welcome && latest_welcome.env);
@@ -2120,6 +2280,13 @@ render_phase5_timeline(coexist_steps, coexist_phase5_proof_timeline);
 const set_coexist_step = (key, status, details) => {
 set_phase5_step_status(coexist_steps, key, status, details, coexist_phase5_proof_timeline);
 };
+const build_phase5_missing_details = (wait_result) => {
+const missing_label =
+wait_result && wait_result.missing && wait_result.missing.length
+? wait_result.missing.join(', ')
+: 'unknown';
+return `missing ${missing_label}`;
+};
 const finalize_coexist = (summary) => {
 const end_ms = Date.now();
 const duration_ms = Number.isInteger(end_ms) && Number.isInteger(coexist_start_ms)
@@ -2151,6 +2318,21 @@ if (coexist_phase5_proof_run_btn) {
 coexist_phase5_proof_run_btn.disabled = false;
 }
 };
+const run_subscribe_wait = async (label, conv_id, status_fn) => {
+const wait_result = await subscribe_and_wait_for_phase5(conv_id, {
+require_app: true,
+timeout_ms: 8000,
+initial_timeout_ms: 1500,
+poll_interval_ms: 400,
+handshake_grace_ms: 800,
+});
+if (!wait_result.ok) {
+const details = build_phase5_missing_details(wait_result);
+status_fn(`coexist proof: ${label} ${details}`);
+return { ok: false, error: `${label} ${details}`, wait_result };
+}
+return { ok: true, wait_result };
+};
 set_coexist_step('parse', 'running', 'checking CLI blocks');
 const block_text = coexist_phase5_proof_cli_input ? coexist_phase5_proof_cli_input.value : '';
 const trimmed_block_text = block_text ? block_text.trim() : '';
@@ -2172,9 +2354,43 @@ dm_block = build_phase5_bundle_cli_block(coexist_bundle.dm);
 room_block = build_phase5_bundle_cli_block(coexist_bundle.room);
 } else if (has_cli_blocks) {
 set_coexist_step('parse', 'ok', 'cli blocks ready');
-set_coexist_step('subscribe_wait', 'ok', 'skipped (cli mode)');
+set_coexist_step('subscribe_wait', 'running', 'subscribing and waiting');
 dm_block = resolved_blocks.dm_block;
 room_block = resolved_blocks.room_block;
+const room_conv_id_value = normalize_conv_id(room_block ? room_block.conv_id : '');
+if (!room_conv_id_value || room_conv_id_value === '(none)') {
+set_room_status('coexist proof: room conv_id required');
+set_coexist_step('subscribe_wait', 'fail', 'room conv_id required');
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: 'room conv_id required' });
+return;
+}
+const room_wait = await run_subscribe_wait('room', room_conv_id_value, set_room_status);
+if (!room_wait.ok) {
+set_coexist_step('subscribe_wait', 'fail', room_wait.error);
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: room_wait.error });
+return;
+}
+let dm_wait = null;
+if (dm_block && dm_block.conv_id) {
+const dm_conv_id = normalize_conv_id(dm_block.conv_id);
+if (dm_conv_id && dm_conv_id !== '(none)') {
+dm_wait = await run_subscribe_wait('dm', dm_conv_id, set_status);
+if (!dm_wait.ok) {
+set_coexist_step('subscribe_wait', 'fail', dm_wait.error);
+set_coexist_step('report', 'fail', 'report failed');
+finalize_coexist({ error: dm_wait.error });
+return;
+}
+}
+}
+const room_details = `room ${format_phase5_wait_details(room_wait.wait_result)}`;
+const dm_details =
+dm_wait && dm_wait.wait_result
+? `; dm ${format_phase5_wait_details(dm_wait.wait_result)}`
+: '';
+set_coexist_step('subscribe_wait', 'ok', `${room_details}${dm_details}`);
 } else {
 const fallback_reason = trimmed_block_text
 ? resolved_blocks.error || 'invalid cli block'
@@ -2190,13 +2406,12 @@ finalize_coexist({ error: 'room conv_id required' });
 return;
 }
 set_coexist_step('subscribe_wait', 'running', 'subscribing and waiting for transcript events');
-dispatch_gateway_subscribe(room_conv_id_value);
-if (dm_conv_id) {
-dispatch_gateway_subscribe(dm_conv_id);
-}
 const wait_options = {
 timeout_ms: 8000,
 poll_interval_ms: 400,
+initial_timeout_ms: 1500,
+handshake_grace_ms: 800,
+require_app: true,
 };
 const room_wait = await wait_for_transcript_envs(room_conv_id_value, wait_options);
 if (!room_wait.ok) {
@@ -2217,7 +2432,14 @@ finalize_coexist({ error: dm_wait.error });
 return;
 }
 }
-set_coexist_step('subscribe_wait', 'ok', 'transcript events ready');
+const room_details = room_wait.wait_result
+? `room ${format_phase5_wait_details(room_wait.wait_result)}`
+: 'room transcript ready';
+const dm_details =
+dm_wait && dm_wait.wait_result
+? `; dm ${format_phase5_wait_details(dm_wait.wait_result)}`
+: '';
+set_coexist_step('subscribe_wait', 'ok', `${room_details}${dm_details}`);
 room_block = build_phase5_cli_block_from_envs(room_conv_id_value, room_wait.envs);
 dm_block = dm_wait ? build_phase5_cli_block_from_envs(dm_conv_id, dm_wait.envs) : null;
 }
