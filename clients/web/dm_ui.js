@@ -1738,6 +1738,62 @@ record_count: records.length,
 };
 };
 
+const build_phase5_records_from_transcript = (transcript) => {
+const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
+const records = [];
+for (const event of events) {
+if (!event || typeof event.env !== 'string') {
+continue;
+}
+records.push({
+seq: event.seq,
+msg_id: event.msg_id,
+env: event.env,
+});
+}
+return records;
+};
+
+const read_phase5_records_with_fallback = async (conv_id, transcript) => {
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+records = [];
+}
+if (records.length) {
+return records;
+}
+if (!transcript) {
+return records;
+}
+return build_phase5_records_from_transcript(transcript);
+};
+
+const read_phase5_transcript_snapshot_with_fallback = async (conv_id, transcript) => {
+const snapshot = await read_phase5_transcript_snapshot(conv_id);
+if (snapshot.ok && snapshot.record_count > 0) {
+return { ...snapshot, source: 'transcript db' };
+}
+if (!transcript) {
+return snapshot;
+}
+const records = build_phase5_records_from_transcript(transcript);
+const extracted = extract_phase5_envs_from_records(conv_id, records);
+return {
+ok: true,
+transcript: extracted.transcript,
+events: extracted.events || [],
+envs: {
+welcome_env_b64: extracted.welcome_env_b64 || '',
+commit_env_b64: extracted.commit_env_b64 || '',
+app_env_b64: extracted.app_env_b64 || '',
+},
+record_count: records.length,
+source: 'fallback transcript',
+};
+};
+
 const count_phase5_envs_in_records = (records) => {
 const counts = {
 welcome: 0,
@@ -1796,6 +1852,10 @@ const quiescent_polls =
 Number.isInteger(options.quiescent_polls) ? options.quiescent_polls : 0;
 const quiescent_interval_ms =
 Number.isInteger(options.quiescent_interval_ms) ? options.quiescent_interval_ms : 300;
+const read_records_fn =
+typeof options.read_records_fn === 'function'
+? options.read_records_fn
+: read_transcript_records_by_conv_id;
 const deadline_ms = Date.now() + timeout_ms;
 let welcome_seen_ms = null;
 let last_counts = {
@@ -1845,7 +1905,7 @@ return Date.now() - welcome_seen_ms < handshake_grace_ms;
 const read_counts = async () => {
 let records = [];
 try {
-records = await read_transcript_records_by_conv_id(conv_id);
+records = await read_records_fn(conv_id);
 } catch (error) {
 records = [];
 }
@@ -1912,41 +1972,17 @@ const final_result = await wait_loop(deadline_ms);
 return final_result;
 };
 
-const wait_for_transcript_envs = async (conv_id, options) => {
-const wait_options = options || {};
-const wait_result = await subscribe_and_wait_for_phase5(conv_id, wait_options);
-if (!wait_result.ok) {
-const missing_label = wait_result.missing.length ? wait_result.missing.join(', ') : 'unknown';
-return {
-ok: false,
-error: `missing ${missing_label} for conv_id ${conv_id}`,
-wait_result,
-};
-}
-const snapshot = await read_phase5_transcript_snapshot(conv_id);
-if (!snapshot.ok) {
-return {
-ok: false,
-error: snapshot.error || `transcript read failed for conv_id ${conv_id}`,
-wait_result,
-};
-}
-return { ok: true, ...snapshot, wait_result };
-};
+const build_phase5_steps_debug = () => build_phase5_steps().map((step) => ({
+key: step.key,
+status: step.status,
+details: step.details,
+}));
 
-const run_phase5_proof_wizard = async (options) => {
-const status_prefix = options.status_prefix;
-if (options.get_in_flight()) {
-return;
-}
-options.set_in_flight(true);
-if (options.run_btn) {
-options.run_btn.disabled = true;
-}
+const run_phase5_proof_core = async (options) => {
+const status_prefix = options.status_prefix || 'proof';
+const on_step = typeof options.on_step === 'function' ? options.on_step : null;
+const steps_debug = build_phase5_steps_debug();
 const proof_start_ms = Date.now();
-const steps = build_phase5_steps();
-render_phase5_timeline(steps, options.timeline_container);
-set_phase5_report_text('', options.report_output);
 const proof_report = {
 conv_id: '',
 digest_status: 'digest missing',
@@ -1969,10 +2005,42 @@ duration_ms: null,
 error: '',
 };
 const set_status_prefixed = (message) => {
+if (typeof options.set_status_fn === 'function') {
 options.set_status_fn(`${status_prefix}: ${message}`);
+}
 };
 const set_step = (key, status, details) => {
-set_phase5_step_status(steps, key, status, details, options.timeline_container);
+const step = steps_debug.find((entry) => entry.key === key);
+if (step) {
+step.status = status;
+if (details !== undefined) {
+step.details = details;
+}
+} else {
+steps_debug.push({
+key,
+status,
+details: details !== undefined ? details : '',
+});
+}
+if (on_step) {
+on_step(key, status, details);
+}
+};
+const resolve_events_source = (source_note) => {
+if (!source_note) {
+return 'unknown';
+}
+if (source_note.includes('coexist bundle')) {
+return 'bundle';
+}
+if (source_note.includes('imported transcript')) {
+return 'imported';
+}
+if (source_note.includes('transcript db')) {
+return 'transcript db';
+}
+return source_note;
 };
 const finalize_report = () => {
 proof_report.end_ms = Date.now();
@@ -1980,14 +2048,8 @@ proof_report.duration_ms =
 Number.isInteger(proof_report.end_ms) && Number.isInteger(proof_report.start_ms)
 ? proof_report.end_ms - proof_report.start_ms
 : null;
-set_phase5_report_text(format_phase5_report(proof_report), options.report_output);
-options.set_in_flight(false);
-if (options.run_btn) {
-options.run_btn.disabled = false;
-}
 };
-
-const run_wizard = async () => {
+const run_core = async () => {
 const resolved = await options.resolve_inputs();
 if (!resolved.ok) {
 set_step('subscribe_wait', 'fail', resolved.error);
@@ -1999,7 +2061,7 @@ set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
 proof_report.error = resolved.error;
 set_status_prefixed(resolved.error);
-return;
+return proof_report;
 }
 proof_report.conv_id = resolved.conv_id;
 if (resolved.source_note) {
@@ -2019,21 +2081,6 @@ commit_env_b64: '',
 app_env_b64: '',
 expected_plaintext: '',
 };
-const resolve_events_source = (source_note) => {
-if (!source_note) {
-return 'unknown';
-}
-if (source_note.includes('coexist bundle')) {
-return 'bundle';
-}
-if (source_note.includes('imported transcript')) {
-return 'imported';
-}
-if (source_note.includes('transcript db')) {
-return 'transcript db';
-}
-return source_note;
-};
 const resolved_expected_plaintext = resolve_phase5_expected_plaintext(cli_envs);
 proof_report.expected_plaintext = resolved_expected_plaintext || '';
 if (cli_envs.expected_plaintext !== undefined) {
@@ -2043,6 +2090,7 @@ set_expected_plaintext_input();
 set_step('subscribe_wait', 'running', 'subscribing to transcript');
 const expected_commit_env_b64 =
 cli_envs.commit_env_b64 && cli_envs.commit_env_b64.trim() ? cli_envs.commit_env_b64 : '';
+const read_records_fn = (conv_id) => read_phase5_records_with_fallback(conv_id, resolved_transcript);
 const subscribe_wait = await subscribe_and_wait_for_phase5(proof_report.conv_id, {
 require_app: true,
 timeout_ms: 8000,
@@ -2053,6 +2101,7 @@ expected_handshake_env_b64: expected_commit_env_b64,
 require_handshake_min: expected_commit_env_b64 ? 1 : 0,
 quiescent_polls: 2,
 quiescent_interval_ms: 300,
+read_records_fn,
 });
 proof_report.wait_quiescent = Boolean(subscribe_wait.wait_quiescent);
 proof_report.wait_expected_handshake_seen = Boolean(subscribe_wait.wait_expected_handshake_seen);
@@ -2071,17 +2120,23 @@ set_step('decrypt', 'pending', 'skipped (subscribe failed)');
 set_step('reply', 'pending', 'skipped (subscribe failed)');
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
-return;
+return proof_report;
 }
 set_step('subscribe_wait', 'ok', format_phase5_wait_details(subscribe_wait));
 proof_report.wait_last_seq_seen = subscribe_wait.last_seq_seen;
-const refreshed_snapshot = await read_phase5_transcript_snapshot(proof_report.conv_id);
+const refreshed_snapshot = await read_phase5_transcript_snapshot_with_fallback(
+proof_report.conv_id,
+resolved_transcript
+);
 let transcript = resolved_transcript;
 let events = resolved_events;
 if (refreshed_snapshot.ok) {
 transcript = refreshed_snapshot.transcript;
 events = refreshed_snapshot.events || [];
-proof_report.events_source = 'transcript db';
+proof_report.events_source =
+refreshed_snapshot.source === 'transcript db'
+? 'transcript db'
+: resolve_events_source(resolved.source_note || '');
 proof_report.events_used = events.length;
 } else {
 proof_report.events_source = resolve_events_source(resolved.source_note || '');
@@ -2147,7 +2202,7 @@ log_output(`${status_prefix}: welcome applied`);
 }
 }
 }
-if (steps.find((step) => step.key === 'join').status !== 'ok') {
+if (steps_debug.find((step) => step.key === 'join').status !== 'ok') {
 set_step('drain', 'pending', 'skipped (join failed)');
 set_step('decrypt', 'pending', 'skipped (join failed)');
 set_step('reply', 'pending', 'skipped (join failed)');
@@ -2156,14 +2211,20 @@ proof_report.decrypted_plaintext = `error: ${proof_report.error}`;
 }
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
-return;
+return proof_report;
 }
 
-const drain_snapshot = await read_phase5_transcript_snapshot(proof_report.conv_id);
+const drain_snapshot = await read_phase5_transcript_snapshot_with_fallback(
+proof_report.conv_id,
+transcript
+);
 if (drain_snapshot.ok) {
 transcript = drain_snapshot.transcript;
 events = drain_snapshot.events || [];
-proof_report.events_source = 'transcript db';
+proof_report.events_source =
+drain_snapshot.source === 'transcript db'
+? 'transcript db'
+: resolve_events_source(resolved.source_note || '');
 proof_report.events_used = events.length;
 } else if (!proof_report.events_source) {
 proof_report.events_source = resolve_events_source(resolved.source_note || '');
@@ -2229,11 +2290,11 @@ proof_report.error = proof_report.error || handshake_error;
 if (!proof_report.decrypted_plaintext) {
 proof_report.decrypted_plaintext = `error: ${handshake_error}`;
 }
-} else if (steps.find((step) => step.key === 'drain').status !== 'ok') {
+} else if (steps_debug.find((step) => step.key === 'drain').status !== 'ok') {
 set_step('drain', 'ok', 'handshakes applied');
 }
 
-if (steps.find((step) => step.key === 'drain').status !== 'ok') {
+if (steps_debug.find((step) => step.key === 'drain').status !== 'ok') {
 set_step('decrypt', 'pending', 'skipped (handshake failed)');
 set_step('reply', 'pending', 'skipped (handshake failed)');
 if (!proof_report.decrypted_plaintext && proof_report.error) {
@@ -2241,7 +2302,7 @@ proof_report.decrypted_plaintext = `error: ${proof_report.error}`;
 }
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
-return;
+return proof_report;
 }
 
 set_step('decrypt', 'running', 'selecting app env');
@@ -2302,7 +2363,7 @@ log_output(`${status_prefix} expected_plaintext FAIL`);
 }
 }
 
-const decrypt_ok = steps.find((step) => step.key === 'decrypt').status === 'ok';
+const decrypt_ok = steps_debug.find((step) => step.key === 'decrypt').status === 'ok';
 const expected_pass =
 !proof_report.expected_plaintext_result || proof_report.expected_plaintext_result === 'PASS';
 const auto_reply_enabled = Boolean(options.auto_reply_input && options.auto_reply_input.checked);
@@ -2344,17 +2405,58 @@ set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
 return proof_report;
 };
-return run_wizard()
-.catch((error) => {
+
+let final_report = null;
+try {
+final_report = await run_core();
+} catch (error) {
 set_status_prefixed('error');
 log_output(`${status_prefix} failed: ${error}`);
 set_step('report', 'fail', 'report failed');
 proof_report.error = proof_report.error || String(error);
-return proof_report;
-})
-.finally(() => {
+final_report = proof_report;
+} finally {
 finalize_report();
+}
+return {
+ok: !final_report.error,
+report: final_report,
+steps_debug,
+};
+};
+
+const run_phase5_proof_wizard = async (options) => {
+const status_prefix = options.status_prefix;
+if (options.get_in_flight()) {
+return;
+}
+options.set_in_flight(true);
+if (options.run_btn) {
+options.run_btn.disabled = true;
+}
+const steps = build_phase5_steps();
+render_phase5_timeline(steps, options.timeline_container);
+set_phase5_report_text('', options.report_output);
+const on_step = (key, status, details) => {
+set_phase5_step_status(steps, key, status, details, options.timeline_container);
+};
+const core_result = await run_phase5_proof_core({
+status_prefix,
+resolve_inputs: options.resolve_inputs,
+set_status_fn: options.set_status_fn,
+on_step,
+set_welcome_env_input: options.set_welcome_env_input,
+set_decrypt_output: options.set_decrypt_output,
+auto_reply_input: options.auto_reply_input,
+reply_input: options.reply_input,
+handshake_context_label: options.handshake_context_label,
+handshake_buffer_label: options.handshake_buffer_label,
 });
+set_phase5_report_text(format_phase5_report(core_result.report), options.report_output);
+options.set_in_flight(false);
+if (options.run_btn) {
+options.run_btn.disabled = false;
+}
 };
 
 const run_dm_phase5_proof_wizard = async () => run_phase5_proof_wizard({
@@ -2428,13 +2530,6 @@ render_phase5_timeline(coexist_steps, coexist_phase5_proof_timeline);
 const set_coexist_step = (key, status, details) => {
 set_phase5_step_status(coexist_steps, key, status, details, coexist_phase5_proof_timeline);
 };
-const build_phase5_missing_details = (wait_result) => {
-const missing_label =
-wait_result && wait_result.missing && wait_result.missing.length
-? wait_result.missing.join(', ')
-: 'unknown';
-return `missing ${missing_label}`;
-};
 const finalize_coexist = (summary) => {
 const end_ms = Date.now();
 const duration_ms = Number.isInteger(end_ms) && Number.isInteger(coexist_start_ms)
@@ -2466,22 +2561,18 @@ if (coexist_phase5_proof_run_btn) {
 coexist_phase5_proof_run_btn.disabled = false;
 }
 };
-const run_subscribe_wait = async (label, conv_id, status_fn) => {
-const wait_result = await subscribe_and_wait_for_phase5(conv_id, {
-require_app: true,
-timeout_ms: 8000,
-initial_timeout_ms: 1500,
-poll_interval_ms: 400,
-handshake_grace_ms: 800,
-quiescent_polls: 2,
-quiescent_interval_ms: 300,
-});
-if (!wait_result.ok) {
-const details = build_phase5_missing_details(wait_result);
-status_fn(`coexist proof: ${label} ${details}`);
-return { ok: false, error: `${label} ${details}`, wait_result };
+const extract_step_debug = (steps_debug, key) => {
+if (!Array.isArray(steps_debug)) {
+return null;
 }
-return { ok: true, wait_result };
+return steps_debug.find((step) => step.key === key) || null;
+};
+const format_subscribe_detail = (label, steps_debug) => {
+const step = extract_step_debug(steps_debug, 'subscribe_wait');
+if (!step || !step.details) {
+return `${label} subscribe_wait: n/a`;
+}
+return `${label} ${step.details}`;
 };
 set_coexist_step('parse', 'running', 'checking CLI blocks');
 const block_text = coexist_phase5_proof_cli_input ? coexist_phase5_proof_cli_input.value : '';
@@ -2490,6 +2581,8 @@ const resolved_blocks = resolve_coexist_cli_blocks(block_text);
 const has_cli_blocks = resolved_blocks.ok && resolved_blocks.room_block;
 let dm_block = null;
 let room_block = null;
+let dm_resolve_inputs = null;
+let room_resolve_inputs = null;
 const coexist_bundle = last_imported_coexist_bundle;
 if (coexist_bundle) {
 const dm_conv_id = coexist_bundle.dm.transcript.conv_id;
@@ -2499,12 +2592,12 @@ set_coexist_step(
 'ok',
 `bundle mode (dm conv_id=${dm_conv_id}, room conv_id=${room_conv_id_value})`
 );
-set_coexist_step('subscribe_wait', 'ok', 'skipped (bundle mode)');
 dm_block = build_phase5_bundle_cli_block(coexist_bundle.dm);
 room_block = build_phase5_bundle_cli_block(coexist_bundle.room);
+dm_resolve_inputs = () => resolve_phase5_bundle_inputs(coexist_bundle.dm);
+room_resolve_inputs = () => resolve_phase5_bundle_inputs(coexist_bundle.room);
 } else if (has_cli_blocks) {
 set_coexist_step('parse', 'ok', 'cli blocks ready');
-set_coexist_step('subscribe_wait', 'running', 'subscribing and waiting');
 dm_block = resolved_blocks.dm_block;
 room_block = resolved_blocks.room_block;
 const room_conv_id_value = normalize_conv_id(room_block ? room_block.conv_id : '');
@@ -2515,32 +2608,22 @@ set_coexist_step('report', 'fail', 'report failed');
 finalize_coexist({ error: 'room conv_id required' });
 return;
 }
-const room_wait = await run_subscribe_wait('room', room_conv_id_value, set_room_status);
-if (!room_wait.ok) {
-set_coexist_step('subscribe_wait', 'fail', room_wait.error);
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: room_wait.error });
-return;
-}
-let dm_wait = null;
-if (dm_block && dm_block.conv_id) {
-const dm_conv_id = normalize_conv_id(dm_block.conv_id);
-if (dm_conv_id && dm_conv_id !== '(none)') {
-dm_wait = await run_subscribe_wait('dm', dm_conv_id, set_status);
-if (!dm_wait.ok) {
-set_coexist_step('subscribe_wait', 'fail', dm_wait.error);
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: dm_wait.error });
-return;
-}
-}
-}
-const room_details = `room ${format_phase5_wait_details(room_wait.wait_result)}`;
-const dm_details =
-dm_wait && dm_wait.wait_result
-? `; dm ${format_phase5_wait_details(dm_wait.wait_result)}`
-: '';
-set_coexist_step('subscribe_wait', 'ok', `${room_details}${dm_details}`);
+dm_resolve_inputs = () => resolve_phase5_inputs({
+conv_id_resolver: () => normalize_conv_id(dm_block ? dm_block.conv_id : ''),
+set_status_fn: set_status,
+status_prefix: 'coexist dm',
+allow_imported_any: false,
+cli_block_override: dm_block,
+allow_cli_block_input: false,
+});
+room_resolve_inputs = () => resolve_phase5_inputs({
+conv_id_resolver: () => normalize_conv_id(room_block ? room_block.conv_id : ''),
+set_status_fn: set_room_status,
+status_prefix: 'coexist room',
+allow_imported_any: false,
+cli_block_override: room_block,
+allow_cli_block_input: false,
+});
 } else {
 const fallback_reason = trimmed_block_text
 ? resolved_blocks.error || 'invalid cli block'
@@ -2555,62 +2638,26 @@ set_coexist_step('report', 'fail', 'report failed');
 finalize_coexist({ error: 'room conv_id required' });
 return;
 }
-set_coexist_step('subscribe_wait', 'running', 'subscribing and waiting for transcript events');
-const wait_options = {
-timeout_ms: 8000,
-poll_interval_ms: 400,
-initial_timeout_ms: 1500,
-handshake_grace_ms: 800,
-require_app: true,
-quiescent_polls: 2,
-quiescent_interval_ms: 300,
-};
-const room_wait = await wait_for_transcript_envs(room_conv_id_value, wait_options);
-if (!room_wait.ok) {
-set_room_status(`coexist proof: ${room_wait.error}`);
-set_coexist_step('subscribe_wait', 'fail', room_wait.error);
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: room_wait.error });
-return;
-}
-let dm_wait = null;
 if (dm_conv_id) {
-dm_wait = await wait_for_transcript_envs(dm_conv_id, wait_options);
-if (!dm_wait.ok) {
-set_status(`coexist proof: ${dm_wait.error}`);
-set_coexist_step('subscribe_wait', 'fail', dm_wait.error);
-set_coexist_step('report', 'fail', 'report failed');
-finalize_coexist({ error: dm_wait.error });
-return;
+dm_block = { conv_id: dm_conv_id };
 }
-}
-const room_details = room_wait.wait_result
-? `room ${format_phase5_wait_details(room_wait.wait_result)}`
-: 'room transcript ready';
-const dm_details =
-dm_wait && dm_wait.wait_result
-? `; dm ${format_phase5_wait_details(dm_wait.wait_result)}`
-: '';
-set_coexist_step('subscribe_wait', 'ok', `${room_details}${dm_details}`);
-room_block = build_phase5_cli_block_from_envs(room_conv_id_value, room_wait.envs);
-dm_block = dm_wait ? build_phase5_cli_block_from_envs(dm_conv_id, dm_wait.envs) : null;
-}
-const run_block = async (label, cli_block, options) => run_phase5_proof_wizard({
-status_prefix: `coexist ${label}`,
-resolve_inputs: options.resolve_inputs || (() => resolve_phase5_inputs({
-conv_id_resolver: () => normalize_conv_id(cli_block ? cli_block.conv_id : ''),
-set_status_fn: options.set_status_fn,
-status_prefix: `coexist ${label}`,
+dm_resolve_inputs = () => resolve_phase5_inputs({
+conv_id_resolver: () => normalize_conv_id(dm_conv_id),
+set_status_fn: set_status,
+status_prefix: 'coexist dm',
 allow_imported_any: false,
-cli_block_override: cli_block,
-allow_cli_block_input: false,
-})),
+});
+room_resolve_inputs = () => resolve_phase5_inputs({
+conv_id_resolver: () => normalize_conv_id(room_conv_id_value),
+set_status_fn: set_room_status,
+status_prefix: 'coexist room',
+allow_imported_any: false,
+});
+}
+const run_block_core = async (label, resolve_inputs, options) => run_phase5_proof_core({
+status_prefix: `coexist ${label}`,
+resolve_inputs,
 set_status_fn: options.set_status_fn,
-timeline_container: null,
-report_output: null,
-run_btn: null,
-get_in_flight: () => false,
-set_in_flight: () => {},
 set_welcome_env_input: options.set_welcome_env_input,
 set_decrypt_output: options.set_decrypt_output,
 auto_reply_input: coexist_phase5_proof_auto_reply_input,
@@ -2620,14 +2667,17 @@ handshake_buffer_label: `handshake (coexist ${label} buffer)`,
 });
 let dm_report = null;
 let room_report = null;
+let dm_steps_debug = null;
+let room_steps_debug = null;
 try {
+set_coexist_step('subscribe_wait', 'running', 'running core proofs');
 set_coexist_step(
 'dm',
 'running',
 dm_block ? 'running dm proof' : 'skipped (room-only)'
 );
 if (dm_block) {
-dm_report = await run_block('dm', dm_block, {
+const dm_result = await run_block_core('dm', dm_resolve_inputs, {
 set_status_fn: set_status,
 set_welcome_env_input: (env_b64) => {
 set_incoming_env_input(env_b64);
@@ -2635,15 +2685,16 @@ set_incoming_env_input(env_b64);
 set_decrypt_output: (_msg_id, plaintext) => {
 set_decrypted_output(plaintext);
 },
-resolve_inputs: coexist_bundle ? () => resolve_phase5_bundle_inputs(coexist_bundle.dm) : null,
 });
-const dm_result = compute_phase5_result_label(dm_report);
-set_coexist_step('dm', dm_result === 'PASS' ? 'ok' : 'fail', `result ${dm_result}`);
+dm_report = dm_result.report;
+dm_steps_debug = dm_result.steps_debug;
+const dm_result_label = compute_phase5_result_label(dm_report);
+set_coexist_step('dm', dm_result_label === 'PASS' ? 'ok' : 'fail', `result ${dm_result_label}`);
 } else {
 set_coexist_step('dm', 'ok', 'skipped (room-only)');
 }
 set_coexist_step('room', 'running', 'running room proof');
-room_report = await run_block('room', room_block, {
+const room_core_result = await run_block_core('room', room_resolve_inputs, {
 set_status_fn: set_room_status,
 set_welcome_env_input: (env_b64) => {
 if (room_welcome_env_input) {
@@ -2651,11 +2702,20 @@ room_welcome_env_input.value = env_b64;
 }
 },
 set_decrypt_output: set_room_decrypt_output,
-resolve_inputs: coexist_bundle ? () => resolve_phase5_bundle_inputs(coexist_bundle.room) : null,
 });
+room_report = room_core_result.report;
+room_steps_debug = room_core_result.steps_debug;
 const dm_result = dm_report ? compute_phase5_result_label(dm_report) : 'SKIP';
 const room_result = room_report ? compute_phase5_result_label(room_report) : 'FAIL';
 set_coexist_step('room', room_result === 'PASS' ? 'ok' : 'fail', `result ${room_result}`);
+const subscribe_ok =
+(!dm_block || (extract_step_debug(dm_steps_debug, 'subscribe_wait') || {}).status === 'ok') &&
+(extract_step_debug(room_steps_debug, 'subscribe_wait') || {}).status === 'ok';
+const subscribe_details = [
+format_subscribe_detail('room', room_steps_debug),
+dm_block ? format_subscribe_detail('dm', dm_steps_debug) : null,
+].filter(Boolean).join('; ');
+set_coexist_step('subscribe_wait', subscribe_ok ? 'ok' : 'fail', subscribe_details || 'n/a');
 const overall_result =
 room_result === 'PASS' && (dm_report ? dm_result === 'PASS' : true) ? 'PASS' : 'FAIL';
 set_coexist_step('report', 'running', 'building combined report');
