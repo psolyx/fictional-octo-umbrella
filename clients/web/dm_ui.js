@@ -152,6 +152,7 @@ const gateway_transcript_db_name = 'gateway_web_demo';
 const gateway_transcript_db_version = 2;
 const gateway_transcript_store_name = 'transcripts';
 const gateway_transcript_index_name = 'by_conv_id';
+const phase5_mls_state_by_conv_id = new Map();
 
 const db_name = 'mls_dm_state';
 const store_name = 'records';
@@ -219,6 +220,25 @@ if (!conv_state_by_id.has(normalized)) {
 conv_state_by_id.set(normalized, build_conv_state());
 }
 return conv_state_by_id.get(normalized);
+};
+
+const build_phase5_mls_state = () => ({
+bob_participant_b64: '',
+bob_has_joined: false,
+last_welcome_seq: null,
+last_commit_seq: null,
+last_app_seq: null,
+handshake_buffer_by_seq: new Map(),
+expected_seq: 1,
+last_ingested_seq: null,
+});
+
+const get_phase5_mls_state = (conv_id) => {
+const normalized = normalize_conv_id(conv_id);
+if (!phase5_mls_state_by_conv_id.has(normalized)) {
+phase5_mls_state_by_conv_id.set(normalized, build_phase5_mls_state());
+}
+return phase5_mls_state_by_conv_id.get(normalized);
 };
 
 const update_conv_status_label = () => {
@@ -544,6 +564,62 @@ if (live_inbox_expected_input) {
 live_inbox_expected_input.value = String(live_inbox_expected_seq);
 }
 update_live_inbox_status();
+};
+
+const with_phase5_conv_scope = async (conv_id, opts, fn) => {
+const normalized = normalize_conv_id(conv_id);
+const prior_state = {
+bob_participant_b64,
+bob_has_joined,
+last_welcome_seq,
+last_commit_seq,
+last_app_seq,
+live_inbox_handshake_buffer_by_seq,
+live_inbox_expected_seq,
+live_inbox_last_ingested_seq,
+};
+const scoped_state = get_phase5_mls_state(normalized);
+bob_participant_b64 = scoped_state.bob_participant_b64 || '';
+bob_has_joined = Boolean(scoped_state.bob_has_joined);
+last_welcome_seq = scoped_state.last_welcome_seq;
+last_commit_seq = scoped_state.last_commit_seq;
+last_app_seq = scoped_state.last_app_seq;
+live_inbox_handshake_buffer_by_seq = new Map(scoped_state.handshake_buffer_by_seq || []);
+live_inbox_last_ingested_seq =
+scoped_state.last_ingested_seq !== undefined ? scoped_state.last_ingested_seq : null;
+set_live_inbox_expected_seq(
+Number.isInteger(scoped_state.expected_seq) ? scoped_state.expected_seq : 1
+);
+let participant_created = false;
+if (opts && opts.ensure_bob_participant && !bob_participant_b64) {
+await ensure_wasm_ready();
+const created = await dm_create_participant('bob', seed_bob);
+if (created && created.participant_b64) {
+bob_participant_b64 = created.participant_b64;
+participant_created = true;
+}
+}
+try {
+return await fn({ participant_created });
+} finally {
+scoped_state.bob_participant_b64 = bob_participant_b64;
+scoped_state.bob_has_joined = bob_has_joined;
+scoped_state.last_welcome_seq = last_welcome_seq;
+scoped_state.last_commit_seq = last_commit_seq;
+scoped_state.last_app_seq = last_app_seq;
+scoped_state.handshake_buffer_by_seq = new Map(live_inbox_handshake_buffer_by_seq || []);
+scoped_state.expected_seq = live_inbox_expected_seq;
+scoped_state.last_ingested_seq = live_inbox_last_ingested_seq;
+phase5_mls_state_by_conv_id.set(normalized, scoped_state);
+bob_participant_b64 = prior_state.bob_participant_b64;
+bob_has_joined = prior_state.bob_has_joined;
+last_welcome_seq = prior_state.last_welcome_seq;
+last_commit_seq = prior_state.last_commit_seq;
+last_app_seq = prior_state.last_app_seq;
+live_inbox_handshake_buffer_by_seq = new Map(prior_state.live_inbox_handshake_buffer_by_seq || []);
+live_inbox_last_ingested_seq = prior_state.live_inbox_last_ingested_seq;
+set_live_inbox_expected_seq(prior_state.live_inbox_expected_seq);
+}
 };
 
 const set_run_next_step_status = (message) => {
@@ -1474,6 +1550,8 @@ const lines = [
 `digest: ${report.digest_status || 'digest missing'}`,
 `events_used: ${Number.isInteger(report.events_used) ? report.events_used : 'n/a'}`,
 `events_source: ${report.events_source || 'unknown'}`,
+`participant_scoped: ${report.participant_scoped ? 'true' : 'false'}`,
+`participant_created: ${report.participant_created ? 'true' : 'false'}`,
 `wait_last_seq_seen: ${
 Number.isInteger(report.wait_last_seq_seen) ? report.wait_last_seq_seen : 'n/a'
 }`,
@@ -1999,6 +2077,8 @@ expected_plaintext: '',
 expected_plaintext_result: '',
 auto_reply_attempted: false,
 reply_plaintext: '',
+participant_scoped: false,
+participant_created: false,
 start_ms: proof_start_ms,
 end_ms: null,
 duration_ms: null,
@@ -2067,6 +2147,11 @@ proof_report.conv_id = resolved.conv_id;
 if (resolved.source_note) {
 set_status_prefixed(resolved.source_note);
 }
+const scoped_result = await with_phase5_conv_scope(proof_report.conv_id, {
+ensure_bob_participant: true,
+}, async (scope_note) => {
+proof_report.participant_scoped = true;
+proof_report.participant_created = Boolean(scope_note && scope_note.participant_created);
 const resolved_transcript = resolved.transcript;
 const resolved_events =
 resolved_transcript && Array.isArray(resolved_transcript.events) ? resolved_transcript.events : [];
@@ -2404,6 +2489,8 @@ log_output(`${status_prefix} reply env sent`);
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
 return proof_report;
+});
+return scoped_result;
 };
 
 let final_report = null;
