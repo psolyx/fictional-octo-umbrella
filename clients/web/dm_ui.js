@@ -368,6 +368,20 @@ return { label: 'bob', participant_b64: bob_participant_b64 };
 return null;
 };
 
+const select_handshake_participant_by_label = (participant_label) => {
+if (participant_label === 'alice') {
+return alice_participant_b64
+? { label: 'alice', participant_b64: alice_participant_b64 }
+: null;
+}
+if (participant_label === 'bob') {
+return bob_participant_b64
+? { label: 'bob', participant_b64: bob_participant_b64 }
+: null;
+}
+return null;
+};
+
 const set_handshake_participant = (label, participant_b64) => {
 if (label === 'alice') {
 alice_participant_b64 = participant_b64;
@@ -392,17 +406,49 @@ const apply_handshake_env = async (seq, env_b64, options) => {
 const normalized_options = options || {};
 const context_label = normalized_options.context_label || 'handshake';
 const from_buffer = Boolean(normalized_options.from_buffer);
+const participant_label =
+normalized_options.participant_label === 'alice' || normalized_options.participant_label === 'bob'
+? normalized_options.participant_label
+: '';
 const seq_suffix = Number.isInteger(seq) ? ` (seq=${seq})` : '';
 const unpacked = unpack_dm_env(env_b64);
 if (!unpacked || unpacked.kind !== 2) {
 set_status('error');
 log_output(`${context_label} apply failed${seq_suffix}: invalid handshake env`);
-return { ok: false, error: 'invalid handshake env' };
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant_label || 'unknown',
+noop: false,
+error: 'invalid handshake env',
+};
 }
-const participant = select_handshake_participant();
+const participant = participant_label
+? select_handshake_participant_by_label(participant_label)
+: select_handshake_participant();
 if (!participant) {
-enqueue_handshake_buffer(seq, env_b64, 'no participant available');
-return { ok: false, buffered: true };
+const reason = participant_label
+? `missing ${participant_label} participant`
+: 'no participant available';
+if (Number.isInteger(seq)) {
+enqueue_handshake_buffer(seq, env_b64, reason);
+return {
+ok: false,
+buffered: true,
+participant_label_used: participant_label || 'unknown',
+noop: false,
+error: reason,
+};
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${reason}`);
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant_label || 'unknown',
+noop: false,
+error: reason,
+};
 }
 await ensure_wasm_ready();
 let result = null;
@@ -411,42 +457,104 @@ result = await dm_commit_apply(participant.participant_b64, unpacked.payload_b64
 } catch (error) {
 const error_text = String(error);
 if (is_uninitialized_commit_error(error_text)) {
-const note = from_buffer ? 'participant state not initialized (buffer retained)' : 'participant state not initialized';
+const note = from_buffer
+? 'participant state not initialized (buffer retained)'
+: 'participant state not initialized';
+if (Number.isInteger(seq)) {
 enqueue_handshake_buffer(seq, env_b64, note);
-return { ok: false, buffered: true };
+return {
+ok: false,
+buffered: true,
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
 }
 set_status('error');
 log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
-return { ok: false, error: error_text };
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant.label,
+noop: false,
+error: error_text,
+};
 }
 if (!result || !result.ok) {
 const error_text = result && result.error ? result.error : 'unknown error';
 if (is_uninitialized_commit_error(error_text)) {
-const note = from_buffer ? 'participant state not initialized (buffer retained)' : 'participant state not initialized';
+const note = from_buffer
+? 'participant state not initialized (buffer retained)'
+: 'participant state not initialized';
+if (Number.isInteger(seq)) {
 enqueue_handshake_buffer(seq, env_b64, note);
-return { ok: false, buffered: true };
+return {
+ok: false,
+buffered: true,
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
 }
 set_status('error');
 log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
-return { ok: false, error: error_text };
+return {
+ok: false,
+buffered: false,
+participant_label_used: participant.label,
+noop: false,
+error: error_text,
+};
 }
 set_handshake_participant(participant.label, result.participant_b64);
 const noop_suffix = result.noop ? ' (noop)' : '';
 set_status(`${context_label} applied${noop_suffix}${seq_suffix}`);
 log_output(`${context_label} applied as ${participant.label}${noop_suffix}${seq_suffix}`);
-return { ok: true };
+return {
+ok: true,
+buffered: false,
+participant_label_used: participant.label,
+noop: Boolean(result.noop),
+error: '',
+};
 };
 
-const drain_handshake_buffer = async (context_label) => {
+const drain_handshake_buffer = async (context_label, options) => {
 if (!live_inbox_handshake_buffer_by_seq.size) {
 return true;
 }
+const normalized_options = options || {};
+const participant_label =
+normalized_options.participant_label === 'alice' || normalized_options.participant_label === 'bob'
+? normalized_options.participant_label
+: '';
 const sorted_seqs = Array.from(live_inbox_handshake_buffer_by_seq.keys()).sort((a, b) => a - b);
 for (const seq of sorted_seqs) {
 const env_b64 = live_inbox_handshake_buffer_by_seq.get(seq);
 const result = await apply_handshake_env(seq, env_b64, {
 context_label: context_label || 'handshake',
 from_buffer: true,
+participant_label,
 });
 if (result.ok) {
 live_inbox_handshake_buffer_by_seq.delete(seq);
@@ -1561,6 +1669,15 @@ Number.isInteger(report.wait_last_seq_seen) ? report.wait_last_seq_seen : 'n/a'
 `last_handshake_applied_seq: ${
 Number.isInteger(report.last_handshake_applied_seq) ? report.last_handshake_applied_seq : 'n/a'
 }`,
+`handshake_apply_participant: ${report.handshake_apply_participant || 'unknown'}`,
+`handshake_buffered_count: ${
+Number.isInteger(report.handshake_buffered_count) ? report.handshake_buffered_count : 'n/a'
+}`,
+`handshake_apply_failures: ${
+Array.isArray(report.handshake_apply_failures) && report.handshake_apply_failures.length
+? report.handshake_apply_failures.join('; ')
+: '(none)'
+}`,
 `app_seq: ${Number.isInteger(report.app_seq) ? report.app_seq : 'n/a'}`,
 `decrypted_plaintext: ${report.decrypted_plaintext || '(none)'}`,
 `expected_plaintext: ${report.expected_plaintext || '(none)'}`,
@@ -1627,6 +1744,19 @@ const lines = [
 `digest: ${digest}`,
 `welcome_seq: ${welcome_seq}`,
 `last_handshake_applied_seq: ${handshake_seq}`,
+`handshake_apply_participant: ${report && report.handshake_apply_participant
+? report.handshake_apply_participant
+: 'unknown'}`,
+`handshake_buffered_count: ${
+report && Number.isInteger(report.handshake_buffered_count)
+? report.handshake_buffered_count
+: 'n/a'
+}`,
+`handshake_apply_failures: ${
+report && Array.isArray(report.handshake_apply_failures) && report.handshake_apply_failures.length
+? report.handshake_apply_failures.join('; ')
+: '(none)'
+}`,
 `app_seq: ${app_seq}`,
 `plaintext_or_error: ${plaintext_or_error}`,
 `auto_reply_attempted: ${report && report.auto_reply_attempted ? 'yes' : 'no'}`,
@@ -2071,6 +2201,9 @@ wait_quiescent: false,
 wait_expected_handshake_seen: false,
 welcome_seq: null,
 last_handshake_applied_seq: null,
+handshake_apply_participant: 'unknown',
+handshake_buffered_count: 0,
+handshake_apply_failures: [],
 app_seq: null,
 decrypted_plaintext: '',
 expected_plaintext: '',
@@ -2152,6 +2285,17 @@ ensure_bob_participant: true,
 }, async (scope_note) => {
 proof_report.participant_scoped = true;
 proof_report.participant_created = Boolean(scope_note && scope_note.participant_created);
+const handshake_participant_label = 'bob';
+proof_report.handshake_apply_participant = handshake_participant_label;
+const handshake_apply_failures = [];
+const record_handshake_failure = (message) => {
+if (!message) {
+return;
+}
+if (!handshake_apply_failures.includes(message)) {
+handshake_apply_failures.push(message);
+}
+};
 const resolved_transcript = resolved.transcript;
 const resolved_events =
 resolved_transcript && Array.isArray(resolved_transcript.events) ? resolved_transcript.events : [];
@@ -2336,6 +2480,7 @@ handshake_events.push({ seq: null, env: cli_envs.commit_env_b64 });
 }
 let last_handshake_seq = null;
 let handshake_error = '';
+let handshake_buffered_count = live_inbox_handshake_buffer_by_seq.size;
 if (!handshake_events.length) {
 set_step('drain', 'ok', 'no handshake envs');
 } else {
@@ -2347,6 +2492,7 @@ continue;
 }
 const apply_result = await apply_handshake_env(handshake_event.seq, handshake_event.env, {
 context_label: options.handshake_context_label,
+participant_label: handshake_participant_label,
 });
 if (apply_result.ok) {
 if (Number.isInteger(handshake_event.seq)) {
@@ -2355,19 +2501,27 @@ last_handshake_seq = handshake_event.seq;
 continue;
 }
 if (apply_result.buffered) {
+handshake_buffered_count += 1;
+record_handshake_failure(apply_result.error);
 continue;
 }
+record_handshake_failure(apply_result.error || 'handshake apply failed');
 handshake_error = handshake_error || 'handshake apply failed';
 break;
 }
 }
 if (live_inbox_handshake_buffer_by_seq.size) {
-const drained = await drain_handshake_buffer(options.handshake_buffer_label);
+const drained = await drain_handshake_buffer(options.handshake_buffer_label, {
+participant_label: handshake_participant_label,
+});
 if (!drained) {
+record_handshake_failure('handshake buffer drain failed');
 handshake_error = handshake_error || 'handshake buffer drain failed';
 }
 }
 proof_report.last_handshake_applied_seq = last_handshake_seq;
+proof_report.handshake_buffered_count = handshake_buffered_count;
+proof_report.handshake_apply_failures = handshake_apply_failures;
 last_commit_seq = last_handshake_seq;
 if (handshake_error) {
 set_step('drain', 'fail', handshake_error);
