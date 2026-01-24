@@ -61,6 +61,7 @@ let outbox_send_app_btn = null;
 let outbox_status_line = null;
 let live_inbox_by_seq = new Map();
 let live_inbox_handshake_buffer_by_seq = new Map();
+let live_inbox_handshake_attempts_by_seq = new Map();
 let live_inbox_expected_seq = 1;
 let live_inbox_last_ingested_seq = null;
 let live_inbox_enabled_input = null;
@@ -190,6 +191,7 @@ return trimmed ? trimmed : '(none)';
 const build_conv_state = () => ({
 inbox_by_seq: new Map(),
 handshake_buffer_by_seq: new Map(),
+handshake_attempts_by_seq: new Map(),
 expected_seq: 1,
 last_ingested_seq: null,
 outbox_welcome_env_b64: '',
@@ -229,6 +231,7 @@ last_welcome_seq: null,
 last_commit_seq: null,
 last_app_seq: null,
 handshake_buffer_by_seq: new Map(),
+handshake_attempts_by_seq: new Map(),
 expected_seq: 1,
 last_ingested_seq: null,
 });
@@ -358,6 +361,30 @@ const lowered = String(error_text).toLowerCase();
 return lowered.includes('participant state not initialized') || lowered.includes('state not initialized');
 };
 
+const is_missing_proposal_error = (error_text) => {
+if (!error_text) {
+return false;
+}
+const lowered = String(error_text).toLowerCase();
+const matches = [
+'missing proposal',
+'unknown proposal',
+'proposal not found',
+'missing referenced proposal',
+'no proposal found',
+];
+if (matches.some((phrase) => lowered.includes(phrase))) {
+return true;
+}
+const dependency_matches = [
+'out of order',
+'unknown epoch',
+'epoch mismatch',
+'epoch not found',
+];
+return dependency_matches.some((phrase) => lowered.includes(phrase));
+};
+
 const select_handshake_participant = () => {
 if (alice_participant_b64) {
 return { label: 'alice', participant_b64: alice_participant_b64 };
@@ -418,6 +445,7 @@ log_output(`${context_label} apply failed${seq_suffix}: invalid handshake env`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
 participant_label_used: participant_label || 'unknown',
 noop: false,
 error: 'invalid handshake env',
@@ -435,6 +463,7 @@ enqueue_handshake_buffer(seq, env_b64, reason);
 return {
 ok: false,
 buffered: true,
+buffered_reason: 'missing participant',
 participant_label_used: participant_label || 'unknown',
 noop: false,
 error: reason,
@@ -445,6 +474,7 @@ log_output(`${context_label} apply failed${seq_suffix}: ${reason}`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
 participant_label_used: participant_label || 'unknown',
 noop: false,
 error: reason,
@@ -465,6 +495,7 @@ enqueue_handshake_buffer(seq, env_b64, note);
 return {
 ok: false,
 buffered: true,
+buffered_reason: 'uninitialized',
 participant_label_used: participant.label,
 noop: false,
 error: note,
@@ -475,6 +506,33 @@ log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+if (is_missing_proposal_error(error_text)) {
+const note = from_buffer
+? 'missing proposal dependency (buffer retained)'
+: 'missing proposal dependency';
+if (Number.isInteger(seq)) {
+enqueue_handshake_buffer(seq, env_b64, note);
+return {
+ok: false,
+buffered: true,
+buffered_reason: 'missing proposal',
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
+return {
+ok: false,
+buffered: false,
+buffered_reason: '',
 participant_label_used: participant.label,
 noop: false,
 error: note,
@@ -485,6 +543,7 @@ log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
 participant_label_used: participant.label,
 noop: false,
 error: error_text,
@@ -501,6 +560,7 @@ enqueue_handshake_buffer(seq, env_b64, note);
 return {
 ok: false,
 buffered: true,
+buffered_reason: 'uninitialized',
 participant_label_used: participant.label,
 noop: false,
 error: note,
@@ -511,6 +571,33 @@ log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+if (is_missing_proposal_error(error_text)) {
+const note = from_buffer
+? 'missing proposal dependency (buffer retained)'
+: 'missing proposal dependency';
+if (Number.isInteger(seq)) {
+enqueue_handshake_buffer(seq, env_b64, note);
+return {
+ok: false,
+buffered: true,
+buffered_reason: 'missing proposal',
+participant_label_used: participant.label,
+noop: false,
+error: note,
+};
+}
+set_status('error');
+log_output(`${context_label} apply failed${seq_suffix}: ${note}`);
+return {
+ok: false,
+buffered: false,
+buffered_reason: '',
 participant_label_used: participant.label,
 noop: false,
 error: note,
@@ -521,6 +608,7 @@ log_output(`${context_label} apply failed${seq_suffix}: ${error_text}`);
 return {
 ok: false,
 buffered: false,
+buffered_reason: '',
 participant_label_used: participant.label,
 noop: false,
 error: error_text,
@@ -533,6 +621,7 @@ log_output(`${context_label} applied as ${participant.label}${noop_suffix}${seq_
 return {
 ok: true,
 buffered: false,
+buffered_reason: '',
 participant_label_used: participant.label,
 noop: Boolean(result.noop),
 error: '',
@@ -541,16 +630,37 @@ error: '',
 
 const drain_handshake_buffer = async (context_label, options) => {
 if (!live_inbox_handshake_buffer_by_seq.size) {
-return true;
+return {
+ok: true,
+stalled_reason: '',
+stalled_seq: null,
+retry_exhausted: false,
+error: '',
+};
 }
 const normalized_options = options || {};
 const participant_label =
 normalized_options.participant_label === 'alice' || normalized_options.participant_label === 'bob'
 ? normalized_options.participant_label
 : '';
+const max_attempts = Number.isInteger(normalized_options.max_attempts)
+? normalized_options.max_attempts
+: 3;
 const sorted_seqs = Array.from(live_inbox_handshake_buffer_by_seq.keys()).sort((a, b) => a - b);
 for (const seq of sorted_seqs) {
 const env_b64 = live_inbox_handshake_buffer_by_seq.get(seq);
+const attempt_count = Number.isInteger(live_inbox_handshake_attempts_by_seq.get(seq))
+? live_inbox_handshake_attempts_by_seq.get(seq)
+: 0;
+if (attempt_count >= max_attempts) {
+return {
+ok: false,
+stalled_reason: 'dependency missing',
+stalled_seq: seq,
+retry_exhausted: true,
+error: 'missing proposal dependency retry limit reached',
+};
+}
 const result = await apply_handshake_env(seq, env_b64, {
 context_label: context_label || 'handshake',
 from_buffer: true,
@@ -558,20 +668,45 @@ participant_label,
 });
 if (result.ok) {
 live_inbox_handshake_buffer_by_seq.delete(seq);
+live_inbox_handshake_attempts_by_seq.delete(seq);
 continue;
 }
 if (result.buffered) {
+if (result.buffered_reason === 'missing proposal' && Number.isInteger(seq)) {
+const next_attempt = attempt_count + 1;
+live_inbox_handshake_attempts_by_seq.set(seq, next_attempt);
+return {
+ok: false,
+stalled_reason: 'dependency missing',
+stalled_seq: seq,
+retry_exhausted: next_attempt >= max_attempts,
+error: result.error || 'missing proposal dependency',
+};
+}
 break;
 }
-return false;
+return {
+ok: false,
+stalled_reason: 'apply failed',
+stalled_seq: seq,
+retry_exhausted: false,
+error: result.error || 'handshake apply failed',
+};
 }
-return live_inbox_handshake_buffer_by_seq.size === 0;
+return {
+ok: live_inbox_handshake_buffer_by_seq.size === 0,
+stalled_reason: '',
+stalled_seq: null,
+retry_exhausted: false,
+error: '',
+};
 };
 
 const save_active_conv_state = () => {
 const state = get_conv_state(active_conv_id);
 state.inbox_by_seq = new Map(live_inbox_by_seq);
 state.handshake_buffer_by_seq = new Map(live_inbox_handshake_buffer_by_seq);
+state.handshake_attempts_by_seq = new Map(live_inbox_handshake_attempts_by_seq);
 state.expected_seq = live_inbox_expected_seq;
 state.last_ingested_seq = live_inbox_last_ingested_seq;
 state.outbox_welcome_env_b64 = outbox_welcome_env_b64 || '';
@@ -603,6 +738,7 @@ const apply_conv_state = (state) => {
 const normalized_state = state || build_conv_state();
 live_inbox_by_seq = new Map(normalized_state.inbox_by_seq || []);
 live_inbox_handshake_buffer_by_seq = new Map(normalized_state.handshake_buffer_by_seq || []);
+live_inbox_handshake_attempts_by_seq = new Map(normalized_state.handshake_attempts_by_seq || []);
 live_inbox_last_ingested_seq =
 Number.isInteger(normalized_state.last_ingested_seq) ? normalized_state.last_ingested_seq : null;
 set_live_inbox_expected_seq(normalized_state.expected_seq);
@@ -683,6 +819,7 @@ last_welcome_seq,
 last_commit_seq,
 last_app_seq,
 live_inbox_handshake_buffer_by_seq,
+live_inbox_handshake_attempts_by_seq,
 live_inbox_expected_seq,
 live_inbox_last_ingested_seq,
 };
@@ -693,6 +830,7 @@ last_welcome_seq = scoped_state.last_welcome_seq;
 last_commit_seq = scoped_state.last_commit_seq;
 last_app_seq = scoped_state.last_app_seq;
 live_inbox_handshake_buffer_by_seq = new Map(scoped_state.handshake_buffer_by_seq || []);
+live_inbox_handshake_attempts_by_seq = new Map(scoped_state.handshake_attempts_by_seq || []);
 live_inbox_last_ingested_seq =
 scoped_state.last_ingested_seq !== undefined ? scoped_state.last_ingested_seq : null;
 set_live_inbox_expected_seq(
@@ -716,6 +854,7 @@ scoped_state.last_welcome_seq = last_welcome_seq;
 scoped_state.last_commit_seq = last_commit_seq;
 scoped_state.last_app_seq = last_app_seq;
 scoped_state.handshake_buffer_by_seq = new Map(live_inbox_handshake_buffer_by_seq || []);
+scoped_state.handshake_attempts_by_seq = new Map(live_inbox_handshake_attempts_by_seq || []);
 scoped_state.expected_seq = live_inbox_expected_seq;
 scoped_state.last_ingested_seq = live_inbox_last_ingested_seq;
 phase5_mls_state_by_conv_id.set(normalized, scoped_state);
@@ -725,6 +864,9 @@ last_welcome_seq = prior_state.last_welcome_seq;
 last_commit_seq = prior_state.last_commit_seq;
 last_app_seq = prior_state.last_app_seq;
 live_inbox_handshake_buffer_by_seq = new Map(prior_state.live_inbox_handshake_buffer_by_seq || []);
+live_inbox_handshake_attempts_by_seq = new Map(
+prior_state.live_inbox_handshake_attempts_by_seq || []
+);
 live_inbox_last_ingested_seq = prior_state.live_inbox_last_ingested_seq;
 set_live_inbox_expected_seq(prior_state.live_inbox_expected_seq);
 }
@@ -1142,8 +1284,8 @@ break;
 }
 if (!handshake_error && live_inbox_handshake_buffer_by_seq.size) {
 const drained = await drain_handshake_buffer(`${context_label} buffer`, { participant_label });
-if (!drained) {
-handshake_error = 'handshake buffer drain failed';
+if (!drained.ok) {
+handshake_error = drained.error || 'handshake buffer drain failed';
 }
 }
 if (handshake_error) {
@@ -1627,7 +1769,10 @@ bob_participant_b64 = result.participant_b64;
 bob_has_joined = true;
 set_room_status('room: peer joined (waiting for commit echo)');
 log_output('room peer applied welcome');
-await drain_handshake_buffer('handshake (room post-welcome)');
+const drained = await drain_handshake_buffer('handshake (room post-welcome)');
+if (!drained.ok) {
+log_output(`room handshake buffer stalled: ${drained.error || drained.stalled_reason}`);
+}
 return true;
 };
 
@@ -1884,6 +2029,10 @@ Array.isArray(report.handshake_apply_failures) && report.handshake_apply_failure
 ? report.handshake_apply_failures.join('; ')
 : '(none)'
 }`,
+`handshake_dependency_stalls: ${
+Number.isInteger(report.handshake_dependency_stalls) ? report.handshake_dependency_stalls : 'n/a'
+}`,
+`handshake_replay_retry_used: ${report.handshake_replay_retry_used ? 'true' : 'false'}`,
 `app_seq: ${Number.isInteger(report.app_seq) ? report.app_seq : 'n/a'}`,
 `decrypted_plaintext: ${report.decrypted_plaintext || '(none)'}`,
 `expected_plaintext: ${report.expected_plaintext || '(none)'}`,
@@ -2442,6 +2591,8 @@ last_handshake_applied_seq: null,
 handshake_apply_participant: 'unknown',
 handshake_buffered_count: 0,
 handshake_apply_failures: [],
+handshake_dependency_stalls: 0,
+handshake_replay_retry_used: false,
 app_seq: null,
 decrypted_plaintext: '',
 expected_plaintext: '',
@@ -2526,6 +2677,8 @@ proof_report.participant_created = Boolean(scope_note && scope_note.participant_
 const handshake_participant_label = 'bob';
 proof_report.handshake_apply_participant = handshake_participant_label;
 const handshake_apply_failures = [];
+let handshake_dependency_stalls = 0;
+let handshake_replay_retry_used = false;
 const record_handshake_failure = (message) => {
 if (!message) {
 return;
@@ -2698,8 +2851,9 @@ proof_report.events_source = resolve_events_source(resolved.source_note || '');
 }
 
 set_step('drain', 'running', 'applying handshakes');
+const collect_handshake_events = (records) => {
 const handshake_events = [];
-for (const event of events) {
+for (const event of records) {
 if (!event || typeof event.env !== 'string') {
 continue;
 }
@@ -2716,12 +2870,23 @@ if (!matched_commit) {
 handshake_events.push({ seq: null, env: cli_envs.commit_env_b64 });
 }
 }
+return handshake_events;
+};
+const apply_handshake_events = async (records) => {
+const handshake_events = collect_handshake_events(records);
 let last_handshake_seq = null;
 let handshake_error = '';
+let dependency_stalled = false;
 let handshake_buffered_count = live_inbox_handshake_buffer_by_seq.size;
 if (!handshake_events.length) {
-set_step('drain', 'ok', 'no handshake envs');
-} else {
+return {
+ok: true,
+handshake_error: '',
+last_handshake_seq: null,
+handshake_buffered_count,
+dependency_stalled: false,
+};
+}
 for (const handshake_event of handshake_events) {
 if (is_unechoed_local_commit_env(handshake_event.env)) {
 handshake_error = handshake_error || 'local commit pending echo';
@@ -2741,27 +2906,71 @@ continue;
 if (apply_result.buffered) {
 handshake_buffered_count += 1;
 record_handshake_failure(apply_result.error);
+if (apply_result.buffered_reason === 'missing proposal') {
+dependency_stalled = true;
+handshake_dependency_stalls += 1;
+}
 continue;
 }
 record_handshake_failure(apply_result.error || 'handshake apply failed');
 handshake_error = handshake_error || 'handshake apply failed';
 break;
 }
-}
 if (live_inbox_handshake_buffer_by_seq.size) {
 const drained = await drain_handshake_buffer(options.handshake_buffer_label, {
 participant_label: handshake_participant_label,
 });
-if (!drained) {
-record_handshake_failure('handshake buffer drain failed');
-handshake_error = handshake_error || 'handshake buffer drain failed';
+if (!drained.ok) {
+record_handshake_failure(drained.error || 'handshake buffer drain failed');
+handshake_error = drained.error || 'handshake buffer drain failed';
+if (drained.stalled_reason === 'dependency missing') {
+dependency_stalled = true;
+handshake_dependency_stalls += 1;
 }
 }
-proof_report.last_handshake_applied_seq = last_handshake_seq;
-proof_report.handshake_buffered_count = handshake_buffered_count;
-proof_report.handshake_apply_failures = handshake_apply_failures;
-last_commit_seq = last_handshake_seq;
-if (handshake_error) {
+}
+return {
+ok: !handshake_error && !dependency_stalled,
+handshake_error,
+last_handshake_seq,
+handshake_buffered_count,
+dependency_stalled,
+};
+};
+let last_handshake_seq = null;
+let handshake_error = '';
+let handshake_buffered_count = live_inbox_handshake_buffer_by_seq.size;
+const handshake_result = await apply_handshake_events(events);
+last_handshake_seq = handshake_result.last_handshake_seq;
+handshake_error = handshake_result.handshake_error;
+handshake_buffered_count = handshake_result.handshake_buffered_count;
+if (handshake_result.dependency_stalled && !handshake_replay_retry_used) {
+handshake_replay_retry_used = true;
+proof_report.handshake_replay_retry_used = true;
+set_step('drain', 'running', 'dependency missing; replaying from seq=1');
+dispatch_gateway_subscribe(proof_report.conv_id, 1);
+live_inbox_handshake_attempts_by_seq = new Map();
+const replay_snapshot = await read_phase5_transcript_snapshot_with_fallback(
+proof_report.conv_id,
+transcript
+);
+if (replay_snapshot.ok) {
+transcript = replay_snapshot.transcript;
+events = replay_snapshot.events || [];
+proof_report.events_source =
+replay_snapshot.source === 'transcript db'
+? 'transcript db'
+: proof_report.events_source || resolve_events_source(resolved.source_note || '');
+proof_report.events_used = events.length;
+}
+const replay_result = await apply_handshake_events(events);
+last_handshake_seq = replay_result.last_handshake_seq;
+handshake_error = replay_result.handshake_error;
+handshake_buffered_count = replay_result.handshake_buffered_count;
+}
+if (!collect_handshake_events(events).length && !handshake_error) {
+set_step('drain', 'ok', 'no handshake envs');
+} else if (handshake_error) {
 set_step('drain', 'fail', handshake_error);
 proof_report.error = proof_report.error || handshake_error;
 if (!proof_report.decrypted_plaintext) {
@@ -2770,6 +2979,12 @@ proof_report.decrypted_plaintext = `error: ${handshake_error}`;
 } else if (steps_debug.find((step) => step.key === 'drain').status !== 'ok') {
 set_step('drain', 'ok', 'handshakes applied');
 }
+proof_report.last_handshake_applied_seq = last_handshake_seq;
+proof_report.handshake_buffered_count = handshake_buffered_count;
+proof_report.handshake_apply_failures = handshake_apply_failures;
+proof_report.handshake_dependency_stalls = handshake_dependency_stalls;
+proof_report.handshake_replay_retry_used = handshake_replay_retry_used;
+last_commit_seq = last_handshake_seq;
 
 if (steps_debug.find((step) => step.key === 'drain').status !== 'ok') {
 set_step('decrypt', 'pending', 'skipped (handshake failed)');
@@ -3825,6 +4040,7 @@ last_commit_seq = null;
 last_app_seq = null;
 live_inbox_by_seq = new Map();
 live_inbox_handshake_buffer_by_seq = new Map();
+live_inbox_handshake_attempts_by_seq = new Map();
 live_inbox_last_ingested_seq = null;
 set_live_inbox_expected_seq(1);
 set_group_id_input();
@@ -4044,7 +4260,10 @@ bob_participant_b64 = result.participant_b64;
 bob_has_joined = true;
 set_status('bob joined');
 log_output('bob applied welcome');
-await drain_handshake_buffer('handshake (post-welcome)');
+const drained = await drain_handshake_buffer('handshake (post-welcome)');
+if (!drained.ok) {
+log_output(`handshake buffer stalled: ${drained.error || drained.stalled_reason}`);
+}
 return true;
 };
 
