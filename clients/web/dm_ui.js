@@ -121,6 +121,9 @@ let room_status_line = null;
 let room_phase5_proof_run_btn = null;
 let room_phase5_proof_auto_reply_input = null;
 let room_phase5_proof_reply_input = null;
+let room_phase5_peer_wait_input = null;
+let room_phase5_peer_expected_input = null;
+let room_phase5_peer_timeout_input = null;
 let room_phase5_proof_timeline = null;
 let room_phase5_proof_report = null;
 let coexist_phase5_proof_run_btn = null;
@@ -131,11 +134,17 @@ let coexist_phase5_bundle_status_line = null;
 let coexist_phase5_bundle_auto_run_input = null;
 let coexist_phase5_proof_auto_reply_input = null;
 let coexist_phase5_proof_reply_input = null;
+let coexist_phase5_peer_wait_input = null;
+let coexist_phase5_peer_expected_input = null;
+let coexist_phase5_peer_timeout_input = null;
 let coexist_phase5_proof_timeline = null;
 let coexist_phase5_proof_report = null;
 let dm_phase5_proof_run_btn = null;
 let dm_phase5_proof_auto_reply_input = null;
 let dm_phase5_proof_reply_input = null;
+let dm_phase5_peer_wait_input = null;
+let dm_phase5_peer_expected_input = null;
+let dm_phase5_peer_timeout_input = null;
 let dm_phase5_proof_timeline = null;
 let dm_phase5_proof_report = null;
 
@@ -149,6 +158,8 @@ const keypackage_publish_path = '/v1/keypackages';
 const room_create_path = '/v1/rooms/create';
 const room_invite_path = '/v1/rooms/invite';
 const room_remove_path = '/v1/rooms/remove';
+const phase5_peer_wait_default_plaintext = 'phase5-peer-app';
+const phase5_peer_wait_default_timeout_ms = 10000;
 const gateway_transcript_db_name = 'gateway_web_demo';
 const gateway_transcript_db_version = 2;
 const gateway_transcript_store_name = 'transcripts';
@@ -1238,6 +1249,48 @@ const error_message = last_error
 return { ok: false, error: error_message };
 };
 
+const wait_for_next_app_record = async (conv_id, after_seq, timeout_ms) => {
+const normalized_after_seq = Number.isInteger(after_seq) ? after_seq : 0;
+const normalized_timeout_ms = Number.isInteger(timeout_ms) ? timeout_ms : 8000;
+const poll_interval_ms = 300;
+const deadline_ms = Date.now() + normalized_timeout_ms;
+let last_error = '';
+while (Date.now() <= deadline_ms) {
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+last_error = String(error);
+}
+let next_record = null;
+for (const record of records) {
+if (!record || typeof record.env !== 'string') {
+continue;
+}
+const env_meta = parse_live_inbox_env(record.env);
+if (!env_meta || env_meta.kind !== 3) {
+continue;
+}
+if (!Number.isInteger(record.seq) || record.seq <= normalized_after_seq) {
+continue;
+}
+if (!next_record || record.seq < next_record.seq) {
+next_record = record;
+}
+}
+if (next_record) {
+return { ok: true, seq: next_record.seq, env_b64: next_record.env };
+}
+await new Promise((resolve) => {
+setTimeout(resolve, poll_interval_ms);
+});
+}
+const error_message = last_error
+? `timeout waiting for app; last_error=${last_error}`
+: 'timeout waiting for app';
+return { ok: false, error: error_message };
+};
+
 const apply_phase5_handshakes_for_records = async (records, options) => {
 const normalized_options = options || {};
 const context_label = normalized_options.context_label || 'handshake';
@@ -1292,6 +1345,75 @@ if (handshake_error) {
 return { ok: false, error: handshake_error };
 }
 return { ok: true };
+};
+
+const wait_decrypt_peer_app = async (conv_id, after_seq, expected_plaintext, timeout_ms) => {
+const normalized_after_seq = Number.isInteger(after_seq) ? after_seq : 0;
+const normalized_timeout_ms = Number.isInteger(timeout_ms) ? timeout_ms : 8000;
+const expected_value = typeof expected_plaintext === 'string' ? expected_plaintext : '';
+return with_phase5_conv_scope(conv_id, { ensure_bob_participant: true }, async () => {
+const result = {
+ok: false,
+peer_app_seq: null,
+decrypted_plaintext: '',
+match: false,
+error: '',
+};
+if (!bob_participant_b64) {
+result.error = 'missing bob participant';
+return result;
+}
+let after_seq_cursor = normalized_after_seq;
+const deadline_ms = Date.now() + normalized_timeout_ms;
+while (Date.now() <= deadline_ms) {
+let records = [];
+try {
+records = await read_transcript_records_by_conv_id(conv_id);
+} catch (error) {
+result.error = `transcript read failed: ${error}`;
+return result;
+}
+const handshake_result = await apply_phase5_handshakes_for_records(records, {
+context_label: 'peer wait handshake',
+after_seq: after_seq_cursor,
+});
+if (!handshake_result.ok) {
+result.error = handshake_result.error;
+return result;
+}
+const remaining_ms = Math.max(0, deadline_ms - Date.now());
+if (remaining_ms <= 0) {
+break;
+}
+const wait_result = await wait_for_next_app_record(conv_id, after_seq_cursor, remaining_ms);
+if (!wait_result.ok) {
+result.error = wait_result.error || 'peer app wait timeout';
+return result;
+}
+after_seq_cursor = wait_result.seq;
+result.peer_app_seq = wait_result.seq;
+const app_unpacked = unpack_dm_env(wait_result.env_b64);
+if (!app_unpacked || app_unpacked.kind !== 3) {
+result.error = 'invalid app env';
+return result;
+}
+const dec_result = await dm_decrypt(bob_participant_b64, app_unpacked.payload_b64);
+if (!dec_result || !dec_result.ok) {
+const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
+result.error = `decrypt failed: ${error_text}`;
+return result;
+}
+bob_participant_b64 = dec_result.participant_b64;
+result.decrypted_plaintext = dec_result.plaintext;
+if (!expected_value || dec_result.plaintext === expected_value) {
+result.match = true;
+result.ok = true;
+return result;
+}
+}
+result.error = result.error || 'peer app wait timeout';
+return result;
+});
 };
 
 const send_wait_decrypt_app = async (conv_id, label, plaintext, opts) => {
@@ -2036,9 +2158,17 @@ Number.isInteger(report.handshake_dependency_stalls) ? report.handshake_dependen
 `app_seq: ${Number.isInteger(report.app_seq) ? report.app_seq : 'n/a'}`,
 `decrypted_plaintext: ${report.decrypted_plaintext || '(none)'}`,
 `expected_plaintext: ${report.expected_plaintext || '(none)'}`,
+`peer_wait_enabled: ${report.peer_wait_enabled ? 'true' : 'false'}`,
+`peer_wait_status: ${report.peer_wait_status || '(none)'}`,
+`peer_app_seq: ${Number.isInteger(report.peer_app_seq) ? report.peer_app_seq : 'n/a'}`,
+`peer_decrypted_plaintext: ${report.peer_decrypted_plaintext || '(none)'}`,
+`peer_expected_plaintext: ${report.peer_expected_plaintext || '(none)'}`,
 ];
 if (report.expected_plaintext_result) {
 lines.push(`expected_plaintext_result: ${report.expected_plaintext_result}`);
+}
+if (report.peer_expected_plaintext_result) {
+lines.push(`peer_expected_plaintext_result: ${report.peer_expected_plaintext_result}`);
 }
 lines.push(`auto_reply_attempted: ${report.auto_reply_attempted ? 'yes' : 'no'}`);
 lines.push(`reply_plaintext: ${report.reply_plaintext || '(none)'}`);
@@ -2047,6 +2177,9 @@ lines.push(`end_ms: ${Number.isInteger(report.end_ms) ? report.end_ms : 'n/a'}`)
 lines.push(`duration_ms: ${Number.isInteger(report.duration_ms) ? report.duration_ms : 'n/a'}`);
 if (report.error) {
 lines.push(`error: ${report.error}`);
+}
+if (report.peer_wait_error) {
+lines.push(`peer_wait_error: ${report.peer_wait_error}`);
 }
 return lines.join('\n');
 };
@@ -2070,7 +2203,8 @@ return 'SKIP';
 }
 const expected_ok =
 !report.expected_plaintext_result || report.expected_plaintext_result === 'PASS';
-if (report.error || !expected_ok) {
+const peer_wait_failed = report.peer_wait_enabled && report.peer_wait_status === 'FAIL';
+if (report.error || !expected_ok || peer_wait_failed) {
 return 'FAIL';
 }
 return 'PASS';
@@ -2114,6 +2248,12 @@ report && Array.isArray(report.handshake_apply_failures) && report.handshake_app
 }`,
 `app_seq: ${app_seq}`,
 `plaintext_or_error: ${plaintext_or_error}`,
+`peer_wait_enabled: ${report && report.peer_wait_enabled ? 'true' : 'false'}`,
+`peer_wait_status: ${report && report.peer_wait_status ? report.peer_wait_status : '(none)'}`,
+`peer_app_seq: ${report && Number.isInteger(report.peer_app_seq) ? report.peer_app_seq : 'n/a'}`,
+`peer_decrypted_plaintext: ${report && report.peer_decrypted_plaintext
+? report.peer_decrypted_plaintext
+: '(none)'}`,
 `auto_reply_attempted: ${report && report.auto_reply_attempted ? 'yes' : 'no'}`,
 `duration_ms: ${report && Number.isInteger(report.duration_ms) ? report.duration_ms : 'n/a'}`,
 ];
@@ -2599,6 +2739,13 @@ expected_plaintext: '',
 expected_plaintext_result: '',
 auto_reply_attempted: false,
 reply_plaintext: '',
+peer_wait_enabled: false,
+peer_wait_status: '',
+peer_app_seq: null,
+peer_decrypted_plaintext: '',
+peer_expected_plaintext: '',
+peer_expected_plaintext_result: '',
+peer_wait_error: '',
 participant_scoped: false,
 participant_created: false,
 start_ms: proof_start_ms,
@@ -2669,6 +2816,24 @@ proof_report.conv_id = resolved.conv_id;
 if (resolved.source_note) {
 set_status_prefixed(resolved.source_note);
 }
+const offline_transcript_mode = Boolean(
+resolved.source_note && (
+resolved.source_note.includes('imported transcript') ||
+resolved.source_note.includes('coexist bundle')
+)
+);
+const peer_wait_enabled = Boolean(options.peer_wait_input && options.peer_wait_input.checked);
+const peer_wait_expected_plaintext = options.peer_wait_expected_input
+? options.peer_wait_expected_input.value
+: phase5_peer_wait_default_plaintext;
+const peer_wait_timeout_ms = Number.isInteger(Number.parseInt(
+options.peer_wait_timeout_input ? options.peer_wait_timeout_input.value : '',
+10
+))
+? Number.parseInt(options.peer_wait_timeout_input.value, 10)
+: phase5_peer_wait_default_timeout_ms;
+proof_report.peer_wait_enabled = peer_wait_enabled;
+proof_report.peer_expected_plaintext = peer_wait_expected_plaintext || '';
 const scoped_result = await with_phase5_conv_scope(proof_report.conv_id, {
 ensure_bob_participant: true,
 }, async (scope_note) => {
@@ -3093,6 +3258,45 @@ log_output(`${status_prefix} reply env sent`);
 }
 }
 
+if (peer_wait_enabled) {
+if (!decrypt_ok) {
+proof_report.peer_wait_status = 'SKIP';
+proof_report.peer_wait_error = 'skipped (decrypt failed)';
+} else if (!expected_pass) {
+proof_report.peer_wait_status = 'SKIP';
+proof_report.peer_wait_error = 'skipped (expected_plaintext FAIL)';
+} else if (offline_transcript_mode) {
+proof_report.peer_wait_status = 'SKIP';
+proof_report.peer_wait_error = 'offline transcript mode';
+} else {
+set_status_prefixed('waiting for peer app');
+const peer_after_seq = Number.isInteger(proof_report.app_seq)
+? proof_report.app_seq
+: Number.isInteger(last_app_seq)
+? last_app_seq
+: 0;
+const peer_wait_result = await wait_decrypt_peer_app(
+proof_report.conv_id,
+peer_after_seq,
+peer_wait_expected_plaintext,
+peer_wait_timeout_ms
+);
+proof_report.peer_app_seq = peer_wait_result.peer_app_seq;
+proof_report.peer_decrypted_plaintext = peer_wait_result.decrypted_plaintext || '';
+if (peer_wait_expected_plaintext) {
+proof_report.peer_expected_plaintext_result = peer_wait_result.match ? 'PASS' : 'FAIL';
+}
+if (peer_wait_result.ok) {
+proof_report.peer_wait_status = 'PASS';
+set_status_prefixed('peer app decrypted');
+} else {
+proof_report.peer_wait_status = 'FAIL';
+proof_report.peer_wait_error = peer_wait_result.error || 'peer wait failed';
+set_status_prefixed('peer app wait failed');
+}
+}
+}
+
 set_step('report', 'running', 'building report');
 set_step('report', 'ok', 'report ready');
 return proof_report;
@@ -3143,6 +3347,9 @@ set_welcome_env_input: options.set_welcome_env_input,
 set_decrypt_output: options.set_decrypt_output,
 auto_reply_input: options.auto_reply_input,
 reply_input: options.reply_input,
+peer_wait_input: options.peer_wait_input,
+peer_wait_expected_input: options.peer_wait_expected_input,
+peer_wait_timeout_input: options.peer_wait_timeout_input,
 handshake_context_label: options.handshake_context_label,
 handshake_buffer_label: options.handshake_buffer_label,
 });
@@ -3177,6 +3384,9 @@ set_decrypted_output(plaintext);
 },
 auto_reply_input: dm_phase5_proof_auto_reply_input,
 reply_input: dm_phase5_proof_reply_input,
+peer_wait_input: dm_phase5_peer_wait_input,
+peer_wait_expected_input: dm_phase5_peer_expected_input,
+peer_wait_timeout_input: dm_phase5_peer_timeout_input,
 handshake_context_label: 'handshake (dm proof)',
 handshake_buffer_label: 'handshake (dm proof buffer)',
 });
@@ -3205,6 +3415,9 @@ room_welcome_env_input.value = env_b64;
 set_decrypt_output: set_room_decrypt_output,
 auto_reply_input: room_phase5_proof_auto_reply_input,
 reply_input: room_phase5_proof_reply_input,
+peer_wait_input: room_phase5_peer_wait_input,
+peer_wait_expected_input: room_phase5_peer_expected_input,
+peer_wait_timeout_input: room_phase5_peer_timeout_input,
 handshake_context_label: 'handshake (proof wizard)',
 handshake_buffer_label: 'handshake (proof wizard buffer)',
 });
@@ -3366,6 +3579,9 @@ set_welcome_env_input: options.set_welcome_env_input,
 set_decrypt_output: options.set_decrypt_output,
 auto_reply_input: coexist_phase5_proof_auto_reply_input,
 reply_input: coexist_phase5_proof_reply_input,
+peer_wait_input: coexist_phase5_peer_wait_input,
+peer_wait_expected_input: coexist_phase5_peer_expected_input,
+peer_wait_timeout_input: coexist_phase5_peer_timeout_input,
 handshake_context_label: `handshake (coexist ${label})`,
 handshake_buffer_label: `handshake (coexist ${label} buffer)`,
 });
@@ -5572,6 +5788,12 @@ dm_phase5_proof_auto_reply_input = document.createElement('input');
 dm_phase5_proof_auto_reply_input.type = 'checkbox';
 dm_phase5_proof_auto_reply_label.appendChild(dm_phase5_proof_auto_reply_input);
 dm_phase5_proof_controls.appendChild(dm_phase5_proof_auto_reply_label);
+const dm_phase5_peer_wait_label = document.createElement('label');
+dm_phase5_peer_wait_label.textContent = 'Require peer app after PASS';
+dm_phase5_peer_wait_input = document.createElement('input');
+dm_phase5_peer_wait_input.type = 'checkbox';
+dm_phase5_peer_wait_label.appendChild(dm_phase5_peer_wait_input);
+dm_phase5_proof_controls.appendChild(dm_phase5_peer_wait_label);
 dm_phase5_proof_panel.appendChild(dm_phase5_proof_controls);
 
 const dm_phase5_proof_reply_label = document.createElement('label');
@@ -5582,6 +5804,22 @@ dm_phase5_proof_reply_input.size = 48;
 dm_phase5_proof_reply_input.value = 'phase5-peer-reply';
 dm_phase5_proof_reply_label.appendChild(dm_phase5_proof_reply_input);
 dm_phase5_proof_panel.appendChild(dm_phase5_proof_reply_label);
+const dm_phase5_peer_expected_label = document.createElement('label');
+dm_phase5_peer_expected_label.textContent = 'Peer expected plaintext';
+dm_phase5_peer_expected_input = document.createElement('input');
+dm_phase5_peer_expected_input.type = 'text';
+dm_phase5_peer_expected_input.size = 48;
+dm_phase5_peer_expected_input.value = phase5_peer_wait_default_plaintext;
+dm_phase5_peer_expected_label.appendChild(dm_phase5_peer_expected_input);
+dm_phase5_proof_panel.appendChild(dm_phase5_peer_expected_label);
+const dm_phase5_peer_timeout_label = document.createElement('label');
+dm_phase5_peer_timeout_label.textContent = 'Peer wait timeout (ms)';
+dm_phase5_peer_timeout_input = document.createElement('input');
+dm_phase5_peer_timeout_input.type = 'number';
+dm_phase5_peer_timeout_input.min = '1000';
+dm_phase5_peer_timeout_input.value = String(phase5_peer_wait_default_timeout_ms);
+dm_phase5_peer_timeout_label.appendChild(dm_phase5_peer_timeout_input);
+dm_phase5_proof_panel.appendChild(dm_phase5_peer_timeout_label);
 
 const dm_phase5_proof_timeline_label = document.createElement('div');
 dm_phase5_proof_timeline_label.textContent = 'Proof steps';
@@ -5795,6 +6033,12 @@ coexist_phase5_proof_auto_reply_input = document.createElement('input');
 coexist_phase5_proof_auto_reply_input.type = 'checkbox';
 coexist_phase5_auto_reply_label.appendChild(coexist_phase5_proof_auto_reply_input);
 coexist_phase5_controls.appendChild(coexist_phase5_auto_reply_label);
+const coexist_phase5_peer_wait_label = document.createElement('label');
+coexist_phase5_peer_wait_label.textContent = 'Require peer app after PASS';
+coexist_phase5_peer_wait_input = document.createElement('input');
+coexist_phase5_peer_wait_input.type = 'checkbox';
+coexist_phase5_peer_wait_label.appendChild(coexist_phase5_peer_wait_input);
+coexist_phase5_controls.appendChild(coexist_phase5_peer_wait_label);
 coexist_phase5_panel.appendChild(coexist_phase5_controls);
 
 const coexist_bundle_label = document.createElement('label');
@@ -5843,6 +6087,22 @@ coexist_phase5_proof_reply_input.size = 48;
 coexist_phase5_proof_reply_input.value = 'phase5-coexist-peer-reply';
 coexist_phase5_reply_label.appendChild(coexist_phase5_proof_reply_input);
 coexist_phase5_panel.appendChild(coexist_phase5_reply_label);
+const coexist_phase5_peer_expected_label = document.createElement('label');
+coexist_phase5_peer_expected_label.textContent = 'Peer expected plaintext';
+coexist_phase5_peer_expected_input = document.createElement('input');
+coexist_phase5_peer_expected_input.type = 'text';
+coexist_phase5_peer_expected_input.size = 48;
+coexist_phase5_peer_expected_input.value = phase5_peer_wait_default_plaintext;
+coexist_phase5_peer_expected_label.appendChild(coexist_phase5_peer_expected_input);
+coexist_phase5_panel.appendChild(coexist_phase5_peer_expected_label);
+const coexist_phase5_peer_timeout_label = document.createElement('label');
+coexist_phase5_peer_timeout_label.textContent = 'Peer wait timeout (ms)';
+coexist_phase5_peer_timeout_input = document.createElement('input');
+coexist_phase5_peer_timeout_input.type = 'number';
+coexist_phase5_peer_timeout_input.min = '1000';
+coexist_phase5_peer_timeout_input.value = String(phase5_peer_wait_default_timeout_ms);
+coexist_phase5_peer_timeout_label.appendChild(coexist_phase5_peer_timeout_input);
+coexist_phase5_panel.appendChild(coexist_phase5_peer_timeout_label);
 
 const coexist_phase5_timeline_label = document.createElement('div');
 coexist_phase5_timeline_label.textContent = 'Combined proof steps';
@@ -5884,6 +6144,12 @@ room_phase5_proof_auto_reply_input = document.createElement('input');
 room_phase5_proof_auto_reply_input.type = 'checkbox';
 room_phase5_proof_auto_reply_label.appendChild(room_phase5_proof_auto_reply_input);
 room_phase5_proof_controls.appendChild(room_phase5_proof_auto_reply_label);
+const room_phase5_peer_wait_label = document.createElement('label');
+room_phase5_peer_wait_label.textContent = 'Require peer app after PASS';
+room_phase5_peer_wait_input = document.createElement('input');
+room_phase5_peer_wait_input.type = 'checkbox';
+room_phase5_peer_wait_label.appendChild(room_phase5_peer_wait_input);
+room_phase5_proof_controls.appendChild(room_phase5_peer_wait_label);
 room_phase5_proof_panel.appendChild(room_phase5_proof_controls);
 
 const room_phase5_proof_reply_label = document.createElement('label');
@@ -5894,6 +6160,22 @@ room_phase5_proof_reply_input.size = 48;
 room_phase5_proof_reply_input.value = 'phase5-peer-reply';
 room_phase5_proof_reply_label.appendChild(room_phase5_proof_reply_input);
 room_phase5_proof_panel.appendChild(room_phase5_proof_reply_label);
+const room_phase5_peer_expected_label = document.createElement('label');
+room_phase5_peer_expected_label.textContent = 'Peer expected plaintext';
+room_phase5_peer_expected_input = document.createElement('input');
+room_phase5_peer_expected_input.type = 'text';
+room_phase5_peer_expected_input.size = 48;
+room_phase5_peer_expected_input.value = phase5_peer_wait_default_plaintext;
+room_phase5_peer_expected_label.appendChild(room_phase5_peer_expected_input);
+room_phase5_proof_panel.appendChild(room_phase5_peer_expected_label);
+const room_phase5_peer_timeout_label = document.createElement('label');
+room_phase5_peer_timeout_label.textContent = 'Peer wait timeout (ms)';
+room_phase5_peer_timeout_input = document.createElement('input');
+room_phase5_peer_timeout_input.type = 'number';
+room_phase5_peer_timeout_input.min = '1000';
+room_phase5_peer_timeout_input.value = String(phase5_peer_wait_default_timeout_ms);
+room_phase5_peer_timeout_label.appendChild(room_phase5_peer_timeout_input);
+room_phase5_proof_panel.appendChild(room_phase5_peer_timeout_label);
 
 const room_phase5_proof_timeline_label = document.createElement('div');
 room_phase5_proof_timeline_label.textContent = 'Proof steps';
