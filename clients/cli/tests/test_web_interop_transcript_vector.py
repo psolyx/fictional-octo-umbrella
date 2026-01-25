@@ -287,5 +287,71 @@ class WebInteropTranscriptVectorTests(unittest.TestCase):
             self.assertEqual(decrypted, "phase5-seeded-transcript")
 
 
+class Phase5CoexistBundleVectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo_root = Path(__file__).resolve().parents[3]
+        self.vector_path = (
+            self.repo_root / "clients" / "web" / "vectors" / "phase5_coexist_bundle_seeded_v1.json"
+        )
+
+    def _load_vector(self, vector_path: Path) -> dict:
+        with vector_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _assert_peer_tokens_types(self, peer_tokens: dict) -> None:
+        self.assertIsInstance(peer_tokens, dict)
+        self.assertIsInstance(peer_tokens.get("peer_app_expected"), str)
+        self.assertIsInstance(peer_tokens.get("sent_peer_token_plaintext"), str)
+        self.assertIsInstance(peer_tokens.get("peer_app_expected_match"), bool)
+
+        peer_app_seq = peer_tokens.get("peer_app_seq")
+        sent_peer_token_seq = peer_tokens.get("sent_peer_token_seq")
+        self.assertTrue(peer_app_seq is None or isinstance(peer_app_seq, int))
+        self.assertTrue(sent_peer_token_seq is None or isinstance(sent_peer_token_seq, int))
+
+    def test_phase5_coexist_bundle_contract(self) -> None:
+        vector = self._load_vector(self.vector_path)
+        self.assertEqual(vector.get("schema_version"), "phase5_coexist_bundle_v1")
+
+        for section_key in ("dm", "room"):
+            with self.subTest(section=section_key):
+                section = vector.get(section_key)
+                self.assertIsInstance(section, dict)
+                self.assertIsInstance(section.get("expected_plaintext"), str)
+
+                transcript = section.get("transcript")
+                self.assertIsInstance(transcript, dict)
+
+                canonical = canonicalize_transcript(
+                    transcript["conv_id"],
+                    transcript["from_seq"],
+                    transcript["next_seq"],
+                    transcript["events"],
+                )
+                digest_b64 = compute_digest_sha256_b64(canonical)
+                self.assertEqual(digest_b64, transcript["digest_sha256_b64"])
+
+                proof_app_seq = section.get("proof_app_seq")
+                proof_app_msg_id = section.get("proof_app_msg_id")
+                self.assertIsInstance(proof_app_seq, int)
+                self.assertIsInstance(proof_app_msg_id, str)
+
+                events = transcript.get("events", [])
+                proof_event = next(
+                    (event for event in events if event.get("seq") == proof_app_seq),
+                    None,
+                )
+                self.assertIsNotNone(proof_event)
+                env = proof_event.get("env")
+                msg_id = proof_event.get("msg_id")
+                self.assertIsInstance(env, str)
+                self.assertIsInstance(msg_id, str)
+                self.assertEqual(decode_env_kind(env), 3)
+                self.assertEqual(compute_msg_id_hex(env), proof_app_msg_id)
+
+                if "peer_tokens" in section:
+                    self._assert_peer_tokens_types(section["peer_tokens"])
+
+
 if __name__ == "__main__":
     unittest.main()
