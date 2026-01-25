@@ -1416,6 +1416,62 @@ return result;
 });
 };
 
+const decrypt_app_env_from_records = async (records, seq, expected_plaintext, context_label) => {
+const result = {
+ok: false,
+seq,
+plaintext: '',
+match: false,
+error: '',
+};
+if (!Number.isInteger(seq)) {
+result.error = 'invalid seq';
+return result;
+}
+if (!bob_participant_b64) {
+result.error = 'missing bob participant';
+return result;
+}
+const record = Array.isArray(records)
+? records.find((entry) => entry && entry.seq === seq && typeof entry.env === 'string')
+: null;
+if (!record) {
+result.error = `missing app env at seq ${seq}`;
+return result;
+}
+const env_meta = parse_live_inbox_env(record.env);
+if (!env_meta || env_meta.kind !== 3) {
+result.error = `invalid app env at seq ${seq}`;
+return result;
+}
+const handshake_result = await apply_phase5_handshakes_for_records(records || [], {
+context_label,
+after_seq: last_commit_seq,
+});
+if (!handshake_result.ok) {
+result.error = handshake_result.error || 'handshake apply failed';
+return result;
+}
+const unpacked = unpack_dm_env(record.env);
+if (!unpacked || unpacked.kind !== 3) {
+result.error = `invalid app env at seq ${seq}`;
+return result;
+}
+const dec_result = await dm_decrypt(bob_participant_b64, unpacked.payload_b64);
+if (!dec_result || !dec_result.ok) {
+const error_text = dec_result && dec_result.error ? dec_result.error : 'unknown error';
+result.error = `decrypt failed: ${error_text}`;
+return result;
+}
+bob_participant_b64 = dec_result.participant_b64;
+result.plaintext = dec_result.plaintext;
+if (!expected_plaintext || dec_result.plaintext === expected_plaintext) {
+result.match = true;
+result.ok = true;
+}
+return result;
+};
+
 const build_peer_wait_token = () => {
 const token_bytes = new Uint8Array(8);
 if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
@@ -2301,6 +2357,8 @@ report && Number.isInteger(report.last_handshake_applied_seq)
 ? report.last_handshake_applied_seq
 : 'n/a';
 const app_seq = report && Number.isInteger(report.app_seq) ? report.app_seq : 'n/a';
+const proof_app_seq =
+report && Number.isInteger(report.proof_app_seq) ? report.proof_app_seq : 'n/a';
 return `${label}: conv_id=${conv_id} digest=${digest} welcome_seq=${welcome_seq} last_handshake_applied_seq=${handshake_seq} app_seq=${app_seq} result=${result_label}`;
 };
 
@@ -2354,6 +2412,7 @@ report && Array.isArray(report.handshake_apply_failures) && report.handshake_app
 : '(none)'
 }`,
 `app_seq: ${app_seq}`,
+`proof_app_seq: ${proof_app_seq}`,
 `plaintext_or_error: ${plaintext_or_error}`,
 `peer_wait_enabled: ${report && report.peer_wait_enabled ? 'true' : 'false'}`,
 `peer_wait_status: ${report && report.peer_wait_status ? report.peer_wait_status : '(none)'}`,
@@ -2419,8 +2478,9 @@ lines.push(`${label}: missing`);
 return;
 }
 const peer_app_seq = Number.isInteger(entry.peer_app_seq) ? entry.peer_app_seq : 'n/a';
+const reason_suffix = entry.reason ? ` (${entry.reason})` : '';
 lines.push(
-`${label}: status=${entry.status || 'FAIL'} token_web_to_cli=${entry.token_web_to_cli || '(none)'} ` +
+`${label}: status=${entry.status || 'FAIL'}${reason_suffix} token_web_to_cli=${entry.token_web_to_cli || '(none)'} ` +
 `token_cli_to_web_expected=${entry.token_cli_to_web_expected || '(none)'} ` +
 `token_cli_to_web_result=${entry.token_cli_to_web_result || '(none)'} ` +
 `peer_app_seq=${peer_app_seq} peer_decrypted_plaintext=${entry.peer_decrypted_plaintext || '(none)'}`
@@ -2541,9 +2601,148 @@ source_note,
 };
 };
 
-const build_phase5_bundle_cli_block = (bundle_section) => ({
-conv_id: bundle_section.transcript.conv_id,
+const build_phase5_bundle_cli_block = (bundle_section) => {
+const transcript = bundle_section && bundle_section.transcript ? bundle_section.transcript : null;
+const events = transcript && Array.isArray(transcript.events) ? transcript.events : [];
+const proof_app_seq_value =
+bundle_section && Number.isInteger(bundle_section.proof_app_seq)
+? bundle_section.proof_app_seq
+: null;
+const block = {
+conv_id: transcript && typeof transcript.conv_id === 'string' ? transcript.conv_id : '',
+};
+if (proof_app_seq_value !== null) {
+const matched_app = find_transcript_event_by_seq(events, proof_app_seq_value, 3);
+if (matched_app) {
+block.app_env_b64 = matched_app.env;
+block.proof_app_seq = proof_app_seq_value;
+}
+}
+return block;
+};
+
+const run_offline_peer_tokens = async (bundle_section, conv_id, report, set_status_fn, label) => {
+const result = {
+status: 'FAIL',
+reason: '',
+token_web_to_cli: '',
+token_cli_to_web_expected: '',
+token_cli_to_web_result: '',
+peer_app_seq: null,
+peer_decrypted_plaintext: '',
+error: '',
+};
+if (!bundle_section || !bundle_section.peer_tokens) {
+result.status = 'SKIP';
+result.reason = 'peer_tokens missing';
+result.error = result.reason;
+return result;
+}
+const peer_tokens = bundle_section.peer_tokens;
+result.token_web_to_cli = peer_tokens.peer_app_expected || '';
+result.token_cli_to_web_expected = peer_tokens.sent_peer_token_plaintext || '';
+const proof_app_seq_value = Number.isInteger(bundle_section.proof_app_seq)
+? bundle_section.proof_app_seq
+: report && Number.isInteger(report.proof_app_seq)
+? report.proof_app_seq
+: null;
+const peer_app_seq_value =
+Number.isInteger(peer_tokens.peer_app_seq) ? peer_tokens.peer_app_seq : null;
+const sent_peer_token_seq_value =
+Number.isInteger(peer_tokens.sent_peer_token_seq) ? peer_tokens.sent_peer_token_seq : null;
+if (!peer_app_seq_value && !sent_peer_token_seq_value) {
+result.status = 'SKIP';
+result.reason = 'bundle missing peer token events';
+result.error = result.reason;
+return result;
+}
+const transcript = bundle_section.transcript;
+const records = build_phase5_records_from_transcript(transcript || { events: [] });
+const missing_seqs = [];
+const target_seqs = [];
+for (const seq_value of [peer_app_seq_value, sent_peer_token_seq_value]) {
+if (!Number.isInteger(seq_value)) {
+continue;
+}
+const record_match =
+records.find((entry) => entry && entry.seq === seq_value && typeof entry.env === 'string') || null;
+if (!record_match) {
+missing_seqs.push(seq_value);
+} else {
+const env_meta = parse_live_inbox_env(record_match.env);
+if (!env_meta || env_meta.kind !== 3) {
+missing_seqs.push(seq_value);
+} else {
+target_seqs.push(seq_value);
+}
+}
+}
+if (missing_seqs.length) {
+result.status = 'SKIP';
+result.reason = 'bundle missing peer token events';
+result.error = result.reason;
+return result;
+}
+if (Number.isInteger(proof_app_seq_value)) {
+const invalid_order = target_seqs.some((seq_value) => seq_value <= proof_app_seq_value);
+if (invalid_order) {
+result.status = 'FAIL';
+result.error = 'peer token seq before proof app';
+return result;
+}
+}
+if (typeof set_status_fn === 'function') {
+set_status_fn(`coexist ${label} peer tokens: offline validate`);
+}
+return with_phase5_conv_scope(conv_id, { ensure_bob_participant: true }, async () => {
+const ordered_targets = [...target_seqs].sort((left, right) => left - right);
+const decrypted_by_seq = new Map();
+for (const seq_value of ordered_targets) {
+const expected_plaintext =
+seq_value === peer_app_seq_value
+? peer_tokens.peer_app_expected
+: peer_tokens.sent_peer_token_plaintext;
+const decrypt_result = await decrypt_app_env_from_records(
+records,
+seq_value,
+expected_plaintext,
+`offline peer tokens (${label})`
+);
+if (!decrypt_result.ok && decrypt_result.error) {
+result.error = decrypt_result.error;
+return result;
+}
+decrypted_by_seq.set(seq_value, decrypt_result);
+}
+if (peer_app_seq_value !== null) {
+const peer_app_result = decrypted_by_seq.get(peer_app_seq_value);
+if (peer_app_result) {
+result.peer_app_seq = peer_app_seq_value;
+result.peer_decrypted_plaintext = peer_app_result.plaintext || '';
+}
+}
+const token_result = sent_peer_token_seq_value !== null
+? decrypted_by_seq.get(sent_peer_token_seq_value)
+: null;
+const peer_app_match =
+peer_app_seq_value === null
+? true
+: Boolean(decrypted_by_seq.get(peer_app_seq_value) && decrypted_by_seq.get(peer_app_seq_value).match);
+const token_match =
+sent_peer_token_seq_value === null
+? true
+: Boolean(token_result && token_result.match);
+result.token_cli_to_web_result = token_match ? 'MATCH' : 'MISMATCH';
+result.status = peer_app_match && token_match ? 'PASS' : 'FAIL';
+if (!peer_app_match) {
+result.error = result.error || 'peer_app_expected mismatch';
+}
+if (!token_match) {
+result.error = result.error || 'token_cli_to_web mismatch';
+}
+return result;
 });
+};
 
 const resolve_phase5_bundle_inputs = (bundle_section) => {
 if (!bundle_section || !bundle_section.transcript) {
@@ -2559,7 +2758,7 @@ return {
 ok: true,
 conv_id,
 transcript: bundle_section.transcript,
-cli_block: null,
+cli_block: build_phase5_bundle_cli_block(bundle_section),
 source_note: 'coexist bundle',
 };
 };
@@ -2887,6 +3086,7 @@ handshake_apply_failures: [],
 handshake_dependency_stalls: 0,
 handshake_replay_retry_used: false,
 app_seq: null,
+proof_app_seq: null,
 decrypted_plaintext: '',
 expected_plaintext: '',
 expected_plaintext_result: '',
@@ -3329,6 +3529,9 @@ const selected_app_env = cli_envs.app_env_b64 || (latest_app && latest_app.env);
 const matched_app = selected_app_env ? lookup_events(selected_app_env, 3) : null;
 const app_seq = matched_app && Number.isInteger(matched_app.seq) ? matched_app.seq : null;
 proof_report.app_seq = app_seq;
+const proof_app_seq_value =
+cli_envs && Number.isInteger(cli_envs.proof_app_seq) ? cli_envs.proof_app_seq : app_seq;
+proof_report.proof_app_seq = proof_app_seq_value;
 if (!selected_app_env) {
 set_step('decrypt', 'fail', 'no app env found');
 proof_report.error = proof_report.error || 'no app env found';
@@ -3885,6 +4088,68 @@ return result;
 };
 set_coexist_step('peer_tokens', 'running', 'sending peer tokens');
 if (offline_transcript_mode) {
+const bundle_peer_tokens_present = Boolean(
+coexist_bundle &&
+(
+(coexist_bundle.dm && coexist_bundle.dm.peer_tokens) ||
+(coexist_bundle.room && coexist_bundle.room.peer_tokens)
+)
+);
+if (bundle_peer_tokens_present) {
+const dm_token_result =
+dm_block && coexist_bundle.dm
+? await run_offline_peer_tokens(
+coexist_bundle.dm,
+dm_conv_id,
+dm_report,
+set_status,
+'dm'
+)
+: null;
+const room_token_result =
+coexist_bundle.room
+? await run_offline_peer_tokens(
+coexist_bundle.room,
+room_conv_id_value,
+room_report,
+set_room_status,
+'room'
+)
+: null;
+const token_statuses = [];
+if (dm_token_result) {
+token_statuses.push(dm_token_result.status);
+}
+if (room_token_result) {
+token_statuses.push(room_token_result.status);
+}
+let peer_tokens_status = 'SKIP';
+if (token_statuses.includes('FAIL')) {
+peer_tokens_status = 'FAIL';
+} else if (token_statuses.includes('PASS')) {
+peer_tokens_status = 'PASS';
+}
+const peer_tokens_errors = [];
+if (dm_token_result && dm_token_result.error) {
+peer_tokens_errors.push(`dm: ${dm_token_result.error}`);
+}
+if (room_token_result && room_token_result.error) {
+peer_tokens_errors.push(`room: ${room_token_result.error}`);
+}
+coexist_peer_tokens = {
+status: peer_tokens_status,
+reason: '',
+cli_command: '',
+dm: dm_token_result,
+room: room_token_result,
+error: peer_tokens_errors.length ? peer_tokens_errors.join('; ') : '',
+};
+set_coexist_step(
+'peer_tokens',
+peer_tokens_status === 'FAIL' ? 'fail' : 'ok',
+peer_tokens_status === 'FAIL' ? 'peer tokens failed' : 'offline peer tokens validated'
+);
+} else {
 coexist_peer_tokens = {
 status: 'SKIP',
 reason: 'offline transcript mode',
@@ -3893,6 +4158,7 @@ dm: null,
 room: null,
 };
 set_coexist_step('peer_tokens', 'ok', 'skipped (offline transcript mode)');
+}
 } else if (!dm_block) {
 coexist_peer_tokens = {
 status: 'SKIP',
@@ -5452,6 +5718,62 @@ return { ok: false, error: 'bundle must be an object' };
 if (bundle.schema_version !== 'phase5_coexist_bundle_v1') {
 return { ok: false, error: 'unsupported bundle schema_version' };
 }
+const validate_bundle_section_fields = (section, transcript, label) => {
+const proof_app_seq_value =
+Number.isInteger(section.proof_app_seq) ? section.proof_app_seq : null;
+if (proof_app_seq_value !== null) {
+if (!Array.isArray(transcript.events)) {
+return { ok: false, error: `${label} transcript events missing` };
+}
+let proof_app_found = false;
+for (const event of transcript.events) {
+if (!event || event.seq !== proof_app_seq_value || typeof event.env !== 'string') {
+continue;
+}
+const env_bytes = base64_to_bytes(event.env);
+if (env_bytes && env_bytes.length > 0 && env_bytes[0] === 3) {
+proof_app_found = true;
+break;
+}
+}
+if (!proof_app_found) {
+return { ok: false, error: `${label} proof_app_seq missing from transcript` };
+}
+}
+if (section.proof_app_msg_id !== undefined && typeof section.proof_app_msg_id !== 'string') {
+return { ok: false, error: `${label} proof_app_msg_id must be a string` };
+}
+if (section.peer_tokens !== undefined && section.peer_tokens !== null) {
+if (!section.peer_tokens || typeof section.peer_tokens !== 'object') {
+return { ok: false, error: `${label} peer_tokens must be an object` };
+}
+const peer_tokens = section.peer_tokens;
+if (typeof peer_tokens.peer_app_expected !== 'string') {
+return { ok: false, error: `${label} peer_tokens.peer_app_expected must be a string` };
+}
+if (
+peer_tokens.peer_app_seq !== null &&
+peer_tokens.peer_app_seq !== undefined &&
+!Number.isInteger(peer_tokens.peer_app_seq)
+) {
+return { ok: false, error: `${label} peer_tokens.peer_app_seq must be int or null` };
+}
+if (typeof peer_tokens.sent_peer_token_plaintext !== 'string') {
+return { ok: false, error: `${label} peer_tokens.sent_peer_token_plaintext must be a string` };
+}
+if (
+peer_tokens.sent_peer_token_seq !== null &&
+peer_tokens.sent_peer_token_seq !== undefined &&
+!Number.isInteger(peer_tokens.sent_peer_token_seq)
+) {
+return { ok: false, error: `${label} peer_tokens.sent_peer_token_seq must be int or null` };
+}
+if (typeof peer_tokens.peer_app_expected_match !== 'boolean') {
+return { ok: false, error: `${label} peer_tokens.peer_app_expected_match must be a boolean` };
+}
+}
+return { ok: true };
+};
 const dm_section = bundle.dm && typeof bundle.dm === 'object' ? bundle.dm : null;
 const room_section = bundle.room && typeof bundle.room === 'object' ? bundle.room : null;
 if (!dm_section || !room_section) {
@@ -5471,6 +5793,18 @@ const room_validated = validate_transcript(room_section.transcript);
 if (!room_validated.ok) {
 return { ok: false, error: `room transcript invalid: ${room_validated.error}` };
 }
+const dm_fields_validated = validate_bundle_section_fields(dm_section, dm_validated.transcript, 'dm');
+if (!dm_fields_validated.ok) {
+return { ok: false, error: dm_fields_validated.error };
+}
+const room_fields_validated = validate_bundle_section_fields(
+room_section,
+room_validated.transcript,
+'room'
+);
+if (!room_fields_validated.ok) {
+return { ok: false, error: room_fields_validated.error };
+}
 return {
 ok: true,
 bundle: {
@@ -5478,10 +5812,18 @@ schema_version: 'phase5_coexist_bundle_v1',
 dm: {
 expected_plaintext: dm_section.expected_plaintext,
 transcript: dm_validated.transcript,
+proof_app_seq: Number.isInteger(dm_section.proof_app_seq) ? dm_section.proof_app_seq : undefined,
+proof_app_msg_id:
+typeof dm_section.proof_app_msg_id === 'string' ? dm_section.proof_app_msg_id : undefined,
+peer_tokens: dm_section.peer_tokens || undefined,
 },
 room: {
 expected_plaintext: room_section.expected_plaintext,
 transcript: room_validated.transcript,
+proof_app_seq: Number.isInteger(room_section.proof_app_seq) ? room_section.proof_app_seq : undefined,
+proof_app_msg_id:
+typeof room_section.proof_app_msg_id === 'string' ? room_section.proof_app_msg_id : undefined,
+peer_tokens: room_section.peer_tokens || undefined,
 },
 },
 };
@@ -5561,6 +5903,23 @@ return null;
 }
 for (const event of events) {
 if (!event || event.env !== env_b64) {
+continue;
+}
+const env_meta = parse_live_inbox_env(event.env);
+if (!env_meta || env_meta.kind !== kind) {
+continue;
+}
+return { seq: event.seq, msg_id: event.msg_id, env: event.env };
+}
+return null;
+};
+
+const find_transcript_event_by_seq = (events, seq, kind) => {
+if (!Array.isArray(events) || !Number.isInteger(seq)) {
+return null;
+}
+for (const event of events) {
+if (!event || event.seq !== seq || typeof event.env !== 'string') {
 continue;
 }
 const env_meta = parse_live_inbox_env(event.env);

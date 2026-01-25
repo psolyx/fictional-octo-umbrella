@@ -1662,7 +1662,7 @@ def _wait_for_peer_app(
     state_dir: str,
     timeout_s: float,
     idle_timeout_s: float,
-) -> str:
+) -> dict[str, object]:
     deadline = time.time() + timeout_s
     next_seq = from_seq
     while time.time() < deadline:
@@ -1690,7 +1690,10 @@ def _wait_for_peer_app(
                         payload_b64,
                     ],
                 )
-                return _first_nonempty_line(output)
+                return {
+                    "seq": seq,
+                    "plaintext": _first_nonempty_line(output),
+                }
         time.sleep(0.1)
     raise RuntimeError("Timed out waiting for peer app message")
 
@@ -1891,10 +1894,11 @@ def _phase5_proof_step(
         )
 
     peer_app_plaintext = None
+    peer_app_seq = None
     if wait_peer_app:
         sys.stdout.write("Waiting for peer app message...\n")
         from_seq = (sent_peer_token_seq if sent_peer_token_seq is not None else app_seq) + 1
-        peer_app_plaintext = _wait_for_peer_app(
+        peer_app_result = _wait_for_peer_app(
             base_url=base_url,
             session_token=session_token,
             conv_id=conv_id,
@@ -1903,6 +1907,8 @@ def _phase5_proof_step(
             timeout_s=peer_app_timeout_s,
             idle_timeout_s=peer_app_idle_timeout_s,
         )
+        peer_app_plaintext = str(peer_app_result.get("plaintext", ""))
+        peer_app_seq = peer_app_result.get("seq")
         sys.stdout.write(f"peer_app_plaintext: {peer_app_plaintext}\n")
 
     handshake_candidates = list(proposal_seqs)
@@ -1918,6 +1924,7 @@ def _phase5_proof_step(
         "conv_id": conv_id,
         "digest_sha256_b64": transcript_payload.get("digest_sha256_b64"),
         "last_handshake_seq": last_handshake_seq,
+        "proof_app_msg_id": _msg_id_for_env(app_env),
         "sent_peer_token": bool(send_peer_token),
         "sent_peer_token_plaintext": send_peer_token or "",
         "sent_peer_token_seq": sent_peer_token_seq,
@@ -1929,6 +1936,7 @@ def _phase5_proof_step(
         summary["proposal_seqs"] = proposal_seqs
     if peer_app_plaintext is not None:
         summary["peer_app_plaintext"] = peer_app_plaintext
+        summary["peer_app_seq"] = peer_app_seq if isinstance(peer_app_seq, int) else None
         summary["peer_app_decrypted"] = True
     elif wait_peer_app:
         summary["peer_app_decrypted"] = False
@@ -2277,16 +2285,62 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
 
         dm_transcript_payload = _load_json_payload(dm_transcript_path)
         room_transcript_payload = _load_json_payload(room_transcript_path)
+        def _build_coexist_bundle_section(
+            summary: dict[str, object],
+            transcript_payload: dict[str, object],
+            expected_plaintext: str,
+            peer_app_expected: str | None,
+            wait_peer_app: bool,
+        ) -> dict[str, object]:
+            section: dict[str, object] = {
+                "expected_plaintext": expected_plaintext,
+                "transcript": transcript_payload,
+            }
+            proof_app_seq = summary.get("app_seq")
+            proof_app_msg_id = summary.get("proof_app_msg_id")
+            if isinstance(proof_app_seq, int):
+                section["proof_app_seq"] = proof_app_seq
+            if isinstance(proof_app_msg_id, str) and proof_app_msg_id:
+                section["proof_app_msg_id"] = proof_app_msg_id
+            peer_tokens_available = (
+                wait_peer_app
+                or peer_app_expected is not None
+                or summary.get("sent_peer_token_plaintext")
+                or summary.get("sent_peer_token_seq") is not None
+            )
+            if peer_tokens_available:
+                peer_app_expected_match = summary.get("peer_app_expected_match")
+                section["peer_tokens"] = {
+                    "peer_app_expected": peer_app_expected or "",
+                    "peer_app_seq": summary.get("peer_app_seq")
+                    if isinstance(summary.get("peer_app_seq"), int)
+                    else None,
+                    "sent_peer_token_plaintext": summary.get("sent_peer_token_plaintext") or "",
+                    "sent_peer_token_seq": summary.get("sent_peer_token_seq")
+                    if isinstance(summary.get("sent_peer_token_seq"), int)
+                    else None,
+                    "peer_app_expected_match": peer_app_expected_match
+                    if isinstance(peer_app_expected_match, bool)
+                    else False,
+                }
+            return section
+
         coexist_bundle = {
             "schema_version": "phase5_coexist_bundle_v1",
-            "dm": {
-                "expected_plaintext": args.dm_plaintext,
-                "transcript": dm_transcript_payload,
-            },
-            "room": {
-                "expected_plaintext": args.room_plaintext,
-                "transcript": room_transcript_payload,
-            },
+            "dm": _build_coexist_bundle_section(
+                summary=dm_summary,
+                transcript_payload=dm_transcript_payload,
+                expected_plaintext=args.dm_plaintext,
+                peer_app_expected=dm_peer_app_expected,
+                wait_peer_app=args.wait_peer_app,
+            ),
+            "room": _build_coexist_bundle_section(
+                summary=room_summary,
+                transcript_payload=room_transcript_payload,
+                expected_plaintext=args.room_plaintext,
+                peer_app_expected=room_peer_app_expected,
+                wait_peer_app=args.wait_peer_app,
+            ),
         }
         _atomic_write_json(coexist_bundle_path, coexist_bundle)
         sys.stdout.write(f"Coexist bundle written to: {coexist_bundle_path}\n")
