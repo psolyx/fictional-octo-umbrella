@@ -1078,6 +1078,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional plaintext for a second app message sent after each proof app message",
     )
     gw_phase5_coexist_proof.add_argument(
+        "--dm-send-peer-token",
+        help="Optional DM plaintext for a second app message sent after the DM proof app message",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-send-peer-token",
+        help="Optional room plaintext for a second app message sent after the room proof app message",
+    )
+    gw_phase5_coexist_proof.add_argument(
         "--auto-reply-hint",
         help="Optional hint to print for enabling auto-reply in the web UI",
     )
@@ -1089,6 +1097,14 @@ def build_parser() -> argparse.ArgumentParser:
     gw_phase5_coexist_proof.add_argument(
         "--peer-app-expected",
         help="Expected peer app plaintext (optional; requires --wait-peer-app)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--dm-peer-app-expected",
+        help="Expected DM peer app plaintext (optional; requires --wait-peer-app)",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--room-peer-app-expected",
+        help="Expected room peer app plaintext (optional; requires --wait-peer-app)",
     )
     gw_phase5_coexist_proof.add_argument(
         "--peer-app-timeout-s",
@@ -2196,6 +2212,16 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             args.cli_device_id,
         )
         session_token = session["session_token"]
+        dm_send_peer_token = args.dm_send_peer_token if args.dm_send_peer_token is not None else args.send_peer_token
+        room_send_peer_token = (
+            args.room_send_peer_token if args.room_send_peer_token is not None else args.send_peer_token
+        )
+        dm_peer_app_expected = (
+            args.dm_peer_app_expected if args.dm_peer_app_expected is not None else args.peer_app_expected
+        )
+        room_peer_app_expected = (
+            args.room_peer_app_expected if args.room_peer_app_expected is not None else args.peer_app_expected
+        )
 
         sys.stdout.write("Waiting for web KeyPackage (DM)...\n")
         dm_summary = _phase5_proof_step(
@@ -2211,9 +2237,9 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_keypackage=args.seed_keypackage,
             seed_init=args.seed_dm_init,
             plaintext=args.dm_plaintext,
-            send_peer_token=args.send_peer_token,
+            send_peer_token=dm_send_peer_token,
             wait_peer_app=args.wait_peer_app,
-            peer_app_expected=args.peer_app_expected,
+            peer_app_expected=dm_peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
             peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
             init_command="dm-init",
@@ -2237,9 +2263,9 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_keypackage=args.seed_keypackage,
             seed_init=args.seed_group_init,
             plaintext=args.room_plaintext,
-            send_peer_token=args.send_peer_token,
+            send_peer_token=room_send_peer_token,
             wait_peer_app=args.wait_peer_app,
-            peer_app_expected=args.peer_app_expected,
+            peer_app_expected=room_peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
             peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
             init_command="group-init",
@@ -2284,6 +2310,14 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             sys.stdout.write(f"Both peer app messages decrypted: {both_decrypted}\n")
         else:
             sys.stdout.write("Both peer app messages decrypted: not requested\n")
+        dm_expected_mismatch = (
+            dm_peer_app_expected is not None and dm_summary.get("peer_app_expected_match") is False
+        )
+        room_expected_mismatch = (
+            room_peer_app_expected is not None and room_summary.get("peer_app_expected_match") is False
+        )
+        if dm_expected_mismatch or room_expected_mismatch:
+            return 1
         return 0
     finally:
         for process in [web_process, gateway_process]:

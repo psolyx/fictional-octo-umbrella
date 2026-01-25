@@ -2114,6 +2114,12 @@ status: 'pending',
 details: 'pending',
 },
 {
+key: 'peer_tokens',
+label: 'Peer tokens',
+status: 'pending',
+details: 'pending',
+},
+{
 key: 'active_coexist',
 label: 'Active coexist',
 status: 'pending',
@@ -2185,6 +2191,40 @@ if (!command_name || !conv_id || !token_web_to_cli || !token_cli_to_web) {
 return '';
 }
 return `python -m cli_app.mls_poc ${command_name} --conv-id ${conv_id} --wait-peer-app --peer-app-expected ${token_web_to_cli} --send-peer-token ${token_cli_to_web}`;
+};
+
+const build_coexist_cli_command = (
+dm_conv_id,
+room_conv_id,
+dm_token_web_to_cli,
+room_token_web_to_cli,
+dm_token_cli_to_web,
+room_token_cli_to_web
+) => {
+if (!dm_conv_id || !room_conv_id) {
+return '';
+}
+if (!dm_token_web_to_cli || !room_token_web_to_cli || !dm_token_cli_to_web || !room_token_cli_to_web) {
+return '';
+}
+return [
+'python -m cli_app.mls_poc gw-phase5-coexist-proof',
+`--wait-peer-app`,
+`--dm-conv-id ${dm_conv_id}`,
+`--room-conv-id ${room_conv_id}`,
+`--dm-peer-app-expected ${dm_token_web_to_cli}`,
+`--room-peer-app-expected ${room_token_web_to_cli}`,
+`--dm-send-peer-token ${dm_token_cli_to_web}`,
+`--room-send-peer-token ${room_token_cli_to_web}`,
+].join(' ');
+};
+
+const parse_peer_wait_timeout_ms = (peer_wait_timeout_input) => {
+const parsed_value = Number.parseInt(
+peer_wait_timeout_input ? peer_wait_timeout_input.value : '',
+10
+);
+return Number.isInteger(parsed_value) ? parsed_value : phase5_peer_wait_default_timeout_ms;
 };
 
 const format_phase5_report = (report) => {
@@ -2365,6 +2405,38 @@ lines.push(`error: ${summary.error}`);
 return lines.join('\n');
 };
 
+const format_phase5_coexist_peer_tokens = (summary) => {
+if (!summary) {
+return 'coexist_peer_tokens: missing';
+}
+const status = summary.status || 'FAIL';
+const reason_suffix = summary.reason ? ` (${summary.reason})` : '';
+const lines = [`coexist_peer_tokens: ${status}${reason_suffix}`];
+lines.push(`cli_command: ${summary.cli_command || '(none)'}`);
+const append_conv_line = (label, entry) => {
+if (!entry) {
+lines.push(`${label}: missing`);
+return;
+}
+const peer_app_seq = Number.isInteger(entry.peer_app_seq) ? entry.peer_app_seq : 'n/a';
+lines.push(
+`${label}: status=${entry.status || 'FAIL'} token_web_to_cli=${entry.token_web_to_cli || '(none)'} ` +
+`token_cli_to_web_expected=${entry.token_cli_to_web_expected || '(none)'} ` +
+`token_cli_to_web_result=${entry.token_cli_to_web_result || '(none)'} ` +
+`peer_app_seq=${peer_app_seq} peer_decrypted_plaintext=${entry.peer_decrypted_plaintext || '(none)'}`
+);
+if (entry.error) {
+lines.push(`${label} error: ${entry.error}`);
+}
+};
+append_conv_line('DM', summary.dm);
+append_conv_line('ROOM', summary.room);
+if (summary.error) {
+lines.push(`error: ${summary.error}`);
+}
+return lines.join('\n');
+};
+
 const format_phase5_coexist_report = (summary) => {
 const dm_result = summary.dm_report ? summary.dm_result : 'SKIP';
 const room_result = summary.room_report ? summary.room_result : 'FAIL';
@@ -2384,6 +2456,10 @@ summary.dm_report
 summary.room_report
 ? format_phase5_coexist_section('ROOM', summary.room_report, room_result)
 : 'ROOM: missing',
+'',
+summary.coexist_peer_tokens
+? format_phase5_coexist_peer_tokens(summary.coexist_peer_tokens)
+: 'coexist_peer_tokens: missing',
 '',
 summary.active_coexist
 ? format_phase5_active_coexist_section(summary.active_coexist)
@@ -3571,6 +3647,7 @@ auto_reply_attempted: false,
 dm_report: null,
 room_report: null,
 active_coexist: null,
+coexist_peer_tokens: null,
 dm_result: 'SKIP',
 room_result: 'FAIL',
 overall_result: 'FAIL',
@@ -3700,10 +3777,10 @@ set_welcome_env_input: options.set_welcome_env_input,
 set_decrypt_output: options.set_decrypt_output,
 auto_reply_input: coexist_phase5_proof_auto_reply_input,
 reply_input: coexist_phase5_proof_reply_input,
-peer_wait_input: coexist_phase5_peer_wait_input,
-peer_wait_expected_input: coexist_phase5_peer_expected_input,
-peer_wait_timeout_input: coexist_phase5_peer_timeout_input,
-peer_wait_cli_command_name: label === 'dm' ? 'gw-phase5-dm-proof' : 'gw-phase5-room-proof',
+peer_wait_input: null,
+peer_wait_expected_input: null,
+peer_wait_timeout_input: null,
+peer_wait_cli_command_name: '',
 handshake_context_label: `handshake (coexist ${label})`,
 handshake_buffer_label: `handshake (coexist ${label} buffer)`,
 });
@@ -3711,6 +3788,7 @@ let dm_report = null;
 let room_report = null;
 let dm_steps_debug = null;
 let room_steps_debug = null;
+let coexist_peer_tokens = null;
 let active_coexist = null;
 try {
 set_coexist_step('subscribe_wait', 'running', 'running core proofs');
@@ -3756,6 +3834,135 @@ const offline_transcript_mode = Boolean(coexist_bundle) ||
 (room_report && room_report.events_source && room_report.events_source !== 'transcript db');
 const dm_ready = dm_block ? is_phase5_conv_ready(dm_steps_debug) : false;
 const room_ready = is_phase5_conv_ready(room_steps_debug);
+const peer_wait_timeout_ms = parse_peer_wait_timeout_ms(coexist_phase5_peer_timeout_input);
+const dm_conv_id = dm_report ? dm_report.conv_id : '';
+const room_conv_id_value = room_report ? room_report.conv_id : '';
+const run_coexist_peer_tokens = async (
+conv_id,
+label,
+token_web_to_cli,
+token_cli_to_web,
+app_seq,
+set_status_fn
+) => {
+const result = {
+status: 'FAIL',
+token_web_to_cli,
+token_cli_to_web_expected: token_cli_to_web,
+token_cli_to_web_result: 'MISMATCH',
+peer_app_seq: null,
+peer_decrypted_plaintext: '',
+error: '',
+};
+if (!conv_id) {
+result.error = 'missing conv_id';
+return result;
+}
+const send_result = await send_phase5_peer_wait_token(conv_id, token_web_to_cli, {
+status_prefix: `coexist ${label} peer token`,
+set_status_fn,
+});
+if (!send_result.ok) {
+result.error = send_result.error || 'peer token send failed';
+return result;
+}
+const peer_after_seq = Number.isInteger(app_seq) ? app_seq : 0;
+const peer_wait_result = await wait_decrypt_peer_app(
+conv_id,
+peer_after_seq,
+token_cli_to_web,
+peer_wait_timeout_ms
+);
+result.peer_app_seq = peer_wait_result.peer_app_seq;
+result.peer_decrypted_plaintext = peer_wait_result.decrypted_plaintext || '';
+result.token_cli_to_web_result = peer_wait_result.match ? 'MATCH' : 'MISMATCH';
+if (peer_wait_result.ok && peer_wait_result.match) {
+result.status = 'PASS';
+} else {
+result.error = peer_wait_result.error || 'peer token wait failed';
+}
+return result;
+};
+set_coexist_step('peer_tokens', 'running', 'sending peer tokens');
+if (offline_transcript_mode) {
+coexist_peer_tokens = {
+status: 'SKIP',
+reason: 'offline transcript mode',
+cli_command: '',
+dm: null,
+room: null,
+};
+set_coexist_step('peer_tokens', 'ok', 'skipped (offline transcript mode)');
+} else if (!dm_block) {
+coexist_peer_tokens = {
+status: 'SKIP',
+reason: 'room-only',
+cli_command: '',
+dm: null,
+room: null,
+};
+set_coexist_step('peer_tokens', 'ok', 'skipped (room-only)');
+} else if (!dm_ready || !room_ready) {
+coexist_peer_tokens = {
+status: 'FAIL',
+reason: 'prerequisites not met',
+cli_command: '',
+dm: null,
+room: null,
+};
+set_coexist_step('peer_tokens', 'fail', 'prerequisites not met');
+} else {
+const dm_token_web_to_cli = build_peer_wait_token();
+const dm_token_cli_to_web = build_peer_wait_token();
+const room_token_web_to_cli = build_peer_wait_token();
+const room_token_cli_to_web = build_peer_wait_token();
+const cli_command = build_coexist_cli_command(
+dm_conv_id,
+room_conv_id_value,
+dm_token_web_to_cli,
+room_token_web_to_cli,
+dm_token_cli_to_web,
+room_token_cli_to_web
+);
+const dm_token_result = await run_coexist_peer_tokens(
+dm_conv_id,
+'dm',
+dm_token_web_to_cli,
+dm_token_cli_to_web,
+dm_report ? dm_report.app_seq : null,
+set_status
+);
+const room_token_result = await run_coexist_peer_tokens(
+room_conv_id_value,
+'room',
+room_token_web_to_cli,
+room_token_cli_to_web,
+room_report ? room_report.app_seq : null,
+set_room_status
+);
+const peer_tokens_status =
+dm_token_result.status === 'PASS' && room_token_result.status === 'PASS' ? 'PASS' : 'FAIL';
+const peer_tokens_errors = [];
+if (dm_token_result.error) {
+peer_tokens_errors.push(`dm: ${dm_token_result.error}`);
+}
+if (room_token_result.error) {
+peer_tokens_errors.push(`room: ${room_token_result.error}`);
+}
+coexist_peer_tokens = {
+status: peer_tokens_status,
+reason: '',
+cli_command,
+dm: dm_token_result,
+room: room_token_result,
+error: peer_tokens_errors.length ? peer_tokens_errors.join('; ') : '',
+};
+set_coexist_step(
+'peer_tokens',
+peer_tokens_status === 'PASS' ? 'ok' : 'fail',
+peer_tokens_status === 'PASS' ? 'peer tokens ok' : 'peer tokens failed'
+);
+}
 const active_errors = [];
 if (offline_transcript_mode) {
 active_coexist = {
@@ -3783,8 +3990,6 @@ room: null,
 set_coexist_step('active_coexist', 'fail', 'prerequisites not met');
 } else {
 set_coexist_step('active_coexist', 'running', 'sending interleaved app messages');
-const dm_conv_id = dm_report ? dm_report.conv_id : '';
-const room_conv_id_value = room_report ? room_report.conv_id : '';
 const dm_results = [];
 const room_results = [];
 const dm_plaintexts = ['phase5-coexist-dm-1', 'phase5-coexist-dm-2'];
@@ -3874,20 +4079,23 @@ const digest_stable =
 const active_status = active_coexist ? active_coexist.status : 'FAIL';
 const active_ok = active_status === 'PASS';
 const active_skipped = active_status === 'SKIP';
-const overall_result =
+const peer_tokens_status = coexist_peer_tokens ? coexist_peer_tokens.status : 'SKIP';
+const peer_tokens_ok = peer_tokens_status === 'PASS';
+const peer_tokens_skipped = peer_tokens_status === 'SKIP';
+const overall_ok =
 room_result === 'PASS' &&
 (dm_report ? dm_result === 'PASS' : true) &&
 digest_stable &&
-(active_ok || active_skipped)
-? active_skipped
-? 'SKIP'
-: 'PASS'
-: 'FAIL';
+(active_ok || active_skipped) &&
+(peer_tokens_ok || peer_tokens_skipped);
+const overall_should_skip = active_skipped || peer_tokens_skipped;
+const overall_result = overall_ok ? (overall_should_skip ? 'SKIP' : 'PASS') : 'FAIL';
 set_coexist_step('report', 'running', 'building combined report');
 set_coexist_step('report', 'ok', 'report ready');
 finalize_coexist({
 dm_report,
 room_report,
+coexist_peer_tokens,
 active_coexist,
 dm_result,
 room_result,
@@ -3898,6 +4106,7 @@ set_coexist_step('report', 'fail', 'report failed');
 finalize_coexist({
 dm_report,
 room_report,
+coexist_peer_tokens,
 error: String(error),
 });
 }
