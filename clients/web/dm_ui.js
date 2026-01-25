@@ -1416,6 +1416,62 @@ return result;
 });
 };
 
+const build_peer_wait_token = () => {
+const token_bytes = new Uint8Array(8);
+if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+globalThis.crypto.getRandomValues(token_bytes);
+} else {
+for (let index = 0; index < token_bytes.length; index += 1) {
+token_bytes[index] = Math.floor(Math.random() * 256);
+}
+}
+let token_value = '';
+for (const entry of token_bytes) {
+token_value += entry.toString(16).padStart(2, '0');
+}
+return token_value.slice(0, 16);
+};
+
+const send_phase5_peer_wait_token = async (conv_id, token_plaintext, opts) => {
+const options = opts || {};
+const status_prefix = options.status_prefix || 'peer wait token';
+const set_status_fn = options.set_status_fn;
+const set_status = (message) => {
+if (typeof set_status_fn === 'function') {
+set_status_fn(`${status_prefix}: ${message}`);
+}
+};
+const result = {
+ok: false,
+env_b64: '',
+error: '',
+};
+if (!token_plaintext) {
+result.error = 'missing peer wait token';
+return result;
+}
+if (!bob_participant_b64) {
+result.error = 'missing bob participant';
+return result;
+}
+set_status('encrypting token');
+await ensure_wasm_ready();
+const enc_result = await dm_encrypt(bob_participant_b64, token_plaintext);
+if (!enc_result || !enc_result.ok) {
+const error_text = enc_result && enc_result.error ? enc_result.error : 'unknown error';
+result.error = `encrypt failed: ${error_text}`;
+set_status('token encrypt failed');
+return result;
+}
+bob_participant_b64 = enc_result.participant_b64;
+const token_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
+dispatch_gateway_send_env(conv_id, token_env_b64);
+result.ok = true;
+result.env_b64 = token_env_b64;
+set_status('token sent');
+return result;
+};
+
 const send_wait_decrypt_app = async (conv_id, label, plaintext, opts) => {
 const normalized_label = label || 'coexist';
 const normalized_opts = opts || {};
@@ -2124,6 +2180,13 @@ return;
 target.value = value || '';
 };
 
+const build_peer_wait_cli_command = (command_name, conv_id, token_value) => {
+if (!command_name || !conv_id || !token_value) {
+return '';
+}
+return `python -m cli_app.mls_poc ${command_name} --conv-id ${conv_id} --wait-peer-app --peer-app-expected ${token_value}`;
+};
+
 const format_phase5_report = (report) => {
 const lines = [
 'phase5 proof report:',
@@ -2164,6 +2227,21 @@ Number.isInteger(report.handshake_dependency_stalls) ? report.handshake_dependen
 `peer_decrypted_plaintext: ${report.peer_decrypted_plaintext || '(none)'}`,
 `peer_expected_plaintext: ${report.peer_expected_plaintext || '(none)'}`,
 ];
+if (report.peer_wait_enabled) {
+if (report.peer_wait_status === 'SKIP') {
+const skip_reason = report.peer_wait_error || 'offline transcript mode';
+lines.push(`peer_wait_cli_command: skipped (${skip_reason})`);
+} else {
+const peer_wait_cli_command = build_peer_wait_cli_command(
+report.peer_wait_cli_command_name,
+report.conv_id,
+report.peer_wait_token
+);
+if (peer_wait_cli_command) {
+lines.push(`peer_wait_cli_command: ${peer_wait_cli_command}`);
+}
+}
+}
 if (report.expected_plaintext_result) {
 lines.push(`expected_plaintext_result: ${report.expected_plaintext_result}`);
 }
@@ -2257,6 +2335,21 @@ report && Array.isArray(report.handshake_apply_failures) && report.handshake_app
 `auto_reply_attempted: ${report && report.auto_reply_attempted ? 'yes' : 'no'}`,
 `duration_ms: ${report && Number.isInteger(report.duration_ms) ? report.duration_ms : 'n/a'}`,
 ];
+if (report && report.peer_wait_enabled) {
+if (report.peer_wait_status === 'SKIP') {
+const skip_reason = report.peer_wait_error || 'offline transcript mode';
+lines.push(`peer_wait_cli_command: skipped (${skip_reason})`);
+} else {
+const peer_wait_cli_command = build_peer_wait_cli_command(
+report.peer_wait_cli_command_name,
+conv_id,
+report.peer_wait_token
+);
+if (peer_wait_cli_command) {
+lines.push(`peer_wait_cli_command: ${peer_wait_cli_command}`);
+}
+}
+}
 return lines.join('\n');
 };
 
@@ -2746,6 +2839,8 @@ peer_decrypted_plaintext: '',
 peer_expected_plaintext: '',
 peer_expected_plaintext_result: '',
 peer_wait_error: '',
+peer_wait_token: '',
+peer_wait_cli_command_name: '',
 participant_scoped: false,
 participant_created: false,
 start_ms: proof_start_ms,
@@ -2834,6 +2929,8 @@ options.peer_wait_timeout_input ? options.peer_wait_timeout_input.value : '',
 : phase5_peer_wait_default_timeout_ms;
 proof_report.peer_wait_enabled = peer_wait_enabled;
 proof_report.peer_expected_plaintext = peer_wait_expected_plaintext || '';
+proof_report.peer_wait_cli_command_name =
+typeof options.peer_wait_cli_command_name === 'string' ? options.peer_wait_cli_command_name : '';
 const scoped_result = await with_phase5_conv_scope(proof_report.conv_id, {
 ensure_bob_participant: true,
 }, async (scope_note) => {
@@ -3269,6 +3366,21 @@ proof_report.peer_wait_error = 'skipped (expected_plaintext FAIL)';
 proof_report.peer_wait_status = 'SKIP';
 proof_report.peer_wait_error = 'offline transcript mode';
 } else {
+const peer_wait_token = build_peer_wait_token();
+proof_report.peer_wait_token = peer_wait_token;
+const token_send_result = await send_phase5_peer_wait_token(
+proof_report.conv_id,
+peer_wait_token,
+{
+status_prefix: `${status_prefix} peer wait token`,
+set_status_fn: options.set_status_fn,
+}
+);
+if (!token_send_result.ok) {
+proof_report.peer_wait_status = 'FAIL';
+proof_report.peer_wait_error = token_send_result.error || 'peer wait token send failed';
+set_status_prefixed('peer wait token send failed');
+} else {
 set_status_prefixed('waiting for peer app');
 const peer_after_seq = Number.isInteger(proof_report.app_seq)
 ? proof_report.app_seq
@@ -3293,6 +3405,7 @@ set_status_prefixed('peer app decrypted');
 proof_report.peer_wait_status = 'FAIL';
 proof_report.peer_wait_error = peer_wait_result.error || 'peer wait failed';
 set_status_prefixed('peer app wait failed');
+}
 }
 }
 }
@@ -3350,6 +3463,7 @@ reply_input: options.reply_input,
 peer_wait_input: options.peer_wait_input,
 peer_wait_expected_input: options.peer_wait_expected_input,
 peer_wait_timeout_input: options.peer_wait_timeout_input,
+peer_wait_cli_command_name: options.peer_wait_cli_command_name,
 handshake_context_label: options.handshake_context_label,
 handshake_buffer_label: options.handshake_buffer_label,
 });
@@ -3387,6 +3501,7 @@ reply_input: dm_phase5_proof_reply_input,
 peer_wait_input: dm_phase5_peer_wait_input,
 peer_wait_expected_input: dm_phase5_peer_expected_input,
 peer_wait_timeout_input: dm_phase5_peer_timeout_input,
+peer_wait_cli_command_name: 'gw-phase5-dm-proof',
 handshake_context_label: 'handshake (dm proof)',
 handshake_buffer_label: 'handshake (dm proof buffer)',
 });
@@ -3418,6 +3533,7 @@ reply_input: room_phase5_proof_reply_input,
 peer_wait_input: room_phase5_peer_wait_input,
 peer_wait_expected_input: room_phase5_peer_expected_input,
 peer_wait_timeout_input: room_phase5_peer_timeout_input,
+peer_wait_cli_command_name: 'gw-phase5-room-proof',
 handshake_context_label: 'handshake (proof wizard)',
 handshake_buffer_label: 'handshake (proof wizard buffer)',
 });
@@ -3582,6 +3698,7 @@ reply_input: coexist_phase5_proof_reply_input,
 peer_wait_input: coexist_phase5_peer_wait_input,
 peer_wait_expected_input: coexist_phase5_peer_expected_input,
 peer_wait_timeout_input: coexist_phase5_peer_timeout_input,
+peer_wait_cli_command_name: label === 'dm' ? 'gw-phase5-dm-proof' : 'gw-phase5-room-proof',
 handshake_context_label: `handshake (coexist ${label})`,
 handshake_buffer_label: `handshake (coexist ${label} buffer)`,
 });

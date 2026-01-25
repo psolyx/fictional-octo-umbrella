@@ -848,6 +848,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Wait for a peer app message and decrypt it",
     )
     gw_phase5_dm_proof.add_argument(
+        "--peer-app-expected",
+        help="Expected peer app plaintext (optional; requires --wait-peer-app)",
+    )
+    gw_phase5_dm_proof.add_argument(
         "--peer-app-timeout-s",
         type=float,
         default=90.0,
@@ -943,6 +947,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--wait-peer-app",
         action="store_true",
         help="Wait for a peer app message and decrypt it",
+    )
+    gw_phase5_room_proof.add_argument(
+        "--peer-app-expected",
+        help="Expected peer app plaintext (optional; requires --wait-peer-app)",
     )
     gw_phase5_room_proof.add_argument(
         "--peer-app-timeout-s",
@@ -1065,6 +1073,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--wait-peer-app",
         action="store_true",
         help="Wait for peer app messages for both DM and room, then decrypt",
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--peer-app-expected",
+        help="Expected peer app plaintext (optional; requires --wait-peer-app)",
     )
     gw_phase5_coexist_proof.add_argument(
         "--peer-app-timeout-s",
@@ -1744,6 +1756,7 @@ def _phase5_proof_step(
     seed_init: int,
     plaintext: str,
     wait_peer_app: bool,
+    peer_app_expected: str | None,
     peer_app_timeout_s: float,
     peer_app_idle_timeout_s: float,
     init_command: str,
@@ -1870,6 +1883,12 @@ def _phase5_proof_step(
         summary["peer_app_decrypted"] = True
     elif wait_peer_app:
         summary["peer_app_decrypted"] = False
+    if peer_app_expected is not None:
+        summary["peer_app_expected"] = peer_app_expected
+        if peer_app_plaintext is not None:
+            summary["peer_app_expected_match"] = peer_app_plaintext == peer_app_expected
+        else:
+            summary["peer_app_expected_match"] = False
     return summary
 
 
@@ -1889,6 +1908,7 @@ def _handle_gw_phase5_local_proof(
     seed_init: int,
     plaintext: str,
     wait_peer_app: bool,
+    peer_app_expected: str | None,
     peer_app_timeout_s: float,
     peer_app_idle_timeout_s: float,
     gateway_ready_timeout_s: float,
@@ -1956,6 +1976,7 @@ def _handle_gw_phase5_local_proof(
             seed_init=seed_init,
             plaintext=plaintext,
             wait_peer_app=wait_peer_app,
+            peer_app_expected=peer_app_expected,
             peer_app_timeout_s=peer_app_timeout_s,
             peer_app_idle_timeout_s=peer_app_idle_timeout_s,
             init_command=init_command,
@@ -2008,6 +2029,7 @@ def handle_gw_phase5_dm_proof(args: argparse.Namespace) -> int:
         seed_init=args.seed_dm_init,
         plaintext=args.plaintext,
         wait_peer_app=args.wait_peer_app,
+        peer_app_expected=args.peer_app_expected,
         peer_app_timeout_s=args.peer_app_timeout_s,
         peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
         gateway_ready_timeout_s=args.gateway_ready_timeout_s,
@@ -2033,6 +2055,7 @@ def handle_gw_phase5_room_proof(args: argparse.Namespace) -> int:
         seed_init=args.seed_group_init,
         plaintext=args.plaintext,
         wait_peer_app=args.wait_peer_app,
+        peer_app_expected=args.peer_app_expected,
         peer_app_timeout_s=args.peer_app_timeout_s,
         peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
         gateway_ready_timeout_s=args.gateway_ready_timeout_s,
@@ -2051,7 +2074,11 @@ def _emit_phase5_coexist_report(
     conv_id = summary.get("conv_id", "")
     digest = summary.get("digest_sha256_b64")
     digest_status = "present" if isinstance(digest, str) and digest else "missing"
-    status_ok = not wait_peer_app or summary.get("peer_app_decrypted") is True
+    expected_match = summary.get("peer_app_expected_match")
+    if wait_peer_app and isinstance(expected_match, bool):
+        status_ok = expected_match
+    else:
+        status_ok = not wait_peer_app or summary.get("peer_app_decrypted") is True
     status_text = "PASS" if status_ok else "FAIL"
 
     sys.stdout.write(f"{label}:\n")
@@ -2062,6 +2089,9 @@ def _emit_phase5_coexist_report(
     sys.stdout.write(f"  welcome_seq: {summary.get('welcome_seq')}\n")
     sys.stdout.write(f"  last_handshake_seq: {summary.get('last_handshake_seq')}\n")
     sys.stdout.write(f"  app_seq: {summary.get('app_seq')}\n")
+    if "peer_app_expected" in summary:
+        sys.stdout.write(f"  peer_app_expected: {summary.get('peer_app_expected')}\n")
+        sys.stdout.write(f"  peer_app_expected_match: {summary.get('peer_app_expected_match')}\n")
     sys.stdout.write(f"  status: {status_text}\n")
     return status_ok
 
@@ -2139,6 +2169,7 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_init=args.seed_dm_init,
             plaintext=args.dm_plaintext,
             wait_peer_app=args.wait_peer_app,
+            peer_app_expected=args.peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
             peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
             init_command="dm-init",
@@ -2163,6 +2194,7 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_init=args.seed_group_init,
             plaintext=args.room_plaintext,
             wait_peer_app=args.wait_peer_app,
+            peer_app_expected=args.peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
             peer_app_idle_timeout_s=args.peer_app_idle_timeout_s,
             init_command="group-init",
