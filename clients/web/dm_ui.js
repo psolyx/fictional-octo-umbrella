@@ -2180,11 +2180,11 @@ return;
 target.value = value || '';
 };
 
-const build_peer_wait_cli_command = (command_name, conv_id, token_value) => {
-if (!command_name || !conv_id || !token_value) {
+const build_bidirectional_cli_command = (command_name, conv_id, token_web_to_cli, token_cli_to_web) => {
+if (!command_name || !conv_id || !token_web_to_cli || !token_cli_to_web) {
 return '';
 }
-return `python -m cli_app.mls_poc ${command_name} --conv-id ${conv_id} --wait-peer-app --peer-app-expected ${token_value}`;
+return `python -m cli_app.mls_poc ${command_name} --conv-id ${conv_id} --wait-peer-app --peer-app-expected ${token_web_to_cli} --send-peer-token ${token_cli_to_web}`;
 };
 
 const format_phase5_report = (report) => {
@@ -2226,22 +2226,11 @@ Number.isInteger(report.handshake_dependency_stalls) ? report.handshake_dependen
 `peer_app_seq: ${Number.isInteger(report.peer_app_seq) ? report.peer_app_seq : 'n/a'}`,
 `peer_decrypted_plaintext: ${report.peer_decrypted_plaintext || '(none)'}`,
 `peer_expected_plaintext: ${report.peer_expected_plaintext || '(none)'}`,
+`token_web_to_cli: ${report.token_web_to_cli || '(none)'}`,
+`token_cli_to_web_expected: ${report.token_cli_to_web_expected || '(none)'}`,
+`token_cli_to_web_result: ${report.token_cli_to_web_result || '(none)'}`,
+`cli_command_bidirectional: ${report.cli_command_bidirectional || '(none)'}`,
 ];
-if (report.peer_wait_enabled) {
-if (report.peer_wait_status === 'SKIP') {
-const skip_reason = report.peer_wait_error || 'offline transcript mode';
-lines.push(`peer_wait_cli_command: skipped (${skip_reason})`);
-} else {
-const peer_wait_cli_command = build_peer_wait_cli_command(
-report.peer_wait_cli_command_name,
-report.conv_id,
-report.peer_wait_token
-);
-if (peer_wait_cli_command) {
-lines.push(`peer_wait_cli_command: ${peer_wait_cli_command}`);
-}
-}
-}
 if (report.expected_plaintext_result) {
 lines.push(`expected_plaintext_result: ${report.expected_plaintext_result}`);
 }
@@ -2332,24 +2321,19 @@ report && Array.isArray(report.handshake_apply_failures) && report.handshake_app
 `peer_decrypted_plaintext: ${report && report.peer_decrypted_plaintext
 ? report.peer_decrypted_plaintext
 : '(none)'}`,
+`token_web_to_cli: ${report && report.token_web_to_cli ? report.token_web_to_cli : '(none)'}`,
+`token_cli_to_web_expected: ${report && report.token_cli_to_web_expected
+? report.token_cli_to_web_expected
+: '(none)'}`,
+`token_cli_to_web_result: ${report && report.token_cli_to_web_result
+? report.token_cli_to_web_result
+: '(none)'}`,
+`cli_command_bidirectional: ${report && report.cli_command_bidirectional
+? report.cli_command_bidirectional
+: '(none)'}`,
 `auto_reply_attempted: ${report && report.auto_reply_attempted ? 'yes' : 'no'}`,
 `duration_ms: ${report && Number.isInteger(report.duration_ms) ? report.duration_ms : 'n/a'}`,
 ];
-if (report && report.peer_wait_enabled) {
-if (report.peer_wait_status === 'SKIP') {
-const skip_reason = report.peer_wait_error || 'offline transcript mode';
-lines.push(`peer_wait_cli_command: skipped (${skip_reason})`);
-} else {
-const peer_wait_cli_command = build_peer_wait_cli_command(
-report.peer_wait_cli_command_name,
-conv_id,
-report.peer_wait_token
-);
-if (peer_wait_cli_command) {
-lines.push(`peer_wait_cli_command: ${peer_wait_cli_command}`);
-}
-}
-}
 return lines.join('\n');
 };
 
@@ -2840,6 +2824,10 @@ peer_expected_plaintext: '',
 peer_expected_plaintext_result: '',
 peer_wait_error: '',
 peer_wait_token: '',
+token_web_to_cli: '',
+token_cli_to_web_expected: '',
+token_cli_to_web_result: '',
+cli_command_bidirectional: '',
 peer_wait_cli_command_name: '',
 participant_scoped: false,
 participant_created: false,
@@ -3359,18 +3347,34 @@ if (peer_wait_enabled) {
 if (!decrypt_ok) {
 proof_report.peer_wait_status = 'SKIP';
 proof_report.peer_wait_error = 'skipped (decrypt failed)';
+proof_report.token_cli_to_web_result = 'SKIP';
+proof_report.cli_command_bidirectional = 'skipped (decrypt failed)';
 } else if (!expected_pass) {
 proof_report.peer_wait_status = 'SKIP';
 proof_report.peer_wait_error = 'skipped (expected_plaintext FAIL)';
+proof_report.token_cli_to_web_result = 'SKIP';
+proof_report.cli_command_bidirectional = 'skipped (expected_plaintext FAIL)';
 } else if (offline_transcript_mode) {
 proof_report.peer_wait_status = 'SKIP';
 proof_report.peer_wait_error = 'offline transcript mode';
+proof_report.token_cli_to_web_result = 'SKIP';
+proof_report.cli_command_bidirectional = 'skipped (offline transcript mode)';
 } else {
-const peer_wait_token = build_peer_wait_token();
-proof_report.peer_wait_token = peer_wait_token;
+const token_web_to_cli = build_peer_wait_token();
+const token_cli_to_web = build_peer_wait_token();
+proof_report.token_web_to_cli = token_web_to_cli;
+proof_report.token_cli_to_web_expected = token_cli_to_web;
+proof_report.peer_expected_plaintext = token_cli_to_web;
+proof_report.cli_command_bidirectional = build_bidirectional_cli_command(
+proof_report.peer_wait_cli_command_name,
+proof_report.conv_id,
+token_web_to_cli,
+token_cli_to_web
+);
+proof_report.peer_wait_token = token_web_to_cli;
 const token_send_result = await send_phase5_peer_wait_token(
 proof_report.conv_id,
-peer_wait_token,
+token_web_to_cli,
 {
 status_prefix: `${status_prefix} peer wait token`,
 set_status_fn: options.set_status_fn,
@@ -3379,6 +3383,7 @@ set_status_fn: options.set_status_fn,
 if (!token_send_result.ok) {
 proof_report.peer_wait_status = 'FAIL';
 proof_report.peer_wait_error = token_send_result.error || 'peer wait token send failed';
+proof_report.token_cli_to_web_result = 'MISMATCH';
 set_status_prefixed('peer wait token send failed');
 } else {
 set_status_prefixed('waiting for peer app');
@@ -3390,20 +3395,20 @@ const peer_after_seq = Number.isInteger(proof_report.app_seq)
 const peer_wait_result = await wait_decrypt_peer_app(
 proof_report.conv_id,
 peer_after_seq,
-peer_wait_expected_plaintext,
+token_cli_to_web,
 peer_wait_timeout_ms
 );
 proof_report.peer_app_seq = peer_wait_result.peer_app_seq;
 proof_report.peer_decrypted_plaintext = peer_wait_result.decrypted_plaintext || '';
-if (peer_wait_expected_plaintext) {
 proof_report.peer_expected_plaintext_result = peer_wait_result.match ? 'PASS' : 'FAIL';
-}
+proof_report.token_cli_to_web_result = peer_wait_result.match ? 'MATCH' : 'MISMATCH';
 if (peer_wait_result.ok) {
 proof_report.peer_wait_status = 'PASS';
 set_status_prefixed('peer app decrypted');
 } else {
 proof_report.peer_wait_status = 'FAIL';
 proof_report.peer_wait_error = peer_wait_result.error || 'peer wait failed';
+proof_report.token_cli_to_web_result = 'MISMATCH';
 set_status_prefixed('peer app wait failed');
 }
 }

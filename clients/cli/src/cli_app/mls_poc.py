@@ -843,6 +843,10 @@ def build_parser() -> argparse.ArgumentParser:
         help='Plaintext for the app message (default: "phase5-dm-proof")',
     )
     gw_phase5_dm_proof.add_argument(
+        "--send-peer-token",
+        help="Optional plaintext for a second app message sent after the proof app message",
+    )
+    gw_phase5_dm_proof.add_argument(
         "--wait-peer-app",
         action="store_true",
         help="Wait for a peer app message and decrypt it",
@@ -942,6 +946,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--plaintext",
         default="phase5-room-proof",
         help='Plaintext for the app message (default: "phase5-room-proof")',
+    )
+    gw_phase5_room_proof.add_argument(
+        "--send-peer-token",
+        help="Optional plaintext for a second app message sent after the proof app message",
     )
     gw_phase5_room_proof.add_argument(
         "--wait-peer-app",
@@ -1064,6 +1072,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--room-plaintext",
         default="phase5-room-proof",
         help='Plaintext for the room app message (default: "phase5-room-proof")',
+    )
+    gw_phase5_coexist_proof.add_argument(
+        "--send-peer-token",
+        help="Optional plaintext for a second app message sent after each proof app message",
     )
     gw_phase5_coexist_proof.add_argument(
         "--auto-reply-hint",
@@ -1755,6 +1767,7 @@ def _phase5_proof_step(
     seed_keypackage: int,
     seed_init: int,
     plaintext: str,
+    send_peer_token: str | None,
     wait_peer_app: bool,
     peer_app_expected: str | None,
     peer_app_timeout_s: float,
@@ -1831,6 +1844,22 @@ def _phase5_proof_step(
     app_seq = _send_envelope(base_url, session_token, conv_id, app_env)
     _append_transcript_event(transcript_events, app_seq, app_env)
 
+    sent_peer_token_seq = None
+    if send_peer_token:
+        token_output = _run_harness_capture(
+            "dm-encrypt",
+            [
+                "--state-dir",
+                cli_state_dir,
+                "--plaintext",
+                send_peer_token,
+            ],
+        )
+        token_ciphertext = _first_nonempty_line(token_output)
+        token_env = dm_envelope.pack(0x03, token_ciphertext)
+        sent_peer_token_seq = _send_envelope(base_url, session_token, conv_id, token_env)
+        _append_transcript_event(transcript_events, sent_peer_token_seq, token_env)
+
     transcript_payload = _build_transcript_payload(conv_id, transcript_events)
     _atomic_write_json(transcript_path, transcript_payload)
 
@@ -1848,11 +1877,12 @@ def _phase5_proof_step(
     peer_app_plaintext = None
     if wait_peer_app:
         sys.stdout.write("Waiting for peer app message...\n")
+        from_seq = (sent_peer_token_seq if sent_peer_token_seq is not None else app_seq) + 1
         peer_app_plaintext = _wait_for_peer_app(
             base_url=base_url,
             session_token=session_token,
             conv_id=conv_id,
-            from_seq=app_seq + 1,
+            from_seq=from_seq,
             state_dir=cli_state_dir,
             timeout_s=peer_app_timeout_s,
             idle_timeout_s=peer_app_idle_timeout_s,
@@ -1872,6 +1902,9 @@ def _phase5_proof_step(
         "conv_id": conv_id,
         "digest_sha256_b64": transcript_payload.get("digest_sha256_b64"),
         "last_handshake_seq": last_handshake_seq,
+        "sent_peer_token": bool(send_peer_token),
+        "sent_peer_token_plaintext": send_peer_token or "",
+        "sent_peer_token_seq": sent_peer_token_seq,
         "welcome_seq": welcome_seq,
     }
     if commit_seq is not None:
@@ -1907,6 +1940,7 @@ def _handle_gw_phase5_local_proof(
     seed_keypackage: int,
     seed_init: int,
     plaintext: str,
+    send_peer_token: str | None,
     wait_peer_app: bool,
     peer_app_expected: str | None,
     peer_app_timeout_s: float,
@@ -1975,6 +2009,7 @@ def _handle_gw_phase5_local_proof(
             seed_keypackage=seed_keypackage,
             seed_init=seed_init,
             plaintext=plaintext,
+            send_peer_token=send_peer_token,
             wait_peer_app=wait_peer_app,
             peer_app_expected=peer_app_expected,
             peer_app_timeout_s=peer_app_timeout_s,
@@ -1990,6 +2025,9 @@ def _handle_gw_phase5_local_proof(
             "app_seq": summary["app_seq"],
             "command": summary["command"],
             "conv_id": summary["conv_id"],
+            "sent_peer_token": summary["sent_peer_token"],
+            "sent_peer_token_plaintext": summary["sent_peer_token_plaintext"],
+            "sent_peer_token_seq": summary["sent_peer_token_seq"],
             "welcome_seq": summary["welcome_seq"],
         }
         if "commit_seq" in summary:
@@ -2028,6 +2066,7 @@ def handle_gw_phase5_dm_proof(args: argparse.Namespace) -> int:
         seed_keypackage=args.seed_keypackage,
         seed_init=args.seed_dm_init,
         plaintext=args.plaintext,
+        send_peer_token=args.send_peer_token,
         wait_peer_app=args.wait_peer_app,
         peer_app_expected=args.peer_app_expected,
         peer_app_timeout_s=args.peer_app_timeout_s,
@@ -2054,6 +2093,7 @@ def handle_gw_phase5_room_proof(args: argparse.Namespace) -> int:
         seed_keypackage=args.seed_keypackage,
         seed_init=args.seed_group_init,
         plaintext=args.plaintext,
+        send_peer_token=args.send_peer_token,
         wait_peer_app=args.wait_peer_app,
         peer_app_expected=args.peer_app_expected,
         peer_app_timeout_s=args.peer_app_timeout_s,
@@ -2089,6 +2129,9 @@ def _emit_phase5_coexist_report(
     sys.stdout.write(f"  welcome_seq: {summary.get('welcome_seq')}\n")
     sys.stdout.write(f"  last_handshake_seq: {summary.get('last_handshake_seq')}\n")
     sys.stdout.write(f"  app_seq: {summary.get('app_seq')}\n")
+    sys.stdout.write(f"  sent_peer_token: {summary.get('sent_peer_token')}\n")
+    sys.stdout.write(f"  sent_peer_token_plaintext: {summary.get('sent_peer_token_plaintext')}\n")
+    sys.stdout.write(f"  sent_peer_token_seq: {summary.get('sent_peer_token_seq')}\n")
     if "peer_app_expected" in summary:
         sys.stdout.write(f"  peer_app_expected: {summary.get('peer_app_expected')}\n")
         sys.stdout.write(f"  peer_app_expected_match: {summary.get('peer_app_expected_match')}\n")
@@ -2168,6 +2211,7 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_keypackage=args.seed_keypackage,
             seed_init=args.seed_dm_init,
             plaintext=args.dm_plaintext,
+            send_peer_token=args.send_peer_token,
             wait_peer_app=args.wait_peer_app,
             peer_app_expected=args.peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
@@ -2193,6 +2237,7 @@ def handle_gw_phase5_coexist_proof(args: argparse.Namespace) -> int:
             seed_keypackage=args.seed_keypackage,
             seed_init=args.seed_group_init,
             plaintext=args.room_plaintext,
+            send_peer_token=args.send_peer_token,
             wait_peer_app=args.wait_peer_app,
             peer_app_expected=args.peer_app_expected,
             peer_app_timeout_s=args.peer_app_timeout_s,
