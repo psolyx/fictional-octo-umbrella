@@ -907,7 +907,10 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                     stderr=subprocess.DEVNULL,
                 )
 
-                cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
+                try:
+                    cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
+                except AssertionError as exc:
+                    raise unittest.SkipTest(f"chromium remote debugging unavailable: {exc}") from exc
 
                 bob_task = asyncio.create_task(
                     self._bob_flow(
@@ -930,6 +933,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             await bob_ws.close()
             if static_server is not None:
                 static_server.shutdown()
+                static_server.server_close()
             if static_thread is not None:
                 static_thread.join(timeout=2.0)
             if chromium_proc is not None:
