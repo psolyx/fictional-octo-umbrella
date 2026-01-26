@@ -1,14 +1,22 @@
+import hashlib
 import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 WASM_MAIN = ROOT_DIR / "tools" / "mls_harness" / "cmd" / "mls-wasm" / "main.go"
+WASM_MODULE_DIR = ROOT_DIR / "tools" / "mls_harness"
+WASM_BUILD_SCRIPT = ROOT_DIR / "tools" / "mls_harness" / "build_wasm.sh"
 WEB_DIR = ROOT_DIR / "clients" / "web"
 WEB_LOADER = WEB_DIR / "mls_vectors_loader.js"
 WEB_VECTORS_UI = WEB_DIR / "vectors_ui.js"
 WEB_TOOLS_DIR = WEB_DIR / "tools"
+WEB_VENDOR_DIR = WEB_DIR / "vendor"
+WEB_VENDOR_GITIGNORE = WEB_VENDOR_DIR / ".gitignore"
+WEB_README = WEB_DIR / "README.md"
 
 REQUIRED_GLOBALS = {
     "verifyVectors",
@@ -80,6 +88,24 @@ def _assert_subset(label: str, found: set[str], allowed: set[str]) -> None:
     raise AssertionError("\n".join(lines))
 
 
+def _build_wasm(output_path: Path) -> None:
+    env = os.environ.copy()
+    env["GOOS"] = "js"
+    env["GOARCH"] = "wasm"
+    env["GOFLAGS"] = "-mod=vendor -trimpath -buildvcs=false"
+    env["GOTOOLCHAIN"] = "local"
+    subprocess.run(
+        ["go", "-C", str(WASM_MODULE_DIR), "build", "-o", str(output_path), "./cmd/mls-wasm"],
+        cwd=ROOT_DIR,
+        env=env,
+        check=True,
+    )
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 class Phase5WasmCliCoexistOverGatewayTests(unittest.TestCase):
     def test_wasm_global_api_contract(self) -> None:
         text = _read_text(WASM_MAIN)
@@ -126,6 +152,52 @@ class Phase5WasmCliCoexistOverGatewayTests(unittest.TestCase):
             for path in sorted(js_tool_hits):
                 lines.append(f"- {path}")
             raise AssertionError("\n".join(lines))
+
+    def test_wasm_build_is_offline_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            first_output = Path(first_dir) / "mls_harness.wasm"
+            second_output = Path(second_dir) / "mls_harness.wasm"
+            _build_wasm(first_output)
+            _build_wasm(second_output)
+
+            self.assertTrue(first_output.exists(), "first wasm output missing")
+            self.assertTrue(second_output.exists(), "second wasm output missing")
+
+            first_bytes = first_output.read_bytes()
+            second_bytes = second_output.read_bytes()
+            self.assertTrue(first_bytes.startswith(b"\0asm"), "first wasm output missing magic header")
+            self.assertTrue(second_bytes.startswith(b"\0asm"), "second wasm output missing magic header")
+            self.assertEqual(
+                _sha256_bytes(first_bytes),
+                _sha256_bytes(second_bytes),
+                "wasm build is not deterministic",
+            )
+
+    def test_wasm_build_script_contract(self) -> None:
+        text = _read_text(WASM_BUILD_SCRIPT)
+        self.assertIn("GOFLAGS:=-mod=vendor", text)
+        self.assertIn("GOTOOLCHAIN:=local", text)
+        self.assertRegex(text, r"GOOS=js\s+GOARCH=wasm")
+        self.assertIn('vendor_dir="${repo_root}/clients/web/vendor"', text)
+        self.assertIn('${vendor_dir}/mls_harness.wasm', text)
+
+    def test_web_vendor_ignore_posture(self) -> None:
+        gitignore_text = _read_text(WEB_VENDOR_GITIGNORE)
+        self.assertTrue(
+            "*.wasm" in gitignore_text or "mls_harness.wasm" in gitignore_text,
+            "clients/web/vendor/.gitignore must ignore wasm outputs",
+        )
+        readme_text = _read_text(WEB_README)
+        self.assertRegex(
+            readme_text,
+            r"must not be committed",
+            "clients/web/README.md must state wasm output is not committed",
+        )
+        self.assertRegex(
+            readme_text,
+            r"mls_harness\.wasm|\*\.wasm",
+            "clients/web/README.md must mention wasm outputs explicitly",
+        )
 
 
 if __name__ == "__main__":
