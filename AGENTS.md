@@ -61,6 +61,9 @@ If the repo has no tests yet, add at least one:
   - assume disconnects and implement resume/replay deterministically
   - app-layer rate limits are mandatory on WS
 
+## External references (hard rule)
+For decisions that depend on MLS / Cloudflare WS / caching behavior, fetch the relevant section from the URL, quote the exact subsection/heading you relied on, then implement.
+
 ## Directory overrides
 - gateway/AGENTS.md overrides gateway-specific rules
 - clients/cli/AGENTS.md overrides CLI-specific rules
