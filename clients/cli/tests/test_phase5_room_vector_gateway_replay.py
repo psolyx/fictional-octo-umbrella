@@ -837,6 +837,9 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
             predicate=lambda payload: payload.get("t") == "session.ready",
         )
         session_token = ready["body"]["session_token"]
+        resume_token = ready["body"].get("resume_token")
+        self.assertIsInstance(resume_token, str)
+        self.assertTrue(resume_token)
 
         for conv_id in (dm_conv_id, room_conv_id):
             resp = await self.client.post(
@@ -865,16 +868,41 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
         )
 
         events_by_conv: dict[str, dict[int, dict]] = {dm_conv_id: {}, room_conv_id: {}}
+        msg_seq_by_conv: dict[str, dict[str, int]] = {dm_conv_id: {}, room_conv_id: {}}
         conv_ids = {dm_conv_id, room_conv_id}
-        dm_index = 0
-        room_index = 0
         send_counter = 0
 
-        async def _send_and_wait_ack(conv_id: str, event: dict) -> None:
+        def _track_event(payload: dict) -> None:
+            if payload.get("t") != "conv.event":
+                return
+            body = payload.get("body")
+            if not isinstance(body, dict):
+                return
+            conv_id = body.get("conv_id")
+            if not isinstance(conv_id, str) or conv_id not in conv_ids:
+                return
+            seq = body.get("seq")
+            msg_id = body.get("msg_id") if isinstance(body.get("msg_id"), str) else None
+            if not isinstance(seq, int):
+                return
+            _record_ws_event_multi(payload, conv_ids, events_by_conv)
+            if msg_id is None:
+                return
+            existing = msg_seq_by_conv[conv_id].get(msg_id)
+            if existing is None:
+                msg_seq_by_conv[conv_id][msg_id] = seq
+            else:
+                self.assertEqual(
+                    existing,
+                    seq,
+                    msg=f"Duplicate msg_id {msg_id} for {conv_id} had seq {seq}, expected {existing}",
+                )
+
+        async def _send_and_wait_ack(active_ws, conv_id: str, event: dict) -> None:
             nonlocal send_counter
             send_id = f"send_{send_counter}"
             send_counter += 1
-            await ws.send_json(
+            await active_ws.send_json(
                 {
                     "v": 1,
                     "t": "conv.send",
@@ -887,25 +915,67 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
                 }
             )
             ack = await _ws_recv_until(
-                ws,
+                active_ws,
                 timeout_s=1.0,
                 predicate=lambda payload, expected_id=send_id: (
                     payload.get("t") == "conv.acked" and payload.get("id") == expected_id
                 ),
-                on_payload=lambda payload: _record_ws_event_multi(
-                    payload,
-                    conv_ids,
-                    events_by_conv,
-                ),
+                on_payload=_track_event,
             )
             self.assertEqual(ack["body"]["seq"], event["seq"])
 
+        await _send_and_wait_ack(ws, dm_conv_id, dm_events[0])
+        await _send_and_wait_ack(ws, room_conv_id, room_events[0])
+        await ws.close()
+
+        ws = await self.client.ws_connect("/v1/ws")
+        await ws.send_json(
+            {
+                "v": 1,
+                "t": "session.start",
+                "id": "start_coexist_resume",
+                "body": {
+                    "auth_token": "t",
+                    "device_id": "coexist_d1",
+                    "resume_token": resume_token,
+                },
+            }
+        )
+        ready = await _ws_recv_until(
+            ws,
+            timeout_s=1.0,
+            predicate=lambda payload: payload.get("t") == "session.ready",
+        )
+        session_token = ready["body"]["session_token"]
+        resume_token = ready["body"].get("resume_token")
+        self.assertIsInstance(resume_token, str)
+        self.assertTrue(resume_token)
+
+        await ws.send_json(
+            {
+                "v": 1,
+                "t": "conv.subscribe",
+                "id": "sub_dm_resume",
+                "body": {"conv_id": dm_conv_id, "from_seq": 1},
+            }
+        )
+        await ws.send_json(
+            {
+                "v": 1,
+                "t": "conv.subscribe",
+                "id": "sub_room_resume",
+                "body": {"conv_id": room_conv_id, "from_seq": 1},
+            }
+        )
+
+        dm_index = 1
+        room_index = 1
         while dm_index < len(dm_events) or room_index < len(room_events):
             if dm_index < len(dm_events):
-                await _send_and_wait_ack(dm_conv_id, dm_events[dm_index])
+                await _send_and_wait_ack(ws, dm_conv_id, dm_events[dm_index])
                 dm_index += 1
             if room_index < len(room_events):
-                await _send_and_wait_ack(room_conv_id, room_events[room_index])
+                await _send_and_wait_ack(ws, room_conv_id, room_events[room_index])
                 room_index += 1
 
         remaining = await _ws_collect_events_multi(
@@ -919,6 +989,20 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
         for conv_id, events in remaining.items():
             for event in events:
                 events_by_conv.setdefault(conv_id, {}).setdefault(event["seq"], event)
+                msg_id = event.get("msg_id")
+                if isinstance(msg_id, str):
+                    existing = msg_seq_by_conv[conv_id].get(msg_id)
+                    if existing is None:
+                        msg_seq_by_conv[conv_id][msg_id] = event["seq"]
+                    else:
+                        self.assertEqual(
+                            existing,
+                            event["seq"],
+                            msg=(
+                                f"Duplicate msg_id {msg_id} for {conv_id} had seq {event['seq']}, "
+                                f"expected {existing}"
+                            ),
+                        )
 
         self.assertEqual(len(events_by_conv[dm_conv_id]), len(dm_events))
         self.assertEqual(len(events_by_conv[room_conv_id]), len(room_events))
@@ -953,11 +1037,7 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
                 predicate=lambda payload, expected_id=resend_id: (
                     payload.get("t") == "conv.acked" and payload.get("id") == expected_id
                 ),
-                on_payload=lambda payload: _record_ws_event_multi(
-                    payload,
-                    conv_ids,
-                    events_by_conv,
-                ),
+                on_payload=_track_event,
             )
             self.assertEqual(ack["body"]["seq"], event["seq"])
 
@@ -997,6 +1077,147 @@ class Phase5CoexistGatewayReplayTests(_Phase5GatewayReplayBase):
         self.assertEqual(
             _canonical_digest_for_vector(room_vector, replayed[room_conv_id]),
             room_vector["digest_sha256_b64"],
+        )
+
+        for conv_id, last_event in (
+            (dm_conv_id, dm_events[-1]),
+            (room_conv_id, room_events[-1]),
+        ):
+            ack_id = f"ack_{conv_id}"
+            await ws.send_json(
+                {
+                    "v": 1,
+                    "t": "conv.ack",
+                    "id": ack_id,
+                    "body": {"conv_id": conv_id, "seq": last_event["seq"]},
+                }
+            )
+            try:
+                await _ws_recv_until(
+                    ws,
+                    timeout_s=0.4,
+                    predicate=lambda payload, expected_id=ack_id: (
+                        payload.get("t") == "conv.acked" and payload.get("id") == expected_id
+                    ),
+                    on_payload=_track_event,
+                )
+            except asyncio.TimeoutError:
+                pass
+
+        ws_cursor = await self.client.ws_connect("/v1/ws")
+        await ws_cursor.send_json(
+            {
+                "v": 1,
+                "t": "session.start",
+                "id": "start_coexist_cursor",
+                "body": {"auth_token": "t", "device_id": "coexist_d1"},
+            }
+        )
+        await _ws_recv_until(
+            ws_cursor,
+            timeout_s=1.0,
+            predicate=lambda payload: payload.get("t") == "session.ready",
+        )
+        await ws_cursor.send_json(
+            {
+                "v": 1,
+                "t": "conv.subscribe",
+                "id": "sub_dm_cursor",
+                "body": {"conv_id": dm_conv_id},
+            }
+        )
+        await ws_cursor.send_json(
+            {
+                "v": 1,
+                "t": "conv.subscribe",
+                "id": "sub_room_cursor",
+                "body": {"conv_id": room_conv_id},
+            }
+        )
+        first_events: dict[str, dict] = {}
+        deadline = asyncio.get_running_loop().time() + 0.3
+        while True:
+            if len(first_events) == len(conv_ids):
+                break
+            try:
+                payload = await _ws_receive_payload(ws_cursor, deadline=deadline)
+            except asyncio.TimeoutError:
+                break
+            if payload.get("t") != "conv.event":
+                continue
+            body = payload.get("body")
+            if not isinstance(body, dict):
+                continue
+            conv_id = body.get("conv_id")
+            if not isinstance(conv_id, str) or conv_id not in conv_ids:
+                continue
+            if conv_id in first_events:
+                continue
+            first_events[conv_id] = body
+
+        last_seq_by_conv = {
+            dm_conv_id: dm_events[-1]["seq"],
+            room_conv_id: room_events[-1]["seq"],
+        }
+        for conv_id, last_seq in last_seq_by_conv.items():
+            if conv_id in first_events:
+                self.assertGreaterEqual(first_events[conv_id]["seq"], last_seq + 1)
+
+        await ws_cursor.close()
+
+        async def _collect_full_sse_events(vector: dict) -> list[dict]:
+            conv_id = vector["conv_id"]
+            expected_count = len(vector["events"])
+            captured = await asyncio.to_thread(
+                capture_sse_transcript,
+                self.base_url,
+                session_token,
+                conv_id,
+                from_seq=1,
+                timeout_s=1.0,
+                max_events=expected_count,
+            )
+            events_by_seq = {event["seq"]: event for event in captured}
+            if len(events_by_seq) < expected_count:
+                next_from_seq = max(events_by_seq) + 1 if events_by_seq else 1
+                remaining = await asyncio.to_thread(
+                    _collect_sse_events,
+                    self.base_url,
+                    session_token,
+                    conv_id,
+                    next_from_seq,
+                    expected_count - len(events_by_seq),
+                    1.0,
+                )
+                for event in remaining:
+                    events_by_seq.setdefault(event["seq"], event)
+            return list(events_by_seq.values())
+
+        dm_sse_events = await _collect_full_sse_events(dm_vector)
+        room_sse_events = await _collect_full_sse_events(room_vector)
+        self.assertEqual(len(dm_sse_events), len(dm_events))
+        self.assertEqual(len(room_sse_events), len(room_events))
+        self.assertEqual(
+            _canonical_digest_for_vector(dm_vector, dm_sse_events),
+            dm_vector["digest_sha256_b64"],
+        )
+        self.assertEqual(
+            _canonical_digest_for_vector(room_vector, room_sse_events),
+            room_vector["digest_sha256_b64"],
+        )
+        await _assert_legacy_after_seq_sse(
+            self.base_url,
+            session_token,
+            conv_id=dm_conv_id,
+            after_seq=dm_events[1]["seq"],
+            expected_seq=dm_events[1]["seq"] + 1,
+        )
+        await _assert_legacy_after_seq_sse(
+            self.base_url,
+            session_token,
+            conv_id=room_conv_id,
+            after_seq=room_events[1]["seq"],
+            expected_seq=room_events[1]["seq"] + 1,
         )
 
         dm_after_payload = await _ws_first_event_after_seq(
