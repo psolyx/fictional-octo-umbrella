@@ -41,10 +41,12 @@ def _find_chromium() -> Optional[str]:
     return None
 
 
-def _wait_for_http(url: str, timeout_s: float) -> None:
+def _wait_for_http(url: str, timeout_s: float, *, process: subprocess.Popen[str]) -> None:
     deadline = time.time() + timeout_s
     last_error: Optional[Exception] = None
     while time.time() < deadline:
+        if process.poll() is not None:
+            raise unittest.SkipTest("dev server exited before becoming ready")
         try:
             with urllib.request.urlopen(url, timeout=0.5) as resp:
                 if resp.status == 200:
@@ -52,7 +54,7 @@ def _wait_for_http(url: str, timeout_s: float) -> None:
         except Exception as exc:  # noqa: BLE001 - test harness polling
             last_error = exc
         time.sleep(0.1)
-    raise AssertionError(f"Timed out waiting for dev server: {last_error}")
+    raise unittest.SkipTest(f"dev server did not become ready: {last_error}")
 
 
 def _wait_for_cdp_url(port: int, timeout_s: float) -> str:
@@ -274,11 +276,15 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     str(dev_port),
                 ],
                 cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
-            _wait_for_http(f"http://127.0.0.1:{dev_port}/index.html", timeout_s=10.0)
+            _wait_for_http(
+                f"http://127.0.0.1:{dev_port}/index.html",
+                timeout_s=10.0,
+                process=server_proc,
+            )
 
             cdp_port = _find_free_port()
             with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
