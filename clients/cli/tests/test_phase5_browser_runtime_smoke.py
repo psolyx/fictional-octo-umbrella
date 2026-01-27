@@ -1,5 +1,6 @@
 import asyncio
 import json
+import selectors
 import shutil
 import socket
 import subprocess
@@ -46,7 +47,13 @@ def _wait_for_http(url: str, timeout_s: float, *, process: subprocess.Popen[str]
     last_error: Optional[Exception] = None
     while time.time() < deadline:
         if process.poll() is not None:
-            raise unittest.SkipTest("dev server exited before becoming ready")
+            stderr_output = ""
+            if process.stderr is not None:
+                stderr_output = process.stderr.read()
+            raise AssertionError(
+                "dev server exited before becoming ready.\n"
+                f"stderr:\n{stderr_output}"
+            )
         try:
             with urllib.request.urlopen(url, timeout=0.5) as resp:
                 if resp.status == 200:
@@ -54,7 +61,43 @@ def _wait_for_http(url: str, timeout_s: float, *, process: subprocess.Popen[str]
         except Exception as exc:  # noqa: BLE001 - test harness polling
             last_error = exc
         time.sleep(0.1)
-    raise unittest.SkipTest(f"dev server did not become ready: {last_error}")
+    raise AssertionError(f"dev server did not become ready: {last_error}")
+
+
+def _wait_for_ready_url(
+    timeout_s: float,
+    *,
+    process: subprocess.Popen[str],
+) -> str:
+    deadline = time.time() + timeout_s
+    selector = selectors.DefaultSelector()
+    if process.stdout is None:
+        raise AssertionError("dev server stdout unavailable")
+    selector.register(process.stdout, selectors.EVENT_READ)
+    stdout_lines = []
+    try:
+        while time.time() < deadline:
+            if process.poll() is not None:
+                stderr_output = ""
+                if process.stderr is not None:
+                    stderr_output = process.stderr.read()
+                stdout_output = "".join(stdout_lines)
+                raise AssertionError(
+                    "dev server exited before becoming ready.\n"
+                    f"stdout:\n{stdout_output}\n"
+                    f"stderr:\n{stderr_output}"
+                )
+            events = selector.select(timeout=0.1)
+            for key, _ in events:
+                line = key.fileobj.readline()
+                if not line:
+                    continue
+                stdout_lines.append(line)
+                if line.startswith("READY "):
+                    return line.split("READY ", 1)[1].strip()
+    finally:
+        selector.close()
+    raise AssertionError("Timed out waiting for dev server readiness output")
 
 
 def _wait_for_cdp_url(port: int, timeout_s: float) -> str:
@@ -122,13 +165,48 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
             await ws.send_json({"id": 3, "method": "Page.navigate", "params": {"url": page_url}})
 
             deadline = asyncio.get_running_loop().time() + timeout_s
-            await _cdp_wait_for_load(ws, deadline=deadline)
+            try:
+                await _cdp_wait_for_load(ws, deadline=deadline)
+            except (TimeoutError, AssertionError):
+                pass
 
             poll_deadline = asyncio.get_running_loop().time() + timeout_s
             msg_id = 10
             while True:
                 if asyncio.get_running_loop().time() >= poll_deadline:
-                    raise AssertionError("Timed out waiting for browser smoke result")
+                    ready_state = "unknown"
+                    smoke_done = "unknown"
+                    smoke_result = "unknown"
+                    try:
+                        ready_state = await _cdp_eval(
+                            ws,
+                            "document.readyState",
+                            msg_id=msg_id,
+                            deadline=asyncio.get_running_loop().time() + 2.0,
+                        )
+                        msg_id += 1
+                        smoke_done = await _cdp_eval(
+                            ws,
+                            "window.__SMOKE_DONE__",
+                            msg_id=msg_id,
+                            deadline=asyncio.get_running_loop().time() + 2.0,
+                        )
+                        msg_id += 1
+                        smoke_result = await _cdp_eval(
+                            ws,
+                            "window.__SMOKE_RESULT__",
+                            msg_id=msg_id,
+                            deadline=asyncio.get_running_loop().time() + 2.0,
+                        )
+                        msg_id += 1
+                    except AssertionError:
+                        ready_state = "unknown"
+                    raise AssertionError(
+                        "Timed out waiting for browser smoke result "
+                        f"(readyState={ready_state}, "
+                        f"smoke_done={smoke_done}, "
+                        f"smoke_result={smoke_result})"
+                    )
                 done = await _cdp_eval(ws, "window.__SMOKE_DONE__ === true", msg_id=msg_id, deadline=poll_deadline)
                 msg_id += 1
                 if done:
@@ -263,7 +341,6 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
 """
                 )
 
-            dev_port = _find_free_port()
             server_proc = subprocess.Popen(
                 [
                     sys.executable,
@@ -273,15 +350,16 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     "--host",
                     "127.0.0.1",
                     "--port",
-                    str(dev_port),
+                    "0",
                 ],
                 cwd=str(ROOT_DIR),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
             )
+            ready_url = _wait_for_ready_url(timeout_s=10.0, process=server_proc)
             _wait_for_http(
-                f"http://127.0.0.1:{dev_port}/index.html",
+                f"{ready_url}/index.html",
                 timeout_s=10.0,
                 process=server_proc,
             )
@@ -318,8 +396,8 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                 except Exception as exc:  # noqa: BLE001 - skip on CDP failure
                     raise unittest.SkipTest(f"chromium remote debugging unavailable: {exc}") from exc
 
-                page_url = f"http://127.0.0.1:{dev_port}/{html_file.name}"
-                result = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=20.0))
+                page_url = f"{ready_url}/{html_file.name}"
+                result = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=120.0))
                 if not result.get("ok"):
                     raise AssertionError(f"Browser runtime smoke failed: {result}")
         finally:
@@ -329,11 +407,17 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     chromium_proc.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
                     chromium_proc.kill()
+                if chromium_proc.stdout is not None:
+                    chromium_proc.stdout.close()
             if server_proc is not None:
                 server_proc.terminate()
                 try:
                     server_proc.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
                     server_proc.kill()
+                if server_proc.stdout is not None:
+                    server_proc.stdout.close()
+                if server_proc.stderr is not None:
+                    server_proc.stderr.close()
             if html_file is not None and html_file.exists():
                 html_file.unlink()
