@@ -124,7 +124,9 @@ def run_server(index_path: pathlib.Path, host: str, port: int) -> int:
             super().end_headers()
 
     server = http.server.ThreadingHTTPServer((host, port), csp_dev_handler)
-    print(f"serving {web_root} on http://{host}:{port}")
+    actual_port = server.server_address[1]
+    print(f"READY http://{host}:{actual_port}", flush=True)
+    print(f"serving {web_root} on http://{host}:{actual_port}")
     print("press Ctrl+C to stop")
     try:
         server.serve_forever()
@@ -141,9 +143,23 @@ def wasm_paths(repo_root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     return wasm_path, wasm_exec_path
 
 
-def report_build_failure(message: str, verbose: bool) -> None:
+def report_build_failure(
+    message: str,
+    exc: BaseException,
+    *,
+    verbose: bool,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> None:
     print(f"error: {message}", file=sys.stderr)
     if verbose:
+        print(f"details: {exc}", file=sys.stderr)
+        if stdout:
+            print("build stdout:", file=sys.stderr)
+            print(stdout, file=sys.stderr)
+        if stderr:
+            print("build stderr:", file=sys.stderr)
+            print(stderr, file=sys.stderr)
         traceback.print_exc()
 
 
@@ -181,15 +197,26 @@ def ensure_wasm(
         print(f"error: build script missing: {build_script}", file=sys.stderr)
         return 1
     try:
-        subprocess.run([str(build_script)], check=True)
+        subprocess.run(
+            ["bash", str(build_script)],
+            check=True,
+            capture_output=verbose,
+            text=True,
+        )
     except (OSError, subprocess.CalledProcessError) as exc:
+        stdout = None
+        stderr = None
+        if isinstance(exc, subprocess.CalledProcessError):
+            stdout = exc.stdout
+            stderr = exc.stderr
         report_build_failure(
             "failed to build MLS WASM harness; ensure Go is installed and "
-            "tools/mls_harness/build_wasm.sh is executable",
-            verbose,
+            "tools/mls_harness/build_wasm.sh is present",
+            exc,
+            verbose=verbose,
+            stdout=stdout,
+            stderr=stderr,
         )
-        if verbose:
-            print(f"details: {exc}", file=sys.stderr)
         return 1
 
     wasm_missing = not wasm_path.exists()
