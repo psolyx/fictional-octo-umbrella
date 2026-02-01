@@ -258,6 +258,26 @@ class TuiModel:
             conv[DM_FIELD_MAP[field_key]] = new_value
         self._persist()
 
+    def append_to_active_field(self, text: str) -> None:
+        """Append text to the active field as a single persisted update.
+
+        Terminal paste can arrive as hundreds of characters in quick
+        succession. Persisting on every character (fsync+rename) is slow and
+        increases the chance of the UI becoming unresponsive during paste.
+        """
+
+        if not text:
+            return
+        field_key = self.field_order[self.active_field]
+        self.update_field_value(self.fields.get(field_key, "") + text)
+
+    def append_to_compose(self, text: str) -> None:
+        """Append text to the compose buffer."""
+
+        if not text:
+            return
+        self.compose_text += text
+
     def set_field_value(self, field_key: str, new_value: str) -> None:
         self.fields[field_key] = new_value
         if field_key in DM_FIELD_MAP:
@@ -354,9 +374,15 @@ class TuiModel:
                 self.move_field(-1)
             elif key == "DOWN":
                 self.move_field(1)
-            elif key in {"BACKSPACE", "DELETE"}:
+            elif key == "BACKSPACE":
                 field_key = self.field_order[self.active_field]
                 self.update_field_value(self.fields[field_key][:-1])
+            elif key == "DELETE":
+                # Reserve Delete for clearing the entire active field.
+                # This makes it practical to replace large blobs (ciphertext,
+                # welcome/commit, keypackages) without holding Backspace.
+                field_key = self.field_order[self.active_field]
+                self.update_field_value("")
             elif key == "ENTER":
                 return None
             elif char:
@@ -381,8 +407,10 @@ class TuiModel:
             return None
 
         if self.focus_area == "compose":
-            if key in {"BACKSPACE", "DELETE"}:
+            if key == "BACKSPACE":
                 self.compose_text = self.compose_text[:-1]
+            elif key == "DELETE":
+                self.compose_text = ""
             elif key == "ENTER":
                 return "send"
             elif char:
