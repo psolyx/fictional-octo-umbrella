@@ -76,6 +76,15 @@ class RenderState:
     new_dm_fields: Dict[str, str]
     new_dm_field_order: List[str]
     new_dm_active_field: int
+    social_active: bool
+    social_target: str
+    social_items: List[Dict[str, Any]]
+    social_selected_idx: int
+    social_scroll: int
+    social_status_line: str
+    social_compose_active: bool
+    social_compose_text: str
+    social_prev_hash: Optional[str]
     user_id: str
     device_id: str
     identity_path: Path
@@ -165,6 +174,16 @@ class TuiModel:
         self.new_dm_fields = {"peer_user_id": "", "name": "", "state_dir": "", "conv_id": ""}
         self.new_dm_active_field = 0
 
+        self.social_active = False
+        self.social_target = "self"
+        self.social_items: List[Dict[str, Any]] = []
+        self.social_selected_idx = 0
+        self.social_scroll = 0
+        self.social_status_line = ""
+        self.social_compose_active = False
+        self.social_compose_text = ""
+        self.social_prev_hash: Optional[str] = None
+
         self.dm_conversations = self._load_conversations(initial_settings, defaults)
         self.selected_conversation = self._load_selected_conversation(initial_settings)
         if self.mode == MODE_HARNESS:
@@ -245,6 +264,8 @@ class TuiModel:
             order = ["menu", "fields", "conversations", "transcript", "compose"]
         else:
             order = ["conversations", "transcript", "compose"]
+            if self.social_active:
+                order.append("social")
         if self.focus_area not in order:
             self.focus_area = order[0]
             return
@@ -256,6 +277,8 @@ class TuiModel:
             order = ["menu", "fields", "conversations", "transcript", "compose"]
         else:
             order = ["conversations", "transcript", "compose"]
+            if self.social_active:
+                order.append("social")
         if self.focus_area not in order:
             self.focus_area = order[0]
             return
@@ -272,6 +295,11 @@ class TuiModel:
         transcript = self.get_selected_conv().get("transcript", [])
         max_scroll = max(0, len(transcript) - 1)
         self.transcript_scroll = max(0, min(max_scroll, self.transcript_scroll + delta))
+
+    def scroll_social(self, delta: int) -> None:
+        max_scroll = max(0, len(self.social_items) - 1)
+        self.social_scroll = max(0, min(max_scroll, self.social_scroll + delta))
+        self.social_selected_idx = max(0, len(self.social_items) - 1 - self.social_scroll)
 
     def update_field_value(self, new_value: str) -> None:
         field_key = self.field_order[self.active_field]
@@ -420,10 +448,23 @@ class TuiModel:
             self.mode = MODE_HARNESS if self.mode == MODE_DM_CLIENT else MODE_DM_CLIENT
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
             self.new_dm_active = False
+            self.social_active = False
+            self.social_compose_active = False
+            self.social_compose_text = ""
             self._persist()
             return "toggle_mode"
         if key == "r":
+            if self.mode == MODE_DM_CLIENT and self.focus_area == "social" and self.social_active:
+                return "social_refresh"
             return "resume"
+        if key == "CTRL_S" and self.mode == MODE_DM_CLIENT and self.focus_area != "compose" and not self.social_compose_active:
+            self.social_active = not self.social_active
+            if self.social_active:
+                self.focus_area = "social"
+            elif self.focus_area == "social":
+                self.focus_area = "conversations"
+            self.social_compose_active = False
+            return "social_toggle"
         if self.new_dm_active and key in {"TAB", "SHIFT_TAB"}:
             return None
         if key == "TAB":
@@ -463,6 +504,43 @@ class TuiModel:
             return None
 
         if self.mode == MODE_DM_CLIENT:
+            if self.focus_area == "social" and self.social_active:
+                if self.social_compose_active:
+                    if key == "ESC":
+                        self.social_compose_active = False
+                        self.social_compose_text = ""
+                        return None
+                    if key == "BACKSPACE":
+                        self.social_compose_text = self.social_compose_text[:-1]
+                        return None
+                    if key == "DELETE":
+                        self.social_compose_text = ""
+                        return None
+                    if key == "ENTER":
+                        return "social_publish"
+                    if char:
+                        self.social_compose_text += char
+                        return None
+                    return None
+                if key == "UP":
+                    self.scroll_social(1)
+                    return None
+                if key == "DOWN":
+                    self.scroll_social(-1)
+                    return None
+                if key == "r":
+                    return "social_refresh"
+                if key == "CHAR" and char in {"1"}:
+                    self.social_target = "self"
+                    return "social_target_self"
+                if key == "CHAR" and char in {"2"}:
+                    self.social_target = "peer"
+                    return "social_target_peer"
+                if key == "CHAR" and char in {"p", "P"}:
+                    self.social_compose_active = True
+                    self.social_compose_text = ""
+                    return None
+                return None
             if key == "CTRL_N":
                 self.new_dm_active = True
                 self.new_dm_fields = {"peer_user_id": "", "name": "", "state_dir": "", "conv_id": ""}
@@ -584,6 +662,15 @@ class TuiModel:
             new_dm_fields=dict(self.new_dm_fields),
             new_dm_field_order=list(NEW_DM_FIELD_ORDER),
             new_dm_active_field=self.new_dm_active_field,
+            social_active=self.social_active,
+            social_target=self.social_target,
+            social_items=list(self.social_items),
+            social_selected_idx=self.social_selected_idx,
+            social_scroll=self.social_scroll,
+            social_status_line=self.social_status_line,
+            social_compose_active=self.social_compose_active,
+            social_compose_text=self.social_compose_text,
+            social_prev_hash=self.social_prev_hash,
             user_id=self.identity.user_id,
             device_id=self.identity.device_id,
             identity_path=self.identity_path,
