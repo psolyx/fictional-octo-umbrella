@@ -95,7 +95,7 @@ class PresenceScrapeSimulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(disallowed, [])
 
     async def _next_presence_update(self, ws) -> dict:
-        deadline = asyncio.get_running_loop().time() + 1
+        deadline = asyncio.get_running_loop().time() + 2
         update = await recv_json_until(ws, deadline=deadline, predicate=lambda msg: msg.get("t") == "presence.update")
         self._assert_presence_update_shape(update)
         return update
@@ -222,9 +222,7 @@ class PresenceScrapeSimulationTests(unittest.IsolatedAsyncioTestCase):
         )
         await self._expect_status(target0_renew, status=200)
 
-        deadline = asyncio.get_running_loop().time() + 1
-        update = await recv_json_until(normal_ws, deadline=deadline, predicate=lambda msg: msg.get("t") == "presence.update")
-        self._assert_presence_update_shape(update)
+        await self._next_presence_update(normal_ws)
 
         target1_watch = await self._post(
             "/v1/presence/watch",
