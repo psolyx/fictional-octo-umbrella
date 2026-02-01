@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import curses
 import io
@@ -12,11 +13,14 @@ import secrets
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable, Optional
+
+import aiohttp
 
 from cli_app import dm_envelope, gateway_client, gateway_store, social
 
@@ -220,7 +224,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     right_start = left_width + 1
     header_offset = 6
     render = model.render()
-    compose_height = 4 if render.social_active else 3
+    compose_height = 4 if render.social_active or render.presence_active else 3
     transcript_height = max(3, max_y - header_offset - compose_height - 1)
 
     _render_text(stdscr, 0, 1, "DM client TUI (gateway-backed)")
@@ -228,7 +232,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | Ctrl-S: social | t: harness | q: quit",
+        "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -261,7 +265,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
     if render.social_active:
         header = (
-            f"SOCIAL ({render.social_target}) — r refresh, p post, 1/2 target, Ctrl-S back"
+            f"SOCIAL ({render.social_target}) — r refresh, p post, 1/2 target, Ctrl-P to switch"
         )
         _render_text(stdscr, transcript_top - 1, right_start + 2, header)
         visible_social = _visible_social(render.social_items, transcript_height, render.social_scroll)
@@ -269,6 +273,17 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         for idx, entry in enumerate(visible_social):
             line = _format_social_event(entry)
             attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
+            _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+    elif render.presence_active:
+        header = (
+            "PRESENCE — a watch, r unwatch, b block, B unblock, i invisible, e enable, Ctrl-P to switch"
+        )
+        _render_text(stdscr, transcript_top - 1, right_start + 2, header)
+        visible_presence = _visible_presence(render.presence_items, transcript_height, render.presence_scroll)
+        highlight_idx = max(0, len(visible_presence) - 1 - render.presence_scroll)
+        for idx, entry in enumerate(visible_presence):
+            line = _format_presence_entry(entry)
+            attr = curses.A_REVERSE if render.focus_area == "presence" and idx == highlight_idx else 0
             _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
     else:
         _render_text(stdscr, transcript_top - 1, right_start + 2, "Transcript (latest at bottom)")
@@ -289,6 +304,15 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         compose_attr = curses.A_REVERSE if render.focus_area == "social" else 0
         _render_text(stdscr, compose_top, right_start + 1, render.social_compose_text, compose_attr)
         _render_text(stdscr, compose_top + 1, right_start + 1, render.social_status_line)
+    elif render.presence_active:
+        invisible_label = "on" if render.presence_invisible else "off"
+        enabled_label = "on" if render.presence_enabled else "off"
+        header = f"Presence input ({render.presence_prompt_action or 'idle'}) — invisible {invisible_label}, enabled {enabled_label}"
+        _render_text(stdscr, compose_top - 1, right_start + 2, header)
+        compose_attr = curses.A_REVERSE if render.focus_area == "presence" else 0
+        prompt_text = render.presence_prompt_text if render.presence_prompt_active else ""
+        _render_text(stdscr, compose_top, right_start + 1, prompt_text, compose_attr)
+        _render_text(stdscr, compose_top + 1, right_start + 1, render.presence_status_line)
     else:
         _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
         compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
@@ -393,6 +417,15 @@ def _visible_social(entries: Iterable[Dict[str, object]], height: int, scroll: i
     return collected[start:end]
 
 
+def _visible_presence(entries: Iterable[Dict[str, object]], height: int, scroll: int) -> list[Dict[str, object]]:
+    collected = list(entries)
+    if height <= 0:
+        return []
+    end = max(0, len(collected) - scroll)
+    start = max(0, end - height)
+    return collected[start:end]
+
+
 def _extract_single_output_line(lines: Iterable[str]) -> str | None:
     for line in reversed(list(lines)):
         stripped = line.strip()
@@ -443,6 +476,24 @@ def _format_social_event(entry: Dict[str, object]) -> str:
     return f"{kind}: {text}{suffix}".strip()
 
 
+def _format_presence_entry(entry: Dict[str, object]) -> str:
+    user_id = str(entry.get("user_id", ""))
+    status = str(entry.get("status", "offline"))
+    last_seen = str(entry.get("last_seen_bucket", ""))
+    expires_at = entry.get("expires_at")
+    expires_text = ""
+    if isinstance(expires_at, int):
+        try:
+            expires_text = time.strftime("%H:%M:%S", time.localtime(expires_at / 1000))
+        except (OSError, ValueError):
+            expires_text = str(expires_at)
+    parts = [user_id, status]
+    if last_seen:
+        parts.append(f"last:{last_seen}")
+    if expires_text:
+        parts.append(f"exp:{expires_text}")
+    return " | ".join(part for part in parts if part)
+
 def _blob_preview_lines(label: str, value: str, chunk: int = 64) -> list[str]:
     """Render a copy-friendly blob preview across multiple transcript lines."""
 
@@ -459,6 +510,12 @@ class SessionState:
 
 @dataclass
 class TailThread:
+    thread: threading.Thread
+    stop_event: threading.Event
+
+
+@dataclass
+class PresenceThread:
     thread: threading.Thread
     stop_event: threading.Event
 
@@ -789,10 +846,10 @@ def _start_tail_thread(
                 ):
                     if stop_event.is_set():
                         return
-                    event_queue.put({"conv_id": conv_id, "event": event})
+                    event_queue.put({"type": "conv", "conv_id": conv_id, "event": event})
                 time.sleep(0.1)
             except Exception as exc:  # pragma: no cover - network tolerance
-                event_queue.put({"conv_id": conv_id, "error": str(exc)})
+                event_queue.put({"type": "conv", "conv_id": conv_id, "error": str(exc)})
                 time.sleep(0.5)
 
     thread = threading.Thread(target=_loop, name=f"dm-tail-{conv_id}", daemon=True)
@@ -927,6 +984,156 @@ def _handle_tail_event(
     return False
 
 
+def _presence_post(
+    base_url: str,
+    session_token: str,
+    path: str,
+    payload: Dict[str, object],
+) -> Dict[str, object]:
+    url = f"{base_url.rstrip('/')}{path}"
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {session_token}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
+def _presence_lease(
+    base_url: str,
+    session_token: str,
+    device_id: str,
+    ttl_seconds: int,
+    invisible: bool,
+) -> int:
+    response = _presence_post(
+        base_url,
+        session_token,
+        "/v1/presence/lease",
+        {"device_id": device_id, "ttl_seconds": ttl_seconds, "invisible": invisible},
+    )
+    return int(response["expires_at"])
+
+
+def _presence_renew(
+    base_url: str,
+    session_token: str,
+    device_id: str,
+    ttl_seconds: int,
+    invisible: bool,
+) -> int:
+    response = _presence_post(
+        base_url,
+        session_token,
+        "/v1/presence/renew",
+        {"device_id": device_id, "ttl_seconds": ttl_seconds, "invisible": invisible},
+    )
+    return int(response["expires_at"])
+
+
+def _presence_watch(
+    base_url: str,
+    session_token: str,
+    contacts: list[str],
+) -> Dict[str, object]:
+    return _presence_post(base_url, session_token, "/v1/presence/watch", {"contacts": contacts})
+
+
+def _presence_unwatch(
+    base_url: str,
+    session_token: str,
+    contacts: list[str],
+) -> Dict[str, object]:
+    return _presence_post(base_url, session_token, "/v1/presence/unwatch", {"contacts": contacts})
+
+
+def _presence_block(
+    base_url: str,
+    session_token: str,
+    contacts: list[str],
+) -> Dict[str, object]:
+    return _presence_post(base_url, session_token, "/v1/presence/block", {"contacts": contacts})
+
+
+def _presence_unblock(
+    base_url: str,
+    session_token: str,
+    contacts: list[str],
+) -> Dict[str, object]:
+    return _presence_post(base_url, session_token, "/v1/presence/unblock", {"contacts": contacts})
+
+
+def _start_presence_thread(
+    base_url: str,
+    identity: object,
+    event_queue: queue.Queue[dict[str, object]],
+    stop_event: threading.Event,
+) -> threading.Thread:
+    async def _presence_loop() -> None:
+        backoff_s = 0.5
+        while not stop_event.is_set():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    ws_url = f"{base_url.rstrip('/')}/v1/ws"
+                    async with session.ws_connect(ws_url, heartbeat=20) as ws:
+                        payload = {
+                            "v": 1,
+                            "t": "session.start",
+                            "id": "presence-start",
+                            "body": {
+                                "auth_token": identity.auth_token,
+                                "device_id": identity.device_id,
+                                "device_credential": identity.device_credential,
+                            },
+                        }
+                        await ws.send_json(payload)
+                        ready = False
+                        while not ready and not stop_event.is_set():
+                            msg = await ws.receive(timeout=1.0)
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    frame = json.loads(msg.data)
+                                except json.JSONDecodeError:
+                                    continue
+                                if frame.get("t") == "session.ready":
+                                    ready = True
+                                    break
+                                if frame.get("t") == "presence.update":
+                                    event_queue.put({"type": "presence", "event": frame})
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+                        if not ready:
+                            continue
+                        backoff_s = 0.5
+                        while not stop_event.is_set():
+                            msg = await ws.receive(timeout=1.0)
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    frame = json.loads(msg.data)
+                                except json.JSONDecodeError:
+                                    continue
+                                if frame.get("t") == "presence.update":
+                                    event_queue.put({"type": "presence", "event": frame})
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+            except Exception as exc:  # pragma: no cover - network tolerance
+                event_queue.put({"type": "presence_error", "error": str(exc)})
+            if stop_event.wait(backoff_s):
+                break
+            backoff_s = min(backoff_s * 2, 5.0)
+
+    def _runner() -> None:
+        asyncio.run(_presence_loop())
+
+    thread = threading.Thread(target=_runner, name="presence-ws", daemon=True)
+    thread.start()
+    return thread
+
+
 def _send_dm_message(
     model: TuiModel,
     session: SessionState | None,
@@ -1047,6 +1254,11 @@ def main() -> int:
         runtime_state: dict[str, DmRuntime] = {}
         tail_threads: dict[str, TailThread] = {}
         session_state: SessionState | None = None
+        presence_thread: PresenceThread | None = None
+        presence_lease_expires_at: Optional[int] = None
+        presence_last_lease_attempt: float = 0.0
+        presence_ttl_seconds = 120
+        presence_renew_margin_seconds = 20
 
         def _stop_tail_threads() -> None:
             for tail in tail_threads.values():
@@ -1054,6 +1266,14 @@ def main() -> int:
             for tail in tail_threads.values():
                 tail.thread.join(timeout=0.5)
             tail_threads.clear()
+
+        def _stop_presence_thread() -> None:
+            nonlocal presence_thread
+            if presence_thread is None:
+                return
+            presence_thread.stop_event.set()
+            presence_thread.thread.join(timeout=0.5)
+            presence_thread = None
 
         def _ensure_tail_threads() -> None:
             if session_state is None or model.render().mode != MODE_DM_CLIENT:
@@ -1066,30 +1286,59 @@ def main() -> int:
                 thread = _start_tail_thread(conv_id, session_state, event_queue, stop_event)
                 tail_threads[conv_id] = TailThread(thread=thread, stop_event=stop_event)
 
+        def _ensure_presence_thread() -> None:
+            nonlocal presence_thread
+            if session_state is None or model.render().mode != MODE_DM_CLIENT or not model.presence_enabled:
+                _stop_presence_thread()
+                return
+            if presence_thread is None:
+                stop_event = threading.Event()
+                thread = _start_presence_thread(session_state.base_url, model.identity, event_queue, stop_event)
+                presence_thread = PresenceThread(thread=thread, stop_event=stop_event)
+
         def _drain_events() -> None:
             while True:
                 try:
                     payload = event_queue.get_nowait()
                 except queue.Empty:
                     break
-                conv_id = str(payload.get("conv_id", ""))
-                if not conv_id:
-                    continue
-                if "error" in payload:
-                    model.append_message(conv_id, "sys", "Tail error; retrying.")
-                    continue
-                if session_state is None:
-                    continue
-                event = payload.get("event")
-                if isinstance(event, dict):
-                    gap = _handle_tail_event(model, runtime_state, session_state, conv_id, event)
-                    if gap:
-                        tail = tail_threads.get(conv_id)
-                        if tail:
-                            tail.stop_event.set()
-                            tail.thread.join(timeout=0.2)
-                            del tail_threads[conv_id]
-                        _ensure_tail_threads()
+                payload_type = payload.get("type")
+                if payload_type == "conv":
+                    conv_id = str(payload.get("conv_id", ""))
+                    if not conv_id:
+                        continue
+                    if "error" in payload:
+                        model.append_message(conv_id, "sys", "Tail error; retrying.")
+                        continue
+                    if session_state is None:
+                        continue
+                    event = payload.get("event")
+                    if isinstance(event, dict):
+                        gap = _handle_tail_event(model, runtime_state, session_state, conv_id, event)
+                        if gap:
+                            tail = tail_threads.get(conv_id)
+                            if tail:
+                                tail.stop_event.set()
+                                tail.thread.join(timeout=0.2)
+                                del tail_threads[conv_id]
+                            _ensure_tail_threads()
+                elif payload_type == "presence":
+                    event = payload.get("event")
+                    if isinstance(event, dict):
+                        body = event.get("body", {})
+                        if isinstance(body, dict):
+                            user_id = str(body.get("user_id", ""))
+                            status = str(body.get("status", "offline"))
+                            expires_at = body.get("expires_at")
+                            if not isinstance(expires_at, int):
+                                expires_at = None
+                            last_seen_bucket = body.get("last_seen_bucket")
+                            if not isinstance(last_seen_bucket, str):
+                                last_seen_bucket = None
+                            model.update_presence_entry(user_id, status, expires_at, last_seen_bucket)
+                elif payload_type == "presence_error":
+                    error = str(payload.get("error", "presence error"))
+                    model.set_presence_status(f"Presence WS error: {error}")
 
         def _refresh_social() -> None:
             base_url = _load_social_base_url(model)
@@ -1143,11 +1392,88 @@ def main() -> int:
             model.social_compose_active = False
             _refresh_social()
 
+        def _set_presence_status(text: str) -> None:
+            model.set_presence_status(text)
+
+        def _execute_presence_prompt(action: str, user_id: str) -> None:
+            if not user_id:
+                _set_presence_status("User id is required.")
+                return
+            if session_state is None:
+                _set_presence_status("No active session. Press r to resume.")
+                return
+            base_url = session_state.base_url
+            token = session_state.session_token
+            try:
+                if action == "watch":
+                    _presence_watch(base_url, token, [user_id])
+                    model.ensure_presence_contact(user_id)
+                    _set_presence_status(f"Watching {user_id}.")
+                elif action == "unwatch":
+                    _presence_unwatch(base_url, token, [user_id])
+                    model.remove_presence_contact(user_id)
+                    _set_presence_status(f"Unwatched {user_id}.")
+                elif action == "block":
+                    response = _presence_block(base_url, token, [user_id])
+                    blocked = response.get("blocked")
+                    _set_presence_status(f"Blocked {user_id} (blocked={blocked}).")
+                elif action == "unblock":
+                    response = _presence_unblock(base_url, token, [user_id])
+                    blocked = response.get("blocked")
+                    _set_presence_status(f"Unblocked {user_id} (blocked={blocked}).")
+                else:
+                    _set_presence_status(f"Unknown presence action {action}.")
+            except Exception as exc:
+                _set_presence_status(f"Presence request failed: {exc}")
+
+        def _expire_presence_entries() -> None:
+            now_ms = int(time.time() * 1000)
+            for entry in list(model.presence_entries.values()):
+                expires_at = entry.get("expires_at")
+                if isinstance(expires_at, int) and expires_at < now_ms:
+                    entry["status"] = "offline"
+
+        def _tick_presence() -> None:
+            nonlocal presence_lease_expires_at, presence_last_lease_attempt
+            _ensure_presence_thread()
+            if not model.presence_enabled or session_state is None:
+                presence_lease_expires_at = None
+                return
+            now = time.time()
+            if now - presence_last_lease_attempt < 1.0:
+                return
+            now_ms = int(now * 1000)
+            if presence_lease_expires_at is None or now_ms >= presence_lease_expires_at - (presence_renew_margin_seconds * 1000):
+                presence_last_lease_attempt = now
+                try:
+                    if presence_lease_expires_at is None:
+                        presence_lease_expires_at = _presence_lease(
+                            session_state.base_url,
+                            session_state.session_token,
+                            model.identity.device_id,
+                            presence_ttl_seconds,
+                            model.presence_invisible,
+                        )
+                        _set_presence_status("Presence lease acquired.")
+                    else:
+                        presence_lease_expires_at = _presence_renew(
+                            session_state.base_url,
+                            session_state.session_token,
+                            model.identity.device_id,
+                            presence_ttl_seconds,
+                            model.presence_invisible,
+                        )
+                        _set_presence_status("Presence lease renewed.")
+                except Exception as exc:
+                    _set_presence_status(f"Presence lease failed: {exc}")
+
         while True:
             # Rendering can occasionally fail during terminal resize. Keep the
             # event loop running and redraw on the next iteration.
             try:
                 _drain_events()
+                _expire_presence_entries()
+                _tick_presence()
                 draw_screen(stdscr, model)
             except curses.error:
                 pass
@@ -1162,7 +1488,12 @@ def main() -> int:
             state = model.render()
             focus = state.focus_area
             social_paste = focus == "social" and state.social_compose_active
-            if (focus in {"fields", "compose", "new_dm"} or social_paste) and (key == 27 or 0 <= key < 256) and key != 9:
+            presence_paste = focus == "presence" and state.presence_prompt_active
+            if (
+                focus in {"fields", "compose", "new_dm"}
+                or social_paste
+                or presence_paste
+            ) and (key == 27 or 0 <= key < 256) and key != 9:
                 pending = _drain_pending_input(stdscr)
                 # If we saw a lone ESC, briefly wait for a follow-on sequence
                 # (common for bracketed paste start ...).
@@ -1211,6 +1542,12 @@ def main() -> int:
                         if cleaned:
                             model.social_compose_text += cleaned
                         continue
+                    if presence_paste:
+                        cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
+                        cleaned = cleaned.replace("\n", "").replace("\r", "")
+                        if cleaned:
+                            model.presence_prompt_text += cleaned
+                        continue
 
             normalized, char = _normalize_key(key)
             action = model.handle_key(normalized, char)
@@ -1221,6 +1558,15 @@ def main() -> int:
                     _stop_tail_threads()
                 else:
                     _ensure_tail_threads()
+                    _ensure_presence_thread()
+            if action == "panel_toggle":
+                if model.presence_active and not model.presence_enabled:
+                    model.presence_enabled = True
+                if model.presence_active:
+                    _set_presence_status("Presence panel active.")
+                else:
+                    _set_presence_status("")
+                _ensure_presence_thread()
             if action == "new_conv":
                 fields = model.render().fields
                 if not fields.get("dm_name") or not fields.get("dm_state_dir"):
@@ -1284,8 +1630,24 @@ def main() -> int:
                 else:
                     _send_dm_message(model, session_state, runtime_state, compose_text)
                 model.compose_text = ""
+            if action == "presence_prompt_submit":
+                action_name = model.presence_prompt_action
+                prompt_text = model.presence_prompt_text.strip()
+                model.presence_prompt_active = False
+                model.presence_prompt_text = ""
+                model.presence_prompt_action = ""
+                _execute_presence_prompt(action_name, prompt_text)
+            if action == "presence_toggle_invisible":
+                _set_presence_status("Invisible mode toggled.")
+                presence_lease_expires_at = None
+            if action == "presence_toggle_enabled":
+                label = "enabled" if model.presence_enabled else "disabled"
+                _set_presence_status(f"Presence {label}.")
+                presence_lease_expires_at = None
+                _ensure_presence_thread()
 
         _stop_tail_threads()
+        _stop_presence_thread()
 
     curses.wrapper(_runner)
     return 0
