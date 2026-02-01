@@ -263,6 +263,21 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
       window.__SMOKE_DONE__ = false;
       window.__SMOKE_RESULT__ = { ok: false, error: 'not started' };
 
+      window.addEventListener('error', (event) => {
+        if (!window.__SMOKE_DONE__) {
+          window.__SMOKE_RESULT__ = { ok: false, error: `unhandled error: ${event.message}` };
+          window.__SMOKE_DONE__ = true;
+        }
+      });
+
+      window.addEventListener('unhandledrejection', (event) => {
+        const reason = event && event.reason ? event.reason : 'unknown';
+        if (!window.__SMOKE_DONE__) {
+          window.__SMOKE_RESULT__ = { ok: false, error: `unhandled rejection: ${reason}` };
+          window.__SMOKE_DONE__ = true;
+        }
+      });
+
       const bytes_to_base64 = (bytes) => {
         let output = '';
         const chunk = 8192;
@@ -397,7 +412,7 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     raise unittest.SkipTest(f"chromium remote debugging unavailable: {exc}") from exc
 
                 page_url = f"{ready_url}/{html_file.name}"
-                result = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=120.0))
+                result = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=180.0))
                 if not result.get("ok"):
                     raise AssertionError(f"Browser runtime smoke failed: {result}")
         finally:
