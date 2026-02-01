@@ -1,19 +1,27 @@
-"""Curses-based TUI wrapper for the MLS harness CLI POC."""
+"""Curses-based TUI wrapper for the MLS harness and DM client."""
 
 from __future__ import annotations
 
+import base64
 import curses
 import io
 import json
+import queue
 import re
+import secrets
 import sys
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Dict, Iterable
+from typing import Callable, Dict, Iterable, Optional
 
-from cli_app import identity_store
+from cli_app import dm_envelope, gateway_client, gateway_store
 
 from cli_app import mls_poc
-from cli_app.tui_model import DEFAULT_SETTINGS_FILE, TuiModel, load_settings
+from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
 
 
 def _normalize_key(key: int) -> tuple[str, str | None]:
@@ -39,6 +47,10 @@ def _normalize_key(key: int) -> tuple[str, str | None]:
         return "CTRL_N", None
     if key == 16:  # ctrl-p
         return "CTRL_P", None
+    if key in (ord("r"), ord("R")):
+        return "r", None
+    if key in (ord("t"), ord("T")):
+        return "t", None
     if key in (ord("q"), ord("Q")):
         return "q", None
     if 32 <= key <= 126:
@@ -137,6 +149,7 @@ def _build_default_settings() -> Dict[str, str]:
     repo_root = mls_poc.find_repo_root()
     default_vector = repo_root / "tools" / "mls_harness" / "vectors" / "dm_smoke_v1.json"
     return {
+        "tui_mode": MODE_DM_CLIENT,
         "state_dir": "",
         "iterations": "50",
         "save_every": "10",
@@ -189,6 +202,71 @@ def _init_default_colors(stdscr: curses.window) -> None:
 
 
 def draw_screen(stdscr: curses.window, model: TuiModel) -> None:
+    if model.render().mode == MODE_HARNESS:
+        _draw_harness_screen(stdscr, model)
+    else:
+        _draw_dm_screen(stdscr, model)
+    stdscr.refresh()
+
+
+def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
+    stdscr.erase()
+    max_y, max_x = stdscr.getmaxyx()
+    left_width = min(40, max(24, max_x // 3))
+    right_start = left_width + 1
+    header_offset = 6
+    compose_height = 3
+    transcript_height = max(3, max_y - header_offset - compose_height - 1)
+
+    render = model.render()
+
+    _render_text(stdscr, 0, 1, "DM client TUI (gateway-backed)")
+    _render_text(stdscr, 1, 1, "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | t: harness | q: quit")
+    _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
+    _render_text(stdscr, 3, 1, f"device: {render.device_id}")
+    _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
+
+    stdscr.vline(header_offset, left_width, curses.ACS_VLINE, max(1, max_y - header_offset))
+
+    _render_text(stdscr, header_offset, 1, "Conversations")
+    for idx, conv in enumerate(render.dm_conversations):
+        attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
+        label = conv.get("name", "")
+        subtitle = conv.get("peer_user_id", "")
+        _render_text(stdscr, header_offset + 1 + idx * 2, 2, label, attr)
+        if subtitle and header_offset + 2 + idx * 2 < max_y:
+            _render_text(stdscr, header_offset + 2 + idx * 2, 4, subtitle[: left_width - 6], attr)
+
+    form_start = header_offset + 1 + len(render.dm_conversations) * 2
+    if render.new_dm_active and form_start < max_y - 2:
+        _render_text(stdscr, form_start, 1, "New DM (Enter to advance, Enter on conv_id to submit)")
+        y = form_start + 1
+        for idx, field in enumerate(render.new_dm_field_order):
+            if y >= max_y - 1:
+                break
+            value = render.new_dm_fields.get(field, "")
+            attr = curses.A_REVERSE if idx == render.new_dm_active_field else 0
+            _render_text(stdscr, y, 2, f"{field}: {value}", attr)
+            y += 1
+
+    transcript_top = header_offset
+    stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
+    _render_text(stdscr, transcript_top - 1, right_start + 2, "Transcript (latest at bottom)")
+    visible_transcript = _visible_transcript(render.transcript, transcript_height, render.transcript_scroll)
+    highlight_idx = max(0, len(visible_transcript) - 1 - render.transcript_scroll)
+    for idx, entry in enumerate(visible_transcript):
+        line = _format_transcript_entry(entry)
+        attr = curses.A_REVERSE if render.focus_area == "transcript" and idx == highlight_idx else 0
+        _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+
+    compose_top = transcript_top + transcript_height + 1
+    stdscr.hline(compose_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
+    _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
+    compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
+    _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
+
+
+def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.erase()
     max_y, max_x = stdscr.getmaxyx()
     left_width = min(40, max(24, max_x // 3))
@@ -200,7 +278,7 @@ def draw_screen(stdscr: curses.window, model: TuiModel) -> None:
     render = model.render()
 
     _render_text(stdscr, 0, 1, "Phase 0.5 MLS harness TUI")
-    _render_text(stdscr, 1, 1, "Tab: focus | Enter: run | q: quit | n: new DM")
+    _render_text(stdscr, 1, 1, "Tab: focus | Enter: run | r: resume | t: DM | q: quit | n: new DM")
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
@@ -267,8 +345,6 @@ def draw_screen(stdscr: curses.window, model: TuiModel) -> None:
     compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
     _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
-    stdscr.refresh()
-
 
 def _visible_transcript(entries: Iterable[Dict[str, str]], height: int, scroll: int) -> list[Dict[str, str]]:
     collected = list(entries)
@@ -315,6 +391,32 @@ def _blob_preview_lines(label: str, value: str, chunk: int = 64) -> list[str]:
 
     header = f"{label} (len={len(value)}):"
     return [header] + _wrap_chunks(value, chunk)
+
+
+@dataclass
+class SessionState:
+    base_url: str
+    session_token: str
+    resume_token: str
+
+
+@dataclass
+class TailThread:
+    thread: threading.Thread
+    stop_event: threading.Event
+
+
+@dataclass
+class DmRuntime:
+    joined: bool
+    pending_commits: dict[int, str]
+    pending_path: Path
+    dedupe_order: deque[str]
+    dedupe_set: set[str]
+
+
+def _generate_group_id_b64() -> str:
+    return base64.b64encode(secrets.token_bytes(32)).decode("utf-8")
 
 
 def _run_dm_encrypt(model: TuiModel, log_writer: Callable[[Iterable[str]], None], plaintext: str) -> None:
@@ -542,6 +644,299 @@ def _invoke(func: Callable[[], int]) -> tuple[int, list[str]]:
     return exit_code, buffer.read().splitlines()
 
 
+def _append_system_message(model: TuiModel, text: str) -> None:
+    conv_id = model.get_selected_conv_id()
+    model.append_message(conv_id, "sys", text)
+
+
+def _get_conv_by_id(model: TuiModel, conv_id: str) -> Optional[dict[str, object]]:
+    for conv in model.dm_conversations:
+        if conv.get("conv_id") == conv_id:
+            return conv
+    return None
+
+
+def _ensure_runtime_state(runtime: dict[str, DmRuntime], conv_id: str, state_dir: str) -> DmRuntime:
+    if conv_id in runtime:
+        return runtime[conv_id]
+    pending_path = mls_poc._pending_commits_path(state_dir)
+    pending_commits = mls_poc._load_pending_commits(pending_path)
+    joined = mls_poc._state_dir_has_data(Path(state_dir))
+    if joined and pending_commits:
+        mls_poc._flush_pending_commits(state_dir, pending_commits, pending_path)
+    state = DmRuntime(
+        joined=joined,
+        pending_commits=pending_commits,
+        pending_path=pending_path,
+        dedupe_order=deque(),
+        dedupe_set=set(),
+    )
+    runtime[conv_id] = state
+    return state
+
+
+def _record_msg_id(runtime: DmRuntime, msg_id: str, max_size: int = 512) -> bool:
+    if msg_id in runtime.dedupe_set:
+        return True
+    runtime.dedupe_order.append(msg_id)
+    runtime.dedupe_set.add(msg_id)
+    if len(runtime.dedupe_order) > max_size:
+        evicted = runtime.dedupe_order.popleft()
+        runtime.dedupe_set.discard(evicted)
+    return False
+
+
+def _start_tail_thread(
+    conv_id: str,
+    session: SessionState,
+    event_queue: queue.Queue[dict[str, object]],
+    stop_event: threading.Event,
+    *,
+    idle_timeout_s: float = 1.0,
+) -> threading.Thread:
+    def _loop() -> None:
+        from_seq = gateway_store.get_next_seq(conv_id)
+        while not stop_event.is_set():
+            from_seq = gateway_store.get_next_seq(conv_id)
+            try:
+                for event in gateway_client.sse_tail(
+                    session.base_url,
+                    session.session_token,
+                    conv_id,
+                    from_seq,
+                    idle_timeout_s=idle_timeout_s,
+                ):
+                    if stop_event.is_set():
+                        return
+                    event_queue.put({"conv_id": conv_id, "event": event})
+                time.sleep(0.1)
+            except Exception as exc:  # pragma: no cover - network tolerance
+                event_queue.put({"conv_id": conv_id, "error": str(exc)})
+                time.sleep(0.5)
+
+    thread = threading.Thread(target=_loop, name=f"dm-tail-{conv_id}", daemon=True)
+    thread.start()
+    return thread
+
+
+def _resume_or_start_session(model: TuiModel) -> SessionState | None:
+    stored = gateway_store.load_session()
+    if stored is None:
+        _append_system_message(model, "No stored gateway session. Run gw-start or gw-resume first.")
+        return None
+    base_url = stored["base_url"]
+    resume_token = stored["resume_token"]
+    try:
+        response = gateway_client.session_resume(base_url, resume_token)
+        session = SessionState(base_url=base_url, session_token=response["session_token"], resume_token=response["resume_token"])
+        gateway_store.save_session(base_url, session.session_token, session.resume_token)
+        _append_system_message(model, "Session resumed.")
+        return session
+    except Exception:
+        identity = model.identity
+        try:
+            response = gateway_client.session_start(
+                base_url,
+                identity.auth_token,
+                identity.device_id,
+                identity.device_credential,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _append_system_message(model, f"Session start failed: {exc}")
+            return None
+        session = SessionState(base_url=base_url, session_token=response["session_token"], resume_token=response["resume_token"])
+        gateway_store.save_session(base_url, session.session_token, session.resume_token)
+        _append_system_message(model, "Session started.")
+        return session
+
+
+def _handle_tail_event(
+    model: TuiModel,
+    runtime: dict[str, DmRuntime],
+    session: SessionState,
+    conv_id: str,
+    event: dict[str, object],
+) -> bool:
+    body = event.get("body", {})
+    if not isinstance(body, dict):
+        return False
+    seq = body.get("seq")
+    env_b64 = body.get("env")
+    msg_id = body.get("msg_id")
+    if not isinstance(seq, int) or not isinstance(env_b64, str):
+        return False
+    conv = _get_conv_by_id(model, conv_id)
+    if conv is None:
+        return False
+    state_dir = str(conv.get("state_dir", ""))
+    if not state_dir:
+        return False
+    expected_seq = int(conv.get("next_seq", 1))
+    if seq > expected_seq:
+        model.append_message(conv_id, "sys", f"Gap detected at seq {seq}; resubscribing.")
+        return True
+    runtime_state = _ensure_runtime_state(runtime, conv_id, state_dir)
+    if isinstance(msg_id, str) and _record_msg_id(runtime_state, msg_id):
+        gateway_client.inbox_ack(session.base_url, session.session_token, conv_id, seq)
+        model.bump_cursor(conv_id, seq)
+        return False
+    try:
+        kind, payload_b64 = dm_envelope.unpack(env_b64)
+        if kind == 0x01:
+            mls_poc._run_harness_capture(
+                "dm-join",
+                [
+                    "--state-dir",
+                    state_dir,
+                    "--welcome",
+                    payload_b64,
+                ],
+            )
+            runtime_state.joined = True
+            if runtime_state.pending_commits:
+                mls_poc._flush_pending_commits(state_dir, runtime_state.pending_commits, runtime_state.pending_path)
+            model.append_message(conv_id, "sys", "Joined DM.")
+        elif kind == 0x02:
+            if not runtime_state.joined:
+                mls_poc._buffer_pending_commit(runtime_state.pending_path, runtime_state.pending_commits, seq, payload_b64)
+            else:
+                returncode, stdout, stderr = mls_poc._run_harness_capture_with_status(
+                    "dm-commit-apply",
+                    [
+                        "--state-dir",
+                        state_dir,
+                        "--commit",
+                        payload_b64,
+                    ],
+                )
+                if returncode != 0:
+                    message = (stderr.strip() or stdout.strip()).lower()
+                    if mls_poc._is_uninitialized_commit_error(message):
+                        runtime_state.joined = False
+                        mls_poc._buffer_pending_commit(
+                            runtime_state.pending_path,
+                            runtime_state.pending_commits,
+                            seq,
+                            payload_b64,
+                        )
+                    else:
+                        model.append_message(conv_id, "sys", "Commit apply failed; see logs.")
+                        return False
+                else:
+                    runtime_state.joined = True
+        elif kind == 0x03:
+            output = mls_poc._run_harness_capture(
+                "dm-decrypt",
+                [
+                    "--state-dir",
+                    state_dir,
+                    "--ciphertext",
+                    payload_b64,
+                ],
+            )
+            plaintext = mls_poc._first_nonempty_line(output)
+            model.append_message(conv_id, "in", plaintext)
+        else:
+            model.append_message(conv_id, "sys", f"Unknown DM envelope kind {kind}.")
+    except Exception as exc:  # pragma: no cover - defensive
+        model.append_message(conv_id, "sys", f"Failed to process event: {exc}")
+        return False
+    gateway_client.inbox_ack(session.base_url, session.session_token, conv_id, seq)
+    model.bump_cursor(conv_id, seq)
+    return False
+
+
+def _send_dm_message(
+    model: TuiModel,
+    session: SessionState | None,
+    runtime: dict[str, DmRuntime],
+    plaintext: str,
+) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    conv = model.get_selected_conv()
+    conv_id = str(conv.get("conv_id", "")).strip()
+    state_dir = str(conv.get("state_dir", "")).strip()
+    if not conv_id:
+        _append_system_message(model, "Selected conversation has no conv_id.")
+        return
+    if not state_dir:
+        _append_system_message(model, "Selected conversation has no state_dir.")
+        return
+    output = mls_poc._run_harness_capture(
+        "dm-encrypt",
+        [
+            "--state-dir",
+            state_dir,
+            "--plaintext",
+            plaintext,
+        ],
+    )
+    ciphertext = mls_poc._first_nonempty_line(output)
+    env_b64 = dm_envelope.pack(0x03, ciphertext)
+    msg_id = mls_poc._msg_id_for_env(env_b64)
+    gateway_client.inbox_send(session.base_url, session.session_token, conv_id, msg_id, env_b64)
+    runtime_state = _ensure_runtime_state(runtime, conv_id, state_dir)
+    _record_msg_id(runtime_state, msg_id)
+    model.append_message(conv_id, "out", plaintext)
+
+
+def _create_new_dm(
+    model: TuiModel,
+    session: SessionState | None,
+    runtime: dict[str, DmRuntime],
+    peer_user_id: str,
+    name: str,
+    state_dir: str,
+    conv_id: str,
+) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    if not peer_user_id or not name or not state_dir:
+        _append_system_message(model, "New DM requires peer_user_id, name, and state_dir.")
+        return
+    conv_id = conv_id.strip() if conv_id.strip() else f"dm_{secrets.token_urlsafe(8)}"
+    response = gateway_client.keypackages_fetch(session.base_url, session.session_token, peer_user_id, 1)
+    keypackages = response.get("keypackages", [])
+    if not keypackages:
+        _append_system_message(model, f"No KeyPackages available for user {peer_user_id}.")
+        return
+    peer_kp = str(keypackages[0])
+    gateway_client.room_create(session.base_url, session.session_token, conv_id, [peer_user_id])
+    group_id = _generate_group_id_b64()
+    output = mls_poc._run_harness_capture(
+        "dm-init",
+        [
+            "--state-dir",
+            state_dir,
+            "--peer-keypackage",
+            peer_kp,
+            "--group-id",
+            group_id,
+            "--seed",
+            "7331",
+        ],
+    )
+    payload = json.loads(mls_poc._first_nonempty_line(output))
+    welcome = str(payload["welcome"])
+    commit = str(payload["commit"])
+    welcome_env = dm_envelope.pack(0x01, welcome)
+    commit_env = dm_envelope.pack(0x02, commit)
+    mls_poc._send_envelope(session.base_url, session.session_token, conv_id, welcome_env)
+    mls_poc._send_envelope(session.base_url, session.session_token, conv_id, commit_env)
+    model.add_dm(peer_user_id, name, state_dir, conv_id)
+    _ensure_runtime_state(runtime, conv_id, state_dir)
+    model.append_message(conv_id, "sys", "DM created; waiting for echo.")
+
+
+# Manual smoke (gateway-backed DM):
+# 1) Start gateway and run `gw-start` to store a session.
+# 2) Launch this TUI, press r to resume/start, Ctrl-N to create a DM, then send a message.
+# 3) Restart the TUI and verify it tails from the stored next_seq cursor.
+
+
 class _redirect_output:
     def __init__(self, buffer: io.StringIO) -> None:
         self.buffer = buffer
@@ -567,11 +962,59 @@ def main() -> int:
         _init_default_colors(stdscr)
         stdscr.nodelay(False)
         stdscr.keypad(True)
+        event_queue: queue.Queue[dict[str, object]] = queue.Queue()
+        runtime_state: dict[str, DmRuntime] = {}
+        tail_threads: dict[str, TailThread] = {}
+        session_state: SessionState | None = None
+
+        def _stop_tail_threads() -> None:
+            for tail in tail_threads.values():
+                tail.stop_event.set()
+            for tail in tail_threads.values():
+                tail.thread.join(timeout=0.5)
+            tail_threads.clear()
+
+        def _ensure_tail_threads() -> None:
+            if session_state is None or model.render().mode != MODE_DM_CLIENT:
+                return
+            for conv in model.dm_conversations:
+                conv_id = str(conv.get("conv_id", "")).strip()
+                if not conv_id or conv_id in tail_threads:
+                    continue
+                stop_event = threading.Event()
+                thread = _start_tail_thread(conv_id, session_state, event_queue, stop_event)
+                tail_threads[conv_id] = TailThread(thread=thread, stop_event=stop_event)
+
+        def _drain_events() -> None:
+            while True:
+                try:
+                    payload = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                conv_id = str(payload.get("conv_id", ""))
+                if not conv_id:
+                    continue
+                if "error" in payload:
+                    model.append_message(conv_id, "sys", "Tail error; retrying.")
+                    continue
+                if session_state is None:
+                    continue
+                event = payload.get("event")
+                if isinstance(event, dict):
+                    gap = _handle_tail_event(model, runtime_state, session_state, conv_id, event)
+                    if gap:
+                        tail = tail_threads.get(conv_id)
+                        if tail:
+                            tail.stop_event.set()
+                            tail.thread.join(timeout=0.2)
+                            del tail_threads[conv_id]
+                        _ensure_tail_threads()
 
         while True:
             # Rendering can occasionally fail during terminal resize. Keep the
             # event loop running and redraw on the next iteration.
             try:
+                _drain_events()
                 draw_screen(stdscr, model)
             except curses.error:
                 pass
@@ -584,7 +1027,7 @@ def main() -> int:
             # - Strip bracketed-paste markers and (for blob fields) whitespace
             #   so users can copy wrapped text and paste it back safely.
             focus = model.render().focus_area
-            if focus in {"fields", "compose"} and (key == 27 or 0 <= key < 256) and key != 9:
+            if focus in {"fields", "compose", "new_dm"} and (key == 27 or 0 <= key < 256) and key != 9:
                 pending = _drain_pending_input(stdscr)
                 # If we saw a lone ESC, briefly wait for a follow-on sequence
                 # (common for bracketed paste start ...).
@@ -621,11 +1064,23 @@ def main() -> int:
                         if cleaned:
                             model.append_to_compose(cleaned)
                         continue
+                    if focus == "new_dm":
+                        cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
+                        cleaned = cleaned.replace("\n", "").replace("\r", "")
+                        if cleaned:
+                            field_key = model.render().new_dm_field_order[model.render().new_dm_active_field]
+                            model.new_dm_fields[field_key] += cleaned
+                        continue
 
             normalized, char = _normalize_key(key)
             action = model.handle_key(normalized, char)
             if action == "quit":
                 break
+            if action == "toggle_mode":
+                if model.render().mode == MODE_HARNESS:
+                    _stop_tail_threads()
+                else:
+                    _ensure_tail_threads()
             if action == "new_conv":
                 fields = model.render().fields
                 if not fields.get("dm_name") or not fields.get("dm_state_dir"):
@@ -638,13 +1093,36 @@ def main() -> int:
                     model.append_transcript("sys", f"Added conversation {fields.get('dm_name', '')}.")
             if action == "run":
                 _run_action(model, lambda lines: [model.append_transcript("sys", line) for line in lines])
+            if action == "resume":
+                session_state = _resume_or_start_session(model)
+                _stop_tail_threads()
+                _ensure_tail_threads()
+            if action == "create_dm":
+                new_dm = model.render().new_dm_fields
+                _create_new_dm(
+                    model,
+                    session_state,
+                    runtime_state,
+                    new_dm.get("peer_user_id", "").strip(),
+                    new_dm.get("name", "").strip(),
+                    new_dm.get("state_dir", "").strip(),
+                    new_dm.get("conv_id", "").strip(),
+                )
+                model.new_dm_active = False
+                model.focus_area = "conversations"
+                _ensure_tail_threads()
             if action == "send":
                 compose_text = model.compose_text.strip("\n")
-                if compose_text:
-                    _run_dm_encrypt(model, lambda lines: [model.append_transcript("sys", line) for line in lines], compose_text)
-                    model.compose_text = ""
-                else:
+                if not compose_text:
                     model.append_transcript("sys", "Compose buffer is empty.")
+                    continue
+                if model.render().mode == MODE_HARNESS:
+                    _run_dm_encrypt(model, lambda lines: [model.append_transcript("sys", line) for line in lines], compose_text)
+                else:
+                    _send_dm_message(model, session_state, runtime_state, compose_text)
+                model.compose_text = ""
+
+        _stop_tail_threads()
 
     curses.wrapper(_runner)
     return 0

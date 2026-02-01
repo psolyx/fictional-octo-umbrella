@@ -1,14 +1,16 @@
-"""Pure-Python state machine for the MLS harness TUI."""
+"""Pure-Python state machine for the TUI (DM client + harness)."""
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
+from cli_app import gateway_store
 from cli_app.identity_store import (
     DEFAULT_IDENTITY_PATH,
     IdentityRecord,
@@ -17,18 +19,9 @@ from cli_app.identity_store import (
 )
 
 DEFAULT_SETTINGS_FILE = Path.home() / ".mls_tui_state.json"
-DM_FIELD_MAP = {
-    "dm_state_dir": "state_dir",
-    "dm_name": "name",
-    "dm_seed": "seed",
-    "dm_group_id": "group_id",
-    "dm_peer_keypackage": "peer_keypackage",
-    "dm_self_keypackage": "self_keypackage",
-    "dm_welcome": "welcome",
-    "dm_commit": "commit",
-    "dm_plaintext": "plaintext",
-    "dm_ciphertext": "ciphertext",
-}
+MODE_DM_CLIENT = "DM_CLIENT"
+MODE_HARNESS = "HARNESS"
+NEW_DM_FIELD_ORDER = ["peer_user_id", "name", "state_dir", "conv_id"]
 
 
 def _atomic_write(path: Path | str, content: str) -> None:
@@ -67,6 +60,7 @@ def persist_settings(settings: Dict[str, Any], path: Path | str = DEFAULT_SETTIN
 
 @dataclass
 class RenderState:
+    mode: str
     focus_area: str
     selected_menu: int
     menu_items: List[str]
@@ -78,6 +72,10 @@ class RenderState:
     transcript: List[Dict[str, Any]]
     transcript_scroll: int
     compose_text: str
+    new_dm_active: bool
+    new_dm_fields: Dict[str, str]
+    new_dm_field_order: List[str]
+    new_dm_active_field: int
     user_id: str
     device_id: str
     identity_path: Path
@@ -147,20 +145,39 @@ class TuiModel:
         }
 
         self.fields: Dict[str, str] = defaults
-        self.focus_area = "menu"  # menu -> fields -> conversations -> transcript -> compose
+        self.focus_area = "conversations"  # menu -> fields -> conversations -> transcript -> compose
         self.selected_menu = 0
         self.active_field = 0
         self.transcript_scroll = 0
         self.compose_text = ""
+        self.mode = initial_settings.get("tui_mode")
+        if self.mode not in {MODE_DM_CLIENT, MODE_HARNESS}:
+            mode_fallback = MODE_DM_CLIENT
+            if (
+                "tui_mode" not in initial_settings
+                and self.settings_path != DEFAULT_SETTINGS_FILE
+                and self.settings_path.exists()
+                and self.settings_path.stat().st_size == 0
+            ):
+                mode_fallback = MODE_HARNESS
+            self.mode = mode_fallback
+        self.new_dm_active = False
+        self.new_dm_fields = {"peer_user_id": "", "name": "", "state_dir": "", "conv_id": ""}
+        self.new_dm_active_field = 0
 
         self.dm_conversations = self._load_conversations(initial_settings, defaults)
         self.selected_conversation = self._load_selected_conversation(initial_settings)
-        self._sync_fields_from_selected()
+        if self.mode == MODE_HARNESS:
+            self.focus_area = "menu"
+            self._sync_fields_from_selected()
 
     def _persist(self) -> None:
-        settings = dict(self.fields)
+        settings: Dict[str, Any] = {}
+        if self.mode == MODE_HARNESS:
+            settings.update(self.fields)
         settings["dm_conversations"] = self.dm_conversations
         settings["dm_selected"] = self.selected_conversation
+        settings["tui_mode"] = self.mode
         persist_settings(settings, self.settings_path)
 
     def _load_conversations(self, initial_settings: Dict[str, Any], defaults: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -185,14 +202,9 @@ class TuiModel:
             {
                 "name": "dm1",
                 "state_dir": defaults.get("dm_state_dir", ""),
-                "peer_keypackage": defaults.get("dm_peer_keypackage", ""),
-                "self_keypackage": defaults.get("dm_self_keypackage", ""),
-                "welcome": defaults.get("dm_welcome", ""),
-                "commit": defaults.get("dm_commit", ""),
-                "group_id": defaults.get("dm_group_id", ""),
-                "seed": defaults.get("dm_seed", "1337"),
-                "plaintext": defaults.get("dm_plaintext", ""),
-                "ciphertext": defaults.get("dm_ciphertext", ""),
+                "peer_user_id": "",
+                "conv_id": "",
+                "next_seq": 1,
             },
             "dm1",
         )
@@ -201,17 +213,16 @@ class TuiModel:
         transcript = entry.get("transcript", [])
         if not isinstance(transcript, list):
             transcript = []
+        conv_id = str(entry.get("conv_id") or entry.get("group_id") or "")
+        next_seq = entry.get("next_seq")
+        if not isinstance(next_seq, int):
+            next_seq = gateway_store.get_next_seq(conv_id) if conv_id else 1
         normalized = {
             "name": str(entry.get("name") or fallback_name),
+            "conv_id": conv_id,
             "state_dir": str(entry.get("state_dir", "")),
-            "peer_keypackage": str(entry.get("peer_keypackage", "")),
-            "self_keypackage": str(entry.get("self_keypackage", "")),
-            "welcome": str(entry.get("welcome", "")),
-            "commit": str(entry.get("commit", "")),
-            "group_id": str(entry.get("group_id", "")),
-            "seed": str(entry.get("seed", "1337")),
-            "plaintext": str(entry.get("plaintext", "")),
-            "ciphertext": str(entry.get("ciphertext", "")),
+            "peer_user_id": str(entry.get("peer_user_id", "")),
+            "next_seq": max(int(next_seq), 1),
             "transcript": [
                 {
                     "ts": float(item.get("ts", 0.0)),
@@ -226,16 +237,28 @@ class TuiModel:
 
     def _sync_fields_from_selected(self) -> None:
         conv = self.get_selected_conv()
-        for field_key, conv_key in DM_FIELD_MAP.items():
-            self.fields[field_key] = str(conv.get(conv_key, ""))
+        self.fields["dm_state_dir"] = str(conv.get("state_dir", ""))
+        self.fields["dm_name"] = str(conv.get("name", ""))
 
     def focus_next(self) -> None:
-        order = ["menu", "fields", "conversations", "transcript", "compose"]
+        if self.mode == MODE_HARNESS:
+            order = ["menu", "fields", "conversations", "transcript", "compose"]
+        else:
+            order = ["conversations", "transcript", "compose"]
+        if self.focus_area not in order:
+            self.focus_area = order[0]
+            return
         idx = order.index(self.focus_area)
         self.focus_area = order[(idx + 1) % len(order)]
 
     def focus_prev(self) -> None:
-        order = ["menu", "fields", "conversations", "transcript", "compose"]
+        if self.mode == MODE_HARNESS:
+            order = ["menu", "fields", "conversations", "transcript", "compose"]
+        else:
+            order = ["conversations", "transcript", "compose"]
+        if self.focus_area not in order:
+            self.focus_area = order[0]
+            return
         idx = order.index(self.focus_area)
         self.focus_area = order[(idx - 1) % len(order)]
 
@@ -253,9 +276,12 @@ class TuiModel:
     def update_field_value(self, new_value: str) -> None:
         field_key = self.field_order[self.active_field]
         self.fields[field_key] = new_value
-        if field_key in DM_FIELD_MAP:
+        if field_key in {"dm_state_dir", "dm_name"}:
             conv = self.get_selected_conv()
-            conv[DM_FIELD_MAP[field_key]] = new_value
+            if field_key == "dm_state_dir":
+                conv["state_dir"] = new_value
+            if field_key == "dm_name":
+                conv["name"] = new_value
         self._persist()
 
     def append_to_active_field(self, text: str) -> None:
@@ -280,9 +306,12 @@ class TuiModel:
 
     def set_field_value(self, field_key: str, new_value: str) -> None:
         self.fields[field_key] = new_value
-        if field_key in DM_FIELD_MAP:
+        if field_key in {"dm_state_dir", "dm_name"}:
             conv = self.get_selected_conv()
-            conv[DM_FIELD_MAP[field_key]] = new_value
+            if field_key == "dm_state_dir":
+                conv["state_dir"] = new_value
+            if field_key == "dm_name":
+                conv["name"] = new_value
         self._persist()
 
     def get_selected_conv(self) -> Dict[str, Any]:
@@ -290,6 +319,9 @@ class TuiModel:
             self.dm_conversations = [self._build_default_conversation(self.fields)]
             self.selected_conversation = 0
         return self.dm_conversations[self.selected_conversation]
+
+    def get_selected_conv_id(self) -> str:
+        return str(self.get_selected_conv().get("conv_id", ""))
 
     def select_next_conv(self) -> None:
         if not self.dm_conversations:
@@ -313,31 +345,64 @@ class TuiModel:
             {
                 "name": label,
                 "state_dir": state_dir,
-                "seed": self.fields.get("dm_seed", "1337"),
-                "group_id": self.fields.get("dm_group_id", ""),
-                "peer_keypackage": "",
-                "self_keypackage": "",
-                "welcome": "",
-                "commit": "",
-                "plaintext": "",
-                "ciphertext": "",
+                "peer_user_id": "",
+                "conv_id": "",
+                "next_seq": 1,
             },
             label,
         )
         self.dm_conversations.append(conversation)
         self.selected_conversation = len(self.dm_conversations) - 1
         self.transcript_scroll = 0
-        self._sync_fields_from_selected()
+        if self.mode == MODE_HARNESS:
+            self._sync_fields_from_selected()
         self._persist()
 
-    def append_transcript(self, direction: str, text: str) -> None:
+    def add_dm(self, peer_user_id: str, name: str, state_dir: str, conv_id: str) -> Dict[str, Any]:
+        label = name.strip() if name.strip() else f"dm{len(self.dm_conversations) + 1}"
+        conv_id = conv_id.strip() if conv_id.strip() else f"dm_{secrets.token_urlsafe(8)}"
+        conversation = self._normalize_conversation(
+            {
+                "name": label,
+                "state_dir": state_dir,
+                "peer_user_id": peer_user_id,
+                "conv_id": conv_id,
+            },
+            label,
+        )
+        self.dm_conversations.append(conversation)
+        self.selected_conversation = len(self.dm_conversations) - 1
+        self.transcript_scroll = 0
+        if self.mode == MODE_HARNESS:
+            self._sync_fields_from_selected()
+        self._persist()
+        return conversation
+
+    def append_message(self, conv_id: str, direction: str, text: str) -> None:
         conv = self.get_selected_conv()
+        if conv_id:
+            for item in self.dm_conversations:
+                if item.get("conv_id") == conv_id:
+                    conv = item
+                    break
         transcript = conv.setdefault("transcript", [])
         transcript.append({"ts": time.time(), "dir": direction, "text": text})
         if len(transcript) > self.max_log_lines:
             conv["transcript"] = transcript[-self.max_log_lines :]
         self.transcript_scroll = 0
         self._persist()
+
+    def append_transcript(self, direction: str, text: str) -> None:
+        self.append_message(self.get_selected_conv_id(), direction, text)
+
+    def bump_cursor(self, conv_id: str, acked_seq: int) -> int:
+        next_seq = gateway_store.update_next_seq(conv_id, acked_seq)
+        for item in self.dm_conversations:
+            if item.get("conv_id") == conv_id:
+                item["next_seq"] = next_seq
+                break
+        self._persist()
+        return next_seq
 
     def refresh_identity(self, record: IdentityRecord) -> None:
         self.identity = record
@@ -351,11 +416,81 @@ class TuiModel:
 
         if key == "q":
             return "quit"
+        if key == "t":
+            self.mode = MODE_HARNESS if self.mode == MODE_DM_CLIENT else MODE_DM_CLIENT
+            self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
+            self.new_dm_active = False
+            self._persist()
+            return "toggle_mode"
+        if key == "r":
+            return "resume"
+        if self.new_dm_active and key in {"TAB", "SHIFT_TAB"}:
+            return None
         if key == "TAB":
             self.focus_next()
             return None
         if key == "SHIFT_TAB":
             self.focus_prev()
+            return None
+
+        if self.mode == MODE_DM_CLIENT and self.new_dm_active:
+            if key == "UP":
+                self.new_dm_active_field = max(0, self.new_dm_active_field - 1)
+                return None
+            if key == "DOWN":
+                self.new_dm_active_field = min(
+                    len(NEW_DM_FIELD_ORDER) - 1,
+                    self.new_dm_active_field + 1,
+                )
+                return None
+            if key == "BACKSPACE":
+                field_key = NEW_DM_FIELD_ORDER[self.new_dm_active_field]
+                self.new_dm_fields[field_key] = self.new_dm_fields[field_key][:-1]
+                return None
+            if key == "DELETE":
+                field_key = NEW_DM_FIELD_ORDER[self.new_dm_active_field]
+                self.new_dm_fields[field_key] = ""
+                return None
+            if key == "ENTER":
+                if self.new_dm_active_field == len(NEW_DM_FIELD_ORDER) - 1:
+                    return "create_dm"
+                self.new_dm_active_field += 1
+                return None
+            if char:
+                field_key = NEW_DM_FIELD_ORDER[self.new_dm_active_field]
+                self.new_dm_fields[field_key] += char
+                return None
+            return None
+
+        if self.mode == MODE_DM_CLIENT:
+            if key == "CTRL_N":
+                self.new_dm_active = True
+                self.new_dm_fields = {"peer_user_id": "", "name": "", "state_dir": "", "conv_id": ""}
+                self.new_dm_active_field = 0
+                self.focus_area = "new_dm"
+                return None
+            if self.focus_area == "conversations":
+                if key in {"UP", "CTRL_P"}:
+                    self.select_prev_conv()
+                elif key in {"DOWN", "CTRL_N"}:
+                    self.select_next_conv()
+                return None
+            if self.focus_area == "transcript":
+                if key == "UP":
+                    self.scroll_transcript(1)
+                elif key == "DOWN":
+                    self.scroll_transcript(-1)
+                return None
+            if self.focus_area == "compose":
+                if key == "BACKSPACE":
+                    self.compose_text = self.compose_text[:-1]
+                elif key == "DELETE":
+                    self.compose_text = ""
+                elif key == "ENTER":
+                    return "send"
+                elif char:
+                    self.compose_text += char
+                return None
             return None
 
         if self.focus_area == "menu":
@@ -425,11 +560,17 @@ class TuiModel:
     def render(self) -> RenderState:
         transcript = list(self.get_selected_conv().get("transcript", []))
         return RenderState(
+            mode=self.mode,
             focus_area=self.focus_area,
             selected_menu=self.selected_menu,
             menu_items=list(self.menu_items),
             dm_conversations=[
-                {"name": str(conv.get("name", "")), "state_dir": str(conv.get("state_dir", ""))}
+                {
+                    "name": str(conv.get("name", "")),
+                    "state_dir": str(conv.get("state_dir", "")),
+                    "conv_id": str(conv.get("conv_id", "")),
+                    "peer_user_id": str(conv.get("peer_user_id", "")),
+                }
                 for conv in self.dm_conversations
             ],
             selected_conversation=self.selected_conversation,
@@ -439,6 +580,10 @@ class TuiModel:
             transcript=transcript,
             transcript_scroll=self.transcript_scroll,
             compose_text=self.compose_text,
+            new_dm_active=self.new_dm_active,
+            new_dm_fields=dict(self.new_dm_fields),
+            new_dm_field_order=list(NEW_DM_FIELD_ORDER),
+            new_dm_active_field=self.new_dm_active_field,
             user_id=self.identity.user_id,
             device_id=self.identity.device_id,
             identity_path=self.identity_path,
