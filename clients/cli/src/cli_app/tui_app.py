@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable, Optional
 
-from cli_app import dm_envelope, gateway_client, gateway_store
+from cli_app import dm_envelope, gateway_client, gateway_store, social
 
 from cli_app import mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
@@ -47,6 +47,10 @@ def _normalize_key(key: int) -> tuple[str, str | None]:
         return "CTRL_N", None
     if key == 16:  # ctrl-p
         return "CTRL_P", None
+    if key == 19:  # ctrl-s
+        return "CTRL_S", None
+    if key == 27:
+        return "ESC", None
     if key in (ord("r"), ord("R")):
         return "r", None
     if key in (ord("t"), ord("T")):
@@ -215,13 +219,17 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     left_width = min(40, max(24, max_x // 3))
     right_start = left_width + 1
     header_offset = 6
-    compose_height = 3
+    render = model.render()
+    compose_height = 4 if render.social_active else 3
     transcript_height = max(3, max_y - header_offset - compose_height - 1)
 
-    render = model.render()
-
     _render_text(stdscr, 0, 1, "DM client TUI (gateway-backed)")
-    _render_text(stdscr, 1, 1, "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | t: harness | q: quit")
+    _render_text(
+        stdscr,
+        1,
+        1,
+        "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | Ctrl-S: social | t: harness | q: quit",
+    )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
@@ -251,19 +259,40 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
 
     transcript_top = header_offset
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
-    _render_text(stdscr, transcript_top - 1, right_start + 2, "Transcript (latest at bottom)")
-    visible_transcript = _visible_transcript(render.transcript, transcript_height, render.transcript_scroll)
-    highlight_idx = max(0, len(visible_transcript) - 1 - render.transcript_scroll)
-    for idx, entry in enumerate(visible_transcript):
-        line = _format_transcript_entry(entry)
-        attr = curses.A_REVERSE if render.focus_area == "transcript" and idx == highlight_idx else 0
-        _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+    if render.social_active:
+        header = (
+            f"SOCIAL ({render.social_target}) — r refresh, p post, 1/2 target, Ctrl-S back"
+        )
+        _render_text(stdscr, transcript_top - 1, right_start + 2, header)
+        visible_social = _visible_social(render.social_items, transcript_height, render.social_scroll)
+        highlight_idx = max(0, len(visible_social) - 1 - render.social_scroll)
+        for idx, entry in enumerate(visible_social):
+            line = _format_social_event(entry)
+            attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
+            _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+    else:
+        _render_text(stdscr, transcript_top - 1, right_start + 2, "Transcript (latest at bottom)")
+        visible_transcript = _visible_transcript(render.transcript, transcript_height, render.transcript_scroll)
+        highlight_idx = max(0, len(visible_transcript) - 1 - render.transcript_scroll)
+        for idx, entry in enumerate(visible_transcript):
+            line = _format_transcript_entry(entry)
+            attr = curses.A_REVERSE if render.focus_area == "transcript" and idx == highlight_idx else 0
+            _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
 
     compose_top = transcript_top + transcript_height + 1
     stdscr.hline(compose_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
-    _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
-    compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
-    _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
+    if render.social_active:
+        header = "Post (p to compose, Enter to publish, Esc to cancel)"
+        if render.social_compose_active:
+            header = "Post (Enter to publish, Esc to cancel)"
+        _render_text(stdscr, compose_top - 1, right_start + 2, header)
+        compose_attr = curses.A_REVERSE if render.focus_area == "social" else 0
+        _render_text(stdscr, compose_top, right_start + 1, render.social_compose_text, compose_attr)
+        _render_text(stdscr, compose_top + 1, right_start + 1, render.social_status_line)
+    else:
+        _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
+        compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
+        _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
 
 def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
@@ -355,6 +384,15 @@ def _visible_transcript(entries: Iterable[Dict[str, str]], height: int, scroll: 
     return collected[start:end]
 
 
+def _visible_social(entries: Iterable[Dict[str, object]], height: int, scroll: int) -> list[Dict[str, object]]:
+    collected = list(entries)
+    if height <= 0:
+        return []
+    end = max(0, len(collected) - scroll)
+    start = max(0, end - height)
+    return collected[start:end]
+
+
 def _extract_single_output_line(lines: Iterable[str]) -> str | None:
     for line in reversed(list(lines)):
         stripped = line.strip()
@@ -384,6 +422,25 @@ def _format_transcript_entry(entry: Dict[str, str]) -> str:
     else:
         prefix = "sys"
     return f"{prefix}: {text}"
+
+
+def _format_social_event(entry: Dict[str, object]) -> str:
+    kind = str(entry.get("kind", ""))
+    payload = entry.get("payload")
+    text = ""
+    if isinstance(payload, dict) and "text" in payload:
+        text = str(payload.get("text", ""))
+    elif payload is not None:
+        try:
+            text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        except TypeError:
+            text = str(payload)
+    text = text.replace("\n", " ").strip()
+    if len(text) > 80:
+        text = f"{text[:80]}…"
+    hash_prefix = str(entry.get("event_hash", ""))[:8]
+    suffix = f" #{hash_prefix}" if hash_prefix else ""
+    return f"{kind}: {text}{suffix}".strip()
 
 
 def _blob_preview_lines(label: str, value: str, chunk: int = 64) -> list[str]:
@@ -647,6 +704,30 @@ def _invoke(func: Callable[[], int]) -> tuple[int, list[str]]:
 def _append_system_message(model: TuiModel, text: str) -> None:
     conv_id = model.get_selected_conv_id()
     model.append_message(conv_id, "sys", text)
+
+
+def _set_social_status(model: TuiModel, text: str) -> None:
+    model.social_status_line = text
+
+
+def _load_social_base_url(model: TuiModel) -> str | None:
+    stored = gateway_store.load_session()
+    if stored is None:
+        _append_system_message(model, "No stored gateway session. Run gw-start or gw-resume first.")
+        _set_social_status(model, "No stored gateway session.")
+        return None
+    return stored["base_url"]
+
+
+def _resolve_social_target(model: TuiModel) -> str | None:
+    if model.social_target == "self":
+        return model.identity.social_public_key_b64
+    peer_user_id = str(model.get_selected_conv().get("peer_user_id", "")).strip()
+    if not peer_user_id:
+        _append_system_message(model, "Selected conversation has no peer_user_id.")
+        _set_social_status(model, "Select a DM with a peer_user_id for peer timeline.")
+        return None
+    return peer_user_id
 
 
 def _get_conv_by_id(model: TuiModel, conv_id: str) -> Optional[dict[str, object]]:
@@ -1010,6 +1091,58 @@ def main() -> int:
                             del tail_threads[conv_id]
                         _ensure_tail_threads()
 
+        def _refresh_social() -> None:
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            user_id = _resolve_social_target(model)
+            if user_id is None:
+                return
+            _set_social_status(model, "Refreshing...")
+            try:
+                events = social.fetch_social_events(base_url, user_id=user_id, limit=50, after_hash=None)
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            model.social_items = events
+            if events:
+                model.social_prev_hash = str(events[-1].get("event_hash", ""))
+                model.social_selected_idx = len(events) - 1
+                model.social_scroll = 0
+            else:
+                model.social_prev_hash = None
+                model.social_selected_idx = 0
+                model.social_scroll = 0
+            _set_social_status(model, f"Last refresh {time.strftime('%H:%M:%S')}")
+
+        def _publish_social() -> None:
+            if model.social_target != "self":
+                _set_social_status(model, "Posting is only available for the self timeline.")
+                return
+            text = model.social_compose_text.strip()
+            if not text:
+                _set_social_status(model, "Compose text is empty.")
+                return
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            _set_social_status(model, "Publishing...")
+            payload = {"text": text, "ts": int(time.time())}
+            try:
+                social.publish_social_event(
+                    base_url,
+                    identity=model.identity,
+                    kind="post",
+                    payload=payload,
+                    prev_hash=model.social_prev_hash,
+                )
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            model.social_compose_text = ""
+            model.social_compose_active = False
+            _refresh_social()
+
         while True:
             # Rendering can occasionally fail during terminal resize. Keep the
             # event loop running and redraw on the next iteration.
@@ -1026,8 +1159,10 @@ def main() -> int:
             #   become one logical edit.
             # - Strip bracketed-paste markers and (for blob fields) whitespace
             #   so users can copy wrapped text and paste it back safely.
-            focus = model.render().focus_area
-            if focus in {"fields", "compose", "new_dm"} and (key == 27 or 0 <= key < 256) and key != 9:
+            state = model.render()
+            focus = state.focus_area
+            social_paste = focus == "social" and state.social_compose_active
+            if (focus in {"fields", "compose", "new_dm"} or social_paste) and (key == 27 or 0 <= key < 256) and key != 9:
                 pending = _drain_pending_input(stdscr)
                 # If we saw a lone ESC, briefly wait for a follow-on sequence
                 # (common for bracketed paste start ...).
@@ -1042,13 +1177,12 @@ def main() -> int:
                 raw_codes = [key] + pending
                 raw_text = "".join(chr(c) for c in raw_codes if 0 <= c < 256)
 
-                if key == 27 and not pending:
+                if key == 27 and not pending and not social_paste:
                     # Bare ESC with nothing following.
                     continue
 
                 if raw_text and (len(raw_text) > 1 or "\x1b" in raw_text or "\n" in raw_text or "\r" in raw_text):
                     if focus == "fields":
-                        state = model.render()
                         field_key = state.field_order[state.active_field]
                         strip_ws = field_key in _BLOB_FIELDS or field_key in _FULL_PREVIEW_FIELDS
                         cleaned = _sanitize_paste(raw_text, strip_all_whitespace=strip_ws, base64_only=(field_key in _BASE64_FIELDS))
@@ -1068,8 +1202,14 @@ def main() -> int:
                         cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
                         cleaned = cleaned.replace("\n", "").replace("\r", "")
                         if cleaned:
-                            field_key = model.render().new_dm_field_order[model.render().new_dm_active_field]
+                            field_key = state.new_dm_field_order[state.new_dm_active_field]
                             model.new_dm_fields[field_key] += cleaned
+                        continue
+                    if social_paste:
+                        cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
+                        cleaned = cleaned.replace("\n", "").replace("\r", "")
+                        if cleaned:
+                            model.social_compose_text += cleaned
                         continue
 
             normalized, char = _normalize_key(key)
@@ -1097,6 +1237,29 @@ def main() -> int:
                 session_state = _resume_or_start_session(model)
                 _stop_tail_threads()
                 _ensure_tail_threads()
+            if action == "social_toggle":
+                if model.social_active:
+                    _set_social_status(model, "Social panel active.")
+                else:
+                    _set_social_status(model, "")
+            if action in {"social_target_self", "social_target_peer"}:
+                if action == "social_target_peer":
+                    peer_user_id = str(model.get_selected_conv().get("peer_user_id", "")).strip()
+                    if not peer_user_id:
+                        model.social_target = "self"
+                        _append_system_message(model, "Selected conversation has no peer_user_id.")
+                        _set_social_status(model, "No peer_user_id found; staying on self.")
+                        continue
+                model.social_items = []
+                model.social_prev_hash = None
+                model.social_scroll = 0
+                model.social_selected_idx = 0
+                target_label = "self" if model.social_target == "self" else "peer"
+                _set_social_status(model, f"Target set to {target_label}. Press r to refresh.")
+            if action == "social_refresh":
+                _refresh_social()
+            if action == "social_publish":
+                _publish_social()
             if action == "create_dm":
                 new_dm = model.render().new_dm_fields
                 _create_new_dm(
