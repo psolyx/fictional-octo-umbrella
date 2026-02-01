@@ -1,16 +1,17 @@
 import asyncio
 import json
-import selectors
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
+from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Deque, Optional
 
 from aiohttp import ClientSession, WSMsgType
 
@@ -42,17 +43,41 @@ def _find_chromium() -> Optional[str]:
     return None
 
 
-def _wait_for_http(url: str, timeout_s: float, *, process: subprocess.Popen[str]) -> None:
+def _format_output(lines: Deque[str]) -> str:
+    if not lines:
+        return "stdout/stderr: <no output captured>"
+    return "stdout/stderr (last lines):\n" + "\n".join(lines)
+
+
+def _start_output_reader(
+    stream,
+    *,
+    output_lines: Deque[str],
+    label: str,
+) -> threading.Thread:
+    def _reader() -> None:
+        for line in stream:
+            output_lines.append(f"[{label}] {line.rstrip()}")
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    return thread
+
+
+def _wait_for_http(
+    url: str,
+    timeout_s: float,
+    *,
+    process: subprocess.Popen[str],
+    output_lines: Deque[str],
+) -> None:
     deadline = time.time() + timeout_s
     last_error: Optional[Exception] = None
     while time.time() < deadline:
         if process.poll() is not None:
-            stderr_output = ""
-            if process.stderr is not None:
-                stderr_output = process.stderr.read()
             raise AssertionError(
                 "dev server exited before becoming ready.\n"
-                f"stderr:\n{stderr_output}"
+                f"{_format_output(output_lines)}"
             )
         try:
             with urllib.request.urlopen(url, timeout=0.5) as resp:
@@ -61,43 +86,44 @@ def _wait_for_http(url: str, timeout_s: float, *, process: subprocess.Popen[str]
         except Exception as exc:  # noqa: BLE001 - test harness polling
             last_error = exc
         time.sleep(0.1)
-    raise AssertionError(f"dev server did not become ready: {last_error}")
+    raise AssertionError(
+        "dev server did not become ready.\n"
+        f"last_error: {last_error}\n"
+        f"{_format_output(output_lines)}"
+    )
 
 
-def _wait_for_ready_url(
+def _wait_for_ready_file(
+    ready_file: Path,
     timeout_s: float,
     *,
     process: subprocess.Popen[str],
-) -> str:
+    output_lines: Deque[str],
+) -> dict:
     deadline = time.time() + timeout_s
-    selector = selectors.DefaultSelector()
-    if process.stdout is None:
-        raise AssertionError("dev server stdout unavailable")
-    selector.register(process.stdout, selectors.EVENT_READ)
-    stdout_lines = []
-    try:
-        while time.time() < deadline:
-            if process.poll() is not None:
-                stderr_output = ""
-                if process.stderr is not None:
-                    stderr_output = process.stderr.read()
-                stdout_output = "".join(stdout_lines)
-                raise AssertionError(
-                    "dev server exited before becoming ready.\n"
-                    f"stdout:\n{stdout_output}\n"
-                    f"stderr:\n{stderr_output}"
-                )
-            events = selector.select(timeout=0.1)
-            for key, _ in events:
-                line = key.fileobj.readline()
-                if not line:
-                    continue
-                stdout_lines.append(line)
-                if line.startswith("READY "):
-                    return line.split("READY ", 1)[1].strip()
-    finally:
-        selector.close()
-    raise AssertionError("Timed out waiting for dev server readiness output")
+    last_error: Optional[Exception] = None
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(
+                "dev server exited before becoming ready.\n"
+                f"{_format_output(output_lines)}"
+            )
+        if ready_file.exists():
+            try:
+                payload = json.loads(ready_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                last_error = exc
+            else:
+                url = payload.get("url")
+                if isinstance(url, str) and url:
+                    return payload
+                last_error = ValueError(f"invalid ready payload: {payload}")
+        time.sleep(0.1)
+    raise AssertionError(
+        "Timed out waiting for dev server readiness file.\n"
+        f"last_error: {last_error}\n"
+        f"{_format_output(output_lines)}"
+    )
 
 
 def _wait_for_cdp_url(port: int, timeout_s: float) -> str:
@@ -228,8 +254,13 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
             raise unittest.SkipTest("Go toolchain not available for WASM build")
 
         html_file = None
+        ready_dir: Optional[tempfile.TemporaryDirectory[str]] = None
+        ready_file: Optional[Path] = None
         server_proc: Optional[subprocess.Popen[str]] = None
         chromium_proc: Optional[subprocess.Popen[str]] = None
+        output_lines: Deque[str] = deque(maxlen=120)
+        stdout_thread: Optional[threading.Thread] = None
+        stderr_thread: Optional[threading.Thread] = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -356,6 +387,9 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
 """
                 )
 
+            ready_dir = tempfile.TemporaryDirectory(prefix="csp-dev-ready-")
+            ready_file = Path(ready_dir.name) / "ready.json"
+
             server_proc = subprocess.Popen(
                 [
                     sys.executable,
@@ -366,17 +400,41 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     "127.0.0.1",
                     "--port",
                     "0",
+                    "--ready-file",
+                    str(ready_file),
                 ],
                 cwd=str(ROOT_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            ready_url = _wait_for_ready_url(timeout_s=10.0, process=server_proc)
+            if server_proc.stdout is None or server_proc.stderr is None:
+                raise AssertionError("dev server stdout/stderr unavailable")
+            stdout_thread = _start_output_reader(
+                server_proc.stdout, output_lines=output_lines, label="stdout"
+            )
+            stderr_thread = _start_output_reader(
+                server_proc.stderr, output_lines=output_lines, label="stderr"
+            )
+            if ready_file is None:
+                raise AssertionError("ready file path missing")
+            wasm_missing = not WASM_PATH.exists()
+            ready_timeout_s = 120.0 if wasm_missing else 60.0
+            ready_payload = _wait_for_ready_file(
+                ready_file,
+                timeout_s=ready_timeout_s,
+                process=server_proc,
+                output_lines=output_lines,
+            )
+            ready_url_value = ready_payload.get("url")
+            if not isinstance(ready_url_value, str) or not ready_url_value:
+                raise AssertionError(f"dev server ready payload invalid: {ready_payload}")
+            ready_url = ready_url_value.rstrip("/")
             _wait_for_http(
                 f"{ready_url}/index.html",
-                timeout_s=10.0,
+                timeout_s=20.0,
                 process=server_proc,
+                output_lines=output_lines,
             )
 
             cdp_port = _find_free_port()
@@ -434,5 +492,11 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     server_proc.stdout.close()
                 if server_proc.stderr is not None:
                     server_proc.stderr.close()
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=1.0)
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=1.0)
+            if ready_dir is not None:
+                ready_dir.cleanup()
             if html_file is not None and html_file.exists():
                 html_file.unlink()

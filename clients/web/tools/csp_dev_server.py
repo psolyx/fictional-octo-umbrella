@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
-import http.server
 import html.parser
+import http.server
+import json
 import mimetypes
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import traceback
 
 
@@ -96,7 +99,39 @@ def run_check(index_path: pathlib.Path) -> int:
     return 0
 
 
-def run_server(index_path: pathlib.Path, host: str, port: int) -> int:
+def write_ready_file(ready_file: pathlib.Path, *, url: str) -> None:
+    ready_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"url": url, "pid": os.getpid()}
+    temp_file = None
+    try:
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{ready_file.name}.",
+            dir=str(ready_file.parent),
+            delete=False,
+        )
+        json.dump(payload, temp_file)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+        temp_file.close()
+        os.replace(temp_file.name, ready_file)
+    finally:
+        if temp_file is not None and not temp_file.closed:
+            temp_file.close()
+        if temp_file is not None:
+            try:
+                os.unlink(temp_file.name)
+            except FileNotFoundError:
+                pass
+
+
+def run_server(
+    index_path: pathlib.Path,
+    host: str,
+    port: int,
+    ready_file: pathlib.Path | None,
+) -> int:
     try:
         csp_value = extract_csp(index_path)
     except ValueError as exc:
@@ -125,6 +160,9 @@ def run_server(index_path: pathlib.Path, host: str, port: int) -> int:
 
     server = http.server.ThreadingHTTPServer((host, port), csp_dev_handler)
     actual_port = server.server_address[1]
+    ready_url = f"http://{host}:{actual_port}/"
+    if ready_file is not None:
+        write_ready_file(ready_file, url=ready_url)
     print(f"READY http://{host}:{actual_port}", flush=True)
     print(f"serving {web_root} on http://{host}:{actual_port}")
     print("press Ctrl+C to stop")
@@ -260,6 +298,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind host (serve mode)")
     parser.add_argument("--port", default=8081, type=int, help="bind port (serve mode)")
+    parser.add_argument(
+        "--ready-file",
+        type=pathlib.Path,
+        help="write JSON readiness payload to this path when serving",
+    )
     parser.add_argument("--verbose", action="store_true", help="show error details")
     return parser
 
@@ -279,7 +322,7 @@ def main() -> int:
     if wasm_status != 0:
         return wasm_status
     if args.serve:
-        return run_server(index_path, args.host, args.port)
+        return run_server(index_path, args.host, args.port, args.ready_file)
     return run_check(index_path)
 
 
