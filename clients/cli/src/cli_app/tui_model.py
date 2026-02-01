@@ -85,6 +85,16 @@ class RenderState:
     social_compose_active: bool
     social_compose_text: str
     social_prev_hash: Optional[str]
+    presence_active: bool
+    presence_enabled: bool
+    presence_invisible: bool
+    presence_items: List[Dict[str, Any]]
+    presence_selected_idx: int
+    presence_scroll: int
+    presence_status_line: str
+    presence_prompt_active: bool
+    presence_prompt_action: str
+    presence_prompt_text: str
     user_id: str
     device_id: str
     identity_path: Path
@@ -184,6 +194,17 @@ class TuiModel:
         self.social_compose_text = ""
         self.social_prev_hash: Optional[str] = None
 
+        self.presence_active = False
+        self.presence_enabled = False
+        self.presence_invisible = False
+        self.presence_entries: Dict[str, Dict[str, Any]] = {}
+        self.presence_selected_idx = 0
+        self.presence_scroll = 0
+        self.presence_status_line = ""
+        self.presence_prompt_active = False
+        self.presence_prompt_action = ""
+        self.presence_prompt_text = ""
+
         self.dm_conversations = self._load_conversations(initial_settings, defaults)
         self.selected_conversation = self._load_selected_conversation(initial_settings)
         if self.mode == MODE_HARNESS:
@@ -266,6 +287,8 @@ class TuiModel:
             order = ["conversations", "transcript", "compose"]
             if self.social_active:
                 order.append("social")
+            if self.presence_active:
+                order.append("presence")
         if self.focus_area not in order:
             self.focus_area = order[0]
             return
@@ -279,6 +302,8 @@ class TuiModel:
             order = ["conversations", "transcript", "compose"]
             if self.social_active:
                 order.append("social")
+            if self.presence_active:
+                order.append("presence")
         if self.focus_area not in order:
             self.focus_area = order[0]
             return
@@ -300,6 +325,11 @@ class TuiModel:
         max_scroll = max(0, len(self.social_items) - 1)
         self.social_scroll = max(0, min(max_scroll, self.social_scroll + delta))
         self.social_selected_idx = max(0, len(self.social_items) - 1 - self.social_scroll)
+
+    def scroll_presence(self, delta: int) -> None:
+        max_scroll = max(0, len(self.presence_entries) - 1)
+        self.presence_scroll = max(0, min(max_scroll, self.presence_scroll + delta))
+        self.presence_selected_idx = max(0, len(self.presence_entries) - 1 - self.presence_scroll)
 
     def update_field_value(self, new_value: str) -> None:
         field_key = self.field_order[self.active_field]
@@ -449,22 +479,33 @@ class TuiModel:
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
             self.new_dm_active = False
             self.social_active = False
+            self.presence_active = False
             self.social_compose_active = False
             self.social_compose_text = ""
+            self.presence_prompt_active = False
+            self.presence_prompt_text = ""
             self._persist()
             return "toggle_mode"
         if key == "r":
             if self.mode == MODE_DM_CLIENT and self.focus_area == "social" and self.social_active:
                 return "social_refresh"
             return "resume"
-        if key == "CTRL_S" and self.mode == MODE_DM_CLIENT and self.focus_area != "compose" and not self.social_compose_active:
-            self.social_active = not self.social_active
+        if key == "CTRL_P" and self.mode == MODE_DM_CLIENT and not self.new_dm_active:
             if self.social_active:
-                self.focus_area = "social"
-            elif self.focus_area == "social":
+                self.social_active = False
+                self.presence_active = True
+                self.focus_area = "presence"
+            elif self.presence_active:
+                self.presence_active = False
                 self.focus_area = "conversations"
+            else:
+                self.social_active = True
+                self.focus_area = "social"
             self.social_compose_active = False
-            return "social_toggle"
+            self.social_compose_text = ""
+            self.presence_prompt_active = False
+            self.presence_prompt_text = ""
+            return "panel_toggle"
         if self.new_dm_active and key in {"TAB", "SHIFT_TAB"}:
             return None
         if key == "TAB":
@@ -504,6 +545,58 @@ class TuiModel:
             return None
 
         if self.mode == MODE_DM_CLIENT:
+            if self.focus_area == "presence" and self.presence_active:
+                if self.presence_prompt_active:
+                    if key == "ESC":
+                        self.presence_prompt_active = False
+                        self.presence_prompt_text = ""
+                        self.presence_prompt_action = ""
+                        return None
+                    if key == "BACKSPACE":
+                        self.presence_prompt_text = self.presence_prompt_text[:-1]
+                        return None
+                    if key == "DELETE":
+                        self.presence_prompt_text = ""
+                        return None
+                    if key == "ENTER":
+                        return "presence_prompt_submit"
+                    if char:
+                        self.presence_prompt_text += char
+                        return None
+                    return None
+                if key == "UP":
+                    self.scroll_presence(1)
+                    return None
+                if key == "DOWN":
+                    self.scroll_presence(-1)
+                    return None
+                if key == "CHAR" and char in {"a", "A"}:
+                    self.presence_prompt_active = True
+                    self.presence_prompt_action = "watch"
+                    self.presence_prompt_text = ""
+                    return None
+                if key == "CHAR" and char in {"r", "R"}:
+                    self.presence_prompt_active = True
+                    self.presence_prompt_action = "unwatch"
+                    self.presence_prompt_text = ""
+                    return None
+                if key == "CHAR" and char in {"b"}:
+                    self.presence_prompt_active = True
+                    self.presence_prompt_action = "block"
+                    self.presence_prompt_text = ""
+                    return None
+                if key == "CHAR" and char in {"B"}:
+                    self.presence_prompt_active = True
+                    self.presence_prompt_action = "unblock"
+                    self.presence_prompt_text = ""
+                    return None
+                if key == "CHAR" and char in {"i", "I"}:
+                    self.presence_invisible = not self.presence_invisible
+                    return "presence_toggle_invisible"
+                if key == "CHAR" and char in {"e", "E"}:
+                    self.presence_enabled = not self.presence_enabled
+                    return "presence_toggle_enabled"
+                return None
             if self.focus_area == "social" and self.social_active:
                 if self.social_compose_active:
                     if key == "ESC":
@@ -548,9 +641,9 @@ class TuiModel:
                 self.focus_area = "new_dm"
                 return None
             if self.focus_area == "conversations":
-                if key in {"UP", "CTRL_P"}:
+                if key == "UP":
                     self.select_prev_conv()
-                elif key in {"DOWN", "CTRL_N"}:
+                elif key == "DOWN":
                     self.select_next_conv()
                 return None
             if self.focus_area == "transcript":
@@ -637,6 +730,7 @@ class TuiModel:
 
     def render(self) -> RenderState:
         transcript = list(self.get_selected_conv().get("transcript", []))
+        presence_items = [self.presence_entries[key] for key in sorted(self.presence_entries.keys())]
         return RenderState(
             mode=self.mode,
             focus_area=self.focus_area,
@@ -671,7 +765,53 @@ class TuiModel:
             social_compose_active=self.social_compose_active,
             social_compose_text=self.social_compose_text,
             social_prev_hash=self.social_prev_hash,
+            presence_active=self.presence_active,
+            presence_enabled=self.presence_enabled,
+            presence_invisible=self.presence_invisible,
+            presence_items=presence_items,
+            presence_selected_idx=self.presence_selected_idx,
+            presence_scroll=self.presence_scroll,
+            presence_status_line=self.presence_status_line,
+            presence_prompt_active=self.presence_prompt_active,
+            presence_prompt_action=self.presence_prompt_action,
+            presence_prompt_text=self.presence_prompt_text,
             user_id=self.identity.user_id,
             device_id=self.identity.device_id,
             identity_path=self.identity_path,
         )
+
+    def set_presence_status(self, text: str) -> None:
+        self.presence_status_line = text
+
+    def ensure_presence_contact(self, user_id: str) -> None:
+        if not user_id:
+            return
+        entry = self.presence_entries.get(user_id, {"user_id": user_id})
+        entry.setdefault("status", "offline")
+        self.presence_entries[user_id] = entry
+        self.presence_scroll = 0
+        self.presence_selected_idx = max(0, len(self.presence_entries) - 1)
+
+    def remove_presence_contact(self, user_id: str) -> None:
+        if not user_id:
+            return
+        self.presence_entries.pop(user_id, None)
+        self.presence_scroll = 0
+        self.presence_selected_idx = max(0, len(self.presence_entries) - 1)
+
+    def update_presence_entry(
+        self,
+        user_id: str,
+        status: str,
+        expires_at: Optional[int],
+        last_seen_bucket: Optional[str],
+    ) -> None:
+        if not user_id:
+            return
+        entry = self.presence_entries.get(user_id, {"user_id": user_id})
+        entry["status"] = status
+        if expires_at is not None:
+            entry["expires_at"] = expires_at
+        if last_seen_bucket is not None:
+            entry["last_seen_bucket"] = last_seen_bucket
+        self.presence_entries[user_id] = entry
