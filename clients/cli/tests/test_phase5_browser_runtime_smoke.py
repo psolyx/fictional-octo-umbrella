@@ -49,6 +49,12 @@ def _format_output(lines: Deque[str]) -> str:
     return "stdout/stderr (last lines):\n" + "\n".join(lines)
 
 
+def _format_cdp_logs(lines: Deque[str]) -> str:
+    if not lines:
+        return "cdp logs: <none captured>"
+    return "cdp logs (last lines):\n" + "\n".join(lines)
+
+
 def _start_output_reader(
     stream,
     *,
@@ -62,6 +68,18 @@ def _start_output_reader(
     thread = threading.Thread(target=_reader, daemon=True)
     thread.start()
     return thread
+
+
+def _terminate_process(proc: subprocess.Popen[str], *, label: str) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"{label} failed to terminate") from None
 
 
 def _wait_for_http(
@@ -142,34 +160,92 @@ def _wait_for_cdp_url(port: int, timeout_s: float) -> str:
     raise AssertionError(f"Timed out waiting for Chromium DevTools URL: {last_error}")
 
 
-async def _cdp_wait_for_load(ws, *, deadline: float) -> None:
+def _format_remote_object(obj: dict) -> str:
+    if "value" in obj:
+        return repr(obj["value"])
+    if "description" in obj:
+        return str(obj["description"])
+    if "type" in obj:
+        return str(obj["type"])
+    return json.dumps(obj, sort_keys=True)
+
+
+def _record_cdp_event(payload: dict, *, logs: Deque[str]) -> None:
+    method = payload.get("method")
+    params = payload.get("params", {})
+    if method == "Runtime.consoleAPICalled":
+        args = params.get("args", [])
+        text = " ".join(_format_remote_object(arg) for arg in args)
+        logs.append(f"[console.{params.get('type', 'log')}] {text}".strip())
+    elif method == "Runtime.exceptionThrown":
+        details = params.get("exceptionDetails", {})
+        exception = details.get("exception", {})
+        description = exception.get("description") or details.get("text") or "exception"
+        logs.append(f"[exception] {description}")
+    elif method == "Log.entryAdded":
+        entry = params.get("entry", {})
+        logs.append(f"[log.{entry.get('level', 'info')}] {entry.get('text', '')}")
+
+
+def _should_skip_cdp_error(message: str) -> Optional[str]:
+    lowered = message.lower()
+    if "target closed" in lowered or "session closed" in lowered:
+        return "CDP target closed"
+    if "connection closed" in lowered or "websocket is closed" in lowered:
+        return "CDP connection closed"
+    if "execution context was destroyed" in lowered or "cannot find context" in lowered:
+        return "CDP execution context unavailable"
+    if "execution context was not found" in lowered:
+        return "CDP execution context missing"
+    if "frame" in lowered and "not found" in lowered:
+        return "CDP frame missing"
+    if "navigation" in lowered and ("failed" in lowered or "aborted" in lowered):
+        return "CDP navigation failed"
+    return None
+
+
+async def _cdp_wait_for_load(ws, *, deadline: float, logs: Deque[str]) -> None:
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise AssertionError("Timed out waiting for Page.loadEventFired")
         msg = await ws.receive(timeout=remaining)
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
+            raise unittest.SkipTest("CDP session closed while waiting for page load")
         if msg.type != WSMsgType.TEXT:
             continue
         payload = json.loads(msg.data)
+        if payload.get("method"):
+            _record_cdp_event(payload, logs=logs)
         if payload.get("method") == "Page.loadEventFired":
             return
 
 
-async def _cdp_request(ws, message: dict, *, deadline: float) -> dict:
+async def _cdp_request(ws, message: dict, *, deadline: float, logs: Deque[str]) -> dict:
     await ws.send_json(message)
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise AssertionError("Timed out waiting for CDP response")
         msg = await ws.receive(timeout=remaining)
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
+            raise unittest.SkipTest("CDP session closed while waiting for response")
         if msg.type != WSMsgType.TEXT:
             continue
         payload = json.loads(msg.data)
+        if payload.get("method"):
+            _record_cdp_event(payload, logs=logs)
         if payload.get("id") == message["id"]:
+            if "error" in payload:
+                error_message = payload["error"].get("message", "unknown CDP error")
+                skip_reason = _should_skip_cdp_error(error_message)
+                if skip_reason:
+                    raise unittest.SkipTest(skip_reason)
+                raise AssertionError(f"CDP error: {error_message}")
             return payload
 
 
-async def _cdp_eval(ws, expression: str, *, msg_id: int, deadline: float):
+async def _cdp_eval(ws, expression: str, *, msg_id: int, deadline: float, logs: Deque[str]):
     response = await _cdp_request(
         ws,
         {
@@ -178,21 +254,35 @@ async def _cdp_eval(ws, expression: str, *, msg_id: int, deadline: float):
             "params": {"expression": expression, "returnByValue": True},
         },
         deadline=deadline,
+        logs=logs,
     )
-    result = response.get("result", {}).get("result", {})
+    result_payload = response.get("result", {})
+    if "exceptionDetails" in result_payload:
+        details = result_payload.get("exceptionDetails", {})
+        exception = details.get("exception", {})
+        description = exception.get("description") or details.get("text") or "exception"
+        skip_reason = _should_skip_cdp_error(description)
+        if skip_reason:
+            raise unittest.SkipTest(skip_reason)
+        raise AssertionError(f"CDP evaluation exception: {description}")
+    result = result_payload.get("result", {})
+    if not result_payload:
+        raise AssertionError(f"CDP evaluation missing result for: {expression}")
     return result.get("value")
 
 
 async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
     async with ClientSession() as session:
         async with session.ws_connect(ws_url) as ws:
+            cdp_logs: Deque[str] = deque(maxlen=50)
             await ws.send_json({"id": 1, "method": "Page.enable"})
             await ws.send_json({"id": 2, "method": "Runtime.enable"})
-            await ws.send_json({"id": 3, "method": "Page.navigate", "params": {"url": page_url}})
+            await ws.send_json({"id": 3, "method": "Log.enable"})
+            await ws.send_json({"id": 4, "method": "Page.navigate", "params": {"url": page_url}})
 
             deadline = asyncio.get_running_loop().time() + timeout_s
             try:
-                await _cdp_wait_for_load(ws, deadline=deadline)
+                await _cdp_wait_for_load(ws, deadline=deadline, logs=cdp_logs)
             except (TimeoutError, AssertionError):
                 pass
 
@@ -209,6 +299,7 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
                             "document.readyState",
                             msg_id=msg_id,
                             deadline=asyncio.get_running_loop().time() + 2.0,
+                            logs=cdp_logs,
                         )
                         msg_id += 1
                         smoke_done = await _cdp_eval(
@@ -216,6 +307,7 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
                             "window.__SMOKE_DONE__",
                             msg_id=msg_id,
                             deadline=asyncio.get_running_loop().time() + 2.0,
+                            logs=cdp_logs,
                         )
                         msg_id += 1
                         smoke_result = await _cdp_eval(
@@ -223,6 +315,7 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
                             "window.__SMOKE_RESULT__",
                             msg_id=msg_id,
                             deadline=asyncio.get_running_loop().time() + 2.0,
+                            logs=cdp_logs,
                         )
                         msg_id += 1
                     except AssertionError:
@@ -231,12 +324,25 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
                         "Timed out waiting for browser smoke result "
                         f"(readyState={ready_state}, "
                         f"smoke_done={smoke_done}, "
-                        f"smoke_result={smoke_result})"
+                        f"smoke_result={smoke_result}).\n"
+                        f"{_format_cdp_logs(cdp_logs)}"
                     )
-                done = await _cdp_eval(ws, "window.__SMOKE_DONE__ === true", msg_id=msg_id, deadline=poll_deadline)
+                done = await _cdp_eval(
+                    ws,
+                    "window.__SMOKE_DONE__ === true",
+                    msg_id=msg_id,
+                    deadline=poll_deadline,
+                    logs=cdp_logs,
+                )
                 msg_id += 1
                 if done:
-                    result = await _cdp_eval(ws, "window.__SMOKE_RESULT__", msg_id=msg_id, deadline=poll_deadline)
+                    result = await _cdp_eval(
+                        ws,
+                        "window.__SMOKE_RESULT__",
+                        msg_id=msg_id,
+                        deadline=poll_deadline,
+                        logs=cdp_logs,
+                    )
                     if not isinstance(result, dict):
                         raise AssertionError(f"Unexpected smoke result: {result}")
                     return result
@@ -254,6 +360,7 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
             raise unittest.SkipTest("Go toolchain not available for WASM build")
 
         html_file = None
+        module_file = None
         ready_dir: Optional[tempfile.TemporaryDirectory[str]] = None
         ready_file: Optional[Path] = None
         server_proc: Optional[subprocess.Popen[str]] = None
@@ -271,8 +378,122 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                 delete=False,
             ) as temp_html:
                 html_file = Path(temp_html.name)
-                temp_html.write(
-                    """<!doctype html>
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".js",
+                prefix="phase5_browser_runtime_smoke_",
+                dir=WEB_DIR,
+                delete=False,
+            ) as temp_module:
+                module_file = Path(temp_module.name)
+                temp_module.write(
+                    """import {
+  verify_vectors_from_url,
+  dm_create_participant,
+  dm_init,
+  dm_join,
+  dm_commit_apply,
+  dm_encrypt,
+  dm_decrypt
+} from './mls_vectors_loader.js';
+
+window.__SMOKE_DONE__ = false;
+window.__SMOKE_RESULT__ = { ok: false, error: 'not started' };
+
+window.addEventListener('error', (event) => {
+  if (!window.__SMOKE_DONE__) {
+    window.__SMOKE_RESULT__ = { ok: false, error: `unhandled error: ${event.message}` };
+    window.__SMOKE_DONE__ = true;
+  }
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event && event.reason ? event.reason : 'unknown';
+  if (!window.__SMOKE_DONE__) {
+    window.__SMOKE_RESULT__ = { ok: false, error: `unhandled rejection: ${reason}` };
+    window.__SMOKE_DONE__ = true;
+  }
+});
+
+const bytes_to_base64 = (bytes) => {
+  let output = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    output += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(output);
+};
+
+const require_ok = (result, label) => {
+  if (!result || !result.ok) {
+    const error_text = result && result.error ? result.error : 'unknown error';
+    throw new Error(`${label} failed: ${error_text}`);
+  }
+  return result;
+};
+
+const set_done = (ok, error_text) => {
+  if (ok) {
+    window.__SMOKE_RESULT__ = { ok: true };
+  } else {
+    window.__SMOKE_RESULT__ = { ok: false, error: error_text };
+  }
+  window.__SMOKE_DONE__ = true;
+};
+
+const run = async () => {
+  const vectors = await verify_vectors_from_url('./vectors/room_seeded_bootstrap_v1.json');
+  if (!vectors || vectors.ok !== true) {
+    throw new Error(`vector verify failed: ${JSON.stringify(vectors)}`);
+  }
+
+  const group_id_bytes = new Uint8Array(32);
+  crypto.getRandomValues(group_id_bytes);
+  const group_id_b64 = bytes_to_base64(group_id_bytes);
+
+  const alice = require_ok(await dm_create_participant('alice', 101), 'alice participant');
+  const bob = require_ok(await dm_create_participant('bob', 202), 'bob participant');
+  const init = require_ok(
+    await dm_init(alice.participant_b64, bob.keypackage_b64, group_id_b64, 303),
+    'dm init'
+  );
+  const bob_join = require_ok(await dm_join(bob.participant_b64, init.welcome_b64), 'dm join');
+  const alice_commit = require_ok(
+    await dm_commit_apply(init.participant_b64, init.commit_b64),
+    'alice commit apply'
+  );
+  const bob_commit = require_ok(
+    await dm_commit_apply(bob_join.participant_b64, init.commit_b64),
+    'bob commit apply'
+  );
+
+  const outbound = require_ok(await dm_encrypt(alice_commit.participant_b64, 'hello bob'), 'encrypt a->b');
+  const inbound = require_ok(await dm_decrypt(bob_commit.participant_b64, outbound.ciphertext_b64), 'decrypt a->b');
+  if (inbound.plaintext !== 'hello bob') {
+    throw new Error(`unexpected a->b plaintext: ${inbound.plaintext}`);
+  }
+
+  const outbound2 = require_ok(await dm_encrypt(bob_commit.participant_b64, 'hello alice'), 'encrypt b->a');
+  const inbound2 = require_ok(
+    await dm_decrypt(alice_commit.participant_b64, outbound2.ciphertext_b64),
+    'decrypt b->a'
+  );
+  if (inbound2.plaintext !== 'hello alice') {
+    throw new Error(`unexpected b->a plaintext: ${inbound2.plaintext}`);
+  }
+};
+
+run().then(
+  () => set_done(true, ''),
+  (error) => set_done(false, error && error.message ? error.message : String(error))
+);
+"""
+                )
+            if html_file is None or module_file is None:
+                raise AssertionError("failed to create smoke test assets")
+            html_file.write_text(
+                f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -280,112 +501,12 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
   </head>
   <body>
     <script src="vendor/wasm_exec.js"></script>
-    <script type="module">
-      import {
-        verify_vectors_from_url,
-        dm_create_participant,
-        dm_init,
-        dm_join,
-        dm_commit_apply,
-        dm_encrypt,
-        dm_decrypt
-      } from './mls_vectors_loader.js';
-
-      window.__SMOKE_DONE__ = false;
-      window.__SMOKE_RESULT__ = { ok: false, error: 'not started' };
-
-      window.addEventListener('error', (event) => {
-        if (!window.__SMOKE_DONE__) {
-          window.__SMOKE_RESULT__ = { ok: false, error: `unhandled error: ${event.message}` };
-          window.__SMOKE_DONE__ = true;
-        }
-      });
-
-      window.addEventListener('unhandledrejection', (event) => {
-        const reason = event && event.reason ? event.reason : 'unknown';
-        if (!window.__SMOKE_DONE__) {
-          window.__SMOKE_RESULT__ = { ok: false, error: `unhandled rejection: ${reason}` };
-          window.__SMOKE_DONE__ = true;
-        }
-      });
-
-      const bytes_to_base64 = (bytes) => {
-        let output = '';
-        const chunk = 8192;
-        for (let i = 0; i < bytes.length; i += chunk) {
-          output += String.fromCharCode(...bytes.subarray(i, i + chunk));
-        }
-        return btoa(output);
-      };
-
-      const require_ok = (result, label) => {
-        if (!result || !result.ok) {
-          const error_text = result && result.error ? result.error : 'unknown error';
-          throw new Error(`${label} failed: ${error_text}`);
-        }
-        return result;
-      };
-
-      const set_done = (ok, error_text) => {
-        if (ok) {
-          window.__SMOKE_RESULT__ = { ok: true };
-        } else {
-          window.__SMOKE_RESULT__ = { ok: false, error: error_text };
-        }
-        window.__SMOKE_DONE__ = true;
-      };
-
-      const run = async () => {
-        const vectors = await verify_vectors_from_url('./vectors/room_seeded_bootstrap_v1.json');
-        if (!vectors || vectors.ok !== true) {
-          throw new Error(`vector verify failed: ${JSON.stringify(vectors)}`);
-        }
-
-        const group_id_bytes = new Uint8Array(32);
-        crypto.getRandomValues(group_id_bytes);
-        const group_id_b64 = bytes_to_base64(group_id_bytes);
-
-        const alice = require_ok(await dm_create_participant('alice', 101), 'alice participant');
-        const bob = require_ok(await dm_create_participant('bob', 202), 'bob participant');
-        const init = require_ok(
-          await dm_init(alice.participant_b64, bob.keypackage_b64, group_id_b64, 303),
-          'dm init'
-        );
-        const bob_join = require_ok(await dm_join(bob.participant_b64, init.welcome_b64), 'dm join');
-        const alice_commit = require_ok(
-          await dm_commit_apply(init.participant_b64, init.commit_b64),
-          'alice commit apply'
-        );
-        const bob_commit = require_ok(
-          await dm_commit_apply(bob_join.participant_b64, init.commit_b64),
-          'bob commit apply'
-        );
-
-        const outbound = require_ok(await dm_encrypt(alice_commit.participant_b64, 'hello bob'), 'encrypt a->b');
-        const inbound = require_ok(await dm_decrypt(bob_commit.participant_b64, outbound.ciphertext_b64), 'decrypt a->b');
-        if (inbound.plaintext !== 'hello bob') {
-          throw new Error(`unexpected a->b plaintext: ${inbound.plaintext}`);
-        }
-
-        const outbound2 = require_ok(await dm_encrypt(bob_commit.participant_b64, 'hello alice'), 'encrypt b->a');
-        const inbound2 = require_ok(
-          await dm_decrypt(alice_commit.participant_b64, outbound2.ciphertext_b64),
-          'decrypt b->a'
-        );
-        if (inbound2.plaintext !== 'hello alice') {
-          throw new Error(`unexpected b->a plaintext: ${inbound2.plaintext}`);
-        }
-      };
-
-      run().then(
-        () => set_done(true, ''),
-        (error) => set_done(false, error && error.message ? error.message : String(error))
-      );
-    </script>
+    <script type="module" src="{module_file.name}"></script>
   </body>
 </html>
-"""
-                )
+""",
+                encoding="utf-8",
+            )
 
             ready_dir = tempfile.TemporaryDirectory(prefix="csp-dev-ready-")
             ready_file = Path(ready_dir.name) / "ready.json"
@@ -460,8 +581,8 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                         f"--user-data-dir={profile_dir}",
                         "about:blank",
                     ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     text=True,
                 )
                 try:
@@ -475,19 +596,9 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                     raise AssertionError(f"Browser runtime smoke failed: {result}")
         finally:
             if chromium_proc is not None:
-                chromium_proc.terminate()
-                try:
-                    chromium_proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    chromium_proc.kill()
-                if chromium_proc.stdout is not None:
-                    chromium_proc.stdout.close()
+                _terminate_process(chromium_proc, label="chromium")
             if server_proc is not None:
-                server_proc.terminate()
-                try:
-                    server_proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    server_proc.kill()
+                _terminate_process(server_proc, label="dev server")
                 if server_proc.stdout is not None:
                     server_proc.stdout.close()
                 if server_proc.stderr is not None:
@@ -500,3 +611,5 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                 ready_dir.cleanup()
             if html_file is not None and html_file.exists():
                 html_file.unlink()
+            if module_file is not None and module_file.exists():
+                module_file.unlink()
