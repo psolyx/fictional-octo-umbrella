@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib
 import importlib.metadata
@@ -1280,3 +1281,270 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
             await peer_one_sse.release()
             await peer_two_sse.release()
             await peer_three_sse.release()
+
+    async def test_room_scaled_fanout_churn_replay_no_divergence(self):
+        env: Dict[str, str] = dict(self.harness_env)
+
+        run_slow = os.getenv("RUN_SLOW_TESTS") == "1"
+        invited_count = 20 if run_slow else 8
+        message_count = 200 if run_slow else 40
+        offline_count = max(1, invited_count // 3)
+
+        owner_auth = "Bearer room-owner"
+        conv_id = "room-scaled-1"
+        owner_device_id = "dev-owner"
+
+        ready_owner = await self._start_session_http(auth_token=owner_auth, device_id=owner_device_id)
+        member_sessions = []
+        for index in range(invited_count):
+            auth = f"Bearer room-member-{index}"
+            device_id = f"dev-member-{index}"
+            ready = await self._start_session_http(auth_token=auth, device_id=device_id)
+            member_sessions.append((device_id, ready))
+
+        await self._create_room(ready_owner["session_token"], conv_id)
+        for _, ready in member_sessions:
+            await self._invite_member(ready_owner["session_token"], conv_id, ready["user_id"])
+
+        total_members = 1 + invited_count
+        member_state_dirs: list[str] = []
+        member_labels: list[str] = []
+        member_sessions_all = [(owner_device_id, ready_owner)] + member_sessions
+
+        with contextlib.ExitStack() as stack:
+            for index in range(total_members):
+                state_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix=f"room-scale-{index}-")
+                )
+                member_state_dirs.append(state_dir)
+                member_labels.append(f"member-{index}")
+
+            for index, (device_id, ready) in enumerate(member_sessions_all):
+                keypackage = await self._run_harness(
+                    env,
+                    "dm-keypackage",
+                    "--state-dir",
+                    member_state_dirs[index],
+                    "--name",
+                    member_labels[index],
+                    "--seed",
+                    str(9300 + index),
+                )
+                await self._publish_keypackages(ready["session_token"], device_id, [keypackage])
+
+            peer_keypackages: list[str] = []
+            for _, ready in member_sessions:
+                fetched = await self._fetch_keypackages(
+                    ready_owner["session_token"], ready["user_id"], 1
+                )
+                self.assertEqual(len(fetched), 1)
+                peer_keypackages.append(fetched[0])
+
+            init_args = [
+                "group-init",
+                "--state-dir",
+                member_state_dirs[0],
+                "--group-id",
+                "cm9vbS1zY2FsZWQ=",
+                "--seed",
+                "8001",
+            ]
+            for keypackage in peer_keypackages:
+                init_args.extend(["--peer-keypackage", keypackage])
+            init_output = await self._run_harness(env, *init_args)
+            init_payload = json.loads(init_output)
+
+            async def open_sse(session_token: str):
+                resp = await self.client.get(
+                    "/v1/sse",
+                    params={"conv_id": conv_id, "from_seq": "1"},
+                    headers={"Authorization": f"Bearer {session_token}"},
+                )
+                self.assertEqual(resp.status, 200)
+                return resp
+
+            sse_streams: list[TestClient] = []
+            for _, ready in member_sessions_all:
+                sse_streams.append(await open_sse(ready["session_token"]))
+
+            expected_seq = 1
+            welcome_env = pack_dm_env(1, init_payload["welcome"])
+            welcome_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-scaled-welcome",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(welcome_env),
+                    "env": welcome_env,
+                },
+            }
+            welcome_resp = await self._post_inbox(ready_owner["session_token"], welcome_frame)
+            self.assertEqual(welcome_resp.status, 200)
+            welcome_ack = await welcome_resp.json()
+            self.assertEqual(welcome_ack["seq"], expected_seq)
+
+            for index, sse in enumerate(sse_streams):
+                event_type, event = await read_sse_event(sse)
+                self.assertEqual(event_type, "conv.event")
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+                if index > 0:
+                    _, welcome_payload = unpack_dm_env(event["body"]["env"])
+                    await self._run_harness(
+                        env, "dm-join", "--state-dir", member_state_dirs[index], "--welcome", welcome_payload
+                    )
+
+            expected_seq += 1
+            commit_env = pack_dm_env(2, init_payload["commit"])
+            commit_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "room-scaled-commit",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id_for_env(commit_env),
+                    "env": commit_env,
+                },
+            }
+            commit_resp = await self._post_inbox(ready_owner["session_token"], commit_frame)
+            self.assertEqual(commit_resp.status, 200)
+            commit_ack = await commit_resp.json()
+            self.assertEqual(commit_ack["seq"], expected_seq)
+
+            for index, sse in enumerate(sse_streams):
+                event_type, event = await read_sse_event(sse)
+                self.assertEqual(event_type, "conv.event")
+                self.assertEqual(event["body"]["seq"], expected_seq)
+                self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+                _, commit_payload = unpack_dm_env(event["body"]["env"])
+                await self._run_harness(
+                    env, "dm-commit-apply", "--state-dir", member_state_dirs[index], "--commit", commit_payload
+                )
+
+            expected_seq += 1
+            online_indices = list(range(total_members))
+            offline_indices = list(range(total_members - offline_count, total_members))
+            offline_last_seq: dict[int, int] = {}
+            expected_plaintexts: Dict[int, str] = {}
+            retry_index = 3
+
+            for msg_index in range(1, message_count + 1):
+                if msg_index == message_count // 2:
+                    for offline_index in offline_indices:
+                        offline_last_seq[offline_index] = expected_seq - 1
+                        await sse_streams[offline_index].release()
+                    online_indices = [idx for idx in online_indices if idx not in offline_indices]
+
+                sender_index = online_indices[msg_index % len(online_indices)]
+                plaintext = f"scaled-{msg_index}-from-{sender_index}"
+                ciphertext = await self._run_harness(
+                    env,
+                    "dm-encrypt",
+                    "--state-dir",
+                    member_state_dirs[sender_index],
+                    "--plaintext",
+                    plaintext,
+                )
+                env_b64 = pack_dm_env(3, ciphertext)
+                frame = {
+                    "v": 1,
+                    "t": "conv.send",
+                    "id": f"room-scaled-app-{msg_index}",
+                    "body": {
+                        "conv_id": conv_id,
+                        "msg_id": msg_id_for_env(env_b64),
+                        "env": env_b64,
+                    },
+                }
+                resp = await self._post_inbox(
+                    member_sessions_all[sender_index][1]["session_token"], frame
+                )
+                self.assertEqual(resp.status, 200)
+                ack = await resp.json()
+                self.assertEqual(ack["seq"], expected_seq)
+
+                events: Dict[int, dict] = {}
+                for index in online_indices:
+                    event_type, event = await read_sse_event(sse_streams[index])
+                    self.assertEqual(event_type, "conv.event")
+                    self.assertEqual(event["body"]["seq"], expected_seq)
+                    self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+                    events[index] = event
+
+                for index in online_indices:
+                    if index == sender_index:
+                        continue
+                    _, payload = unpack_dm_env(events[index]["body"]["env"])
+                    decrypted = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        member_state_dirs[index],
+                        "--ciphertext",
+                        payload,
+                    )
+                    self.assertEqual(decrypted, plaintext)
+
+                if msg_index == retry_index:
+                    retry_resp = await self._post_inbox(
+                        member_sessions_all[sender_index][1]["session_token"], frame
+                    )
+                    self.assertEqual(retry_resp.status, 200)
+                    retry_ack = await retry_resp.json()
+                    self.assertEqual(retry_ack["seq"], expected_seq)
+                    with self.assertRaises(asyncio.TimeoutError):
+                        await asyncio.wait_for(read_sse_event(sse_streams[online_indices[0]]), timeout=0.2)
+
+                expected_plaintexts[expected_seq] = plaintext
+                expected_seq += 1
+
+            final_seq = expected_seq - 1
+
+            for offline_index in offline_indices:
+                from_seq = offline_last_seq[offline_index] + 1
+                replay_sse = await self.client.get(
+                    "/v1/sse",
+                    params={"conv_id": conv_id, "from_seq": str(from_seq)},
+                    headers={
+                        "Authorization": f"Bearer {member_sessions_all[offline_index][1]['session_token']}"
+                    },
+                )
+                self.assertEqual(replay_sse.status, 200)
+
+                seen_seq = from_seq - 1
+                while seen_seq < final_seq:
+                    event_type, event = await read_sse_event(replay_sse)
+                    self.assertEqual(event_type, "conv.event")
+                    seq = event["body"]["seq"]
+                    self.assertGreater(seq, seen_seq)
+                    self.assertEqual(seq, seen_seq + 1)
+                    self.assertEqual(event["body"]["msg_id"], msg_id_for_env(event["body"]["env"]))
+                    _, payload = unpack_dm_env(event["body"]["env"])
+                    decrypted = await self._run_harness(
+                        env,
+                        "dm-decrypt",
+                        "--state-dir",
+                        member_state_dirs[offline_index],
+                        "--ciphertext",
+                        payload,
+                    )
+                    self.assertEqual(decrypted, expected_plaintexts[seq])
+                    seen_seq = seq
+
+                ack_resp = await self._post_inbox(
+                    member_sessions_all[offline_index][1]["session_token"],
+                    {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": final_seq}},
+                )
+                self.assertEqual(ack_resp.status, 200)
+                await ack_resp.json()
+
+                resumed = await self._resume_session_http(
+                    resume_token=member_sessions_all[offline_index][1]["resume_token"]
+                )
+                cursors = {cursor["conv_id"]: cursor["next_seq"] for cursor in resumed.get("cursors", [])}
+                self.assertEqual(cursors.get(conv_id), final_seq + 1)
+                await replay_sse.release()
+
+            for index in online_indices:
+                await sse_streams[index].release()
