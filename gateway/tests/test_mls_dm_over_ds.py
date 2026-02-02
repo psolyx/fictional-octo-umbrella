@@ -98,6 +98,11 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         return await resp.json()
 
+    async def _resume_session_http(self, *, resume_token: str):
+        resp = await self.client.post("/v1/session/resume", json={"resume_token": resume_token})
+        self.assertEqual(resp.status, 200)
+        return await resp.json()
+
     async def _create_room(self, session_token: str, conv_id: str):
         resp = await self.client.post(
             "/v1/rooms/create",
@@ -626,6 +631,276 @@ class MlsDmOverDsTests(unittest.IsolatedAsyncioTestCase):
 
             await initiator_sse.release()
             await joiner_sse.release()
+
+    async def test_dm_phase2_multidevice_wipe_resume_replay(self):
+        env: Dict[str, str] = dict(self.harness_env)
+
+        auth_a = "Bearer user-a"
+        auth_b = "Bearer user-b"
+        conv_id = "dm-phase2-1"
+
+        ready_a1 = await self._start_session_http(auth_token=auth_a, device_id="dev-a1")
+        ready_a2 = await self._start_session_http(auth_token=auth_a, device_id="dev-a2")
+        ready_b1 = await self._start_session_http(auth_token=auth_b, device_id="dev-b1")
+        ready_b2 = await self._start_session_http(auth_token=auth_b, device_id="dev-b2")
+
+        await self._create_room(ready_a1["session_token"], conv_id)
+        await self._invite_member(ready_a1["session_token"], conv_id, ready_b1["user_id"])
+
+        b1_seed = "9201"
+        b2_seed = "9202"
+
+        with (
+            tempfile.TemporaryDirectory(prefix="a1-") as a1_dir,
+            tempfile.TemporaryDirectory(prefix="a2-") as a2_dir,
+            tempfile.TemporaryDirectory(prefix="b1-") as b1_dir,
+            tempfile.TemporaryDirectory(prefix="b2-") as b2_dir,
+        ):
+            a1_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", a1_dir, "--name", "a1", "--seed", "9101"
+            )
+            a2_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", a2_dir, "--name", "a2", "--seed", "9102"
+            )
+            b1_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", b1_dir, "--name", "b1", "--seed", b1_seed
+            )
+            b2_kp = await self._run_harness(
+                env, "dm-keypackage", "--state-dir", b2_dir, "--name", "b2", "--seed", b2_seed
+            )
+
+            await self._publish_keypackages(ready_a1["session_token"], "dev-a1", [a1_kp])
+            await self._publish_keypackages(ready_a2["session_token"], "dev-a2", [a2_kp])
+            await self._publish_keypackages(ready_b1["session_token"], "dev-b1", [b1_kp])
+            await self._publish_keypackages(ready_b2["session_token"], "dev-b2", [b2_kp])
+
+            fetched = await self._fetch_keypackages(ready_a1["session_token"], ready_b1["user_id"], 1)
+            self.assertEqual(len(fetched), 1)
+
+            init_output = await self._run_harness(
+                env,
+                "dm-init",
+                "--state-dir",
+                a1_dir,
+                "--peer-keypackage",
+                fetched[0],
+                "--group-id",
+                "ZG0tZ3JvdXA=",
+                "--seed",
+                "4242",
+            )
+            init_payload = json.loads(init_output)
+
+            a1_sse = await self.client.get(
+                "/v1/sse",
+                params={"conv_id": conv_id, "from_seq": "1"},
+                headers={"Authorization": f"Bearer {ready_a1['session_token']}"},
+            )
+            self.assertEqual(a1_sse.status, 200)
+            b1_sse = await self.client.get(
+                "/v1/sse",
+                params={"conv_id": conv_id, "from_seq": "1"},
+                headers={"Authorization": f"Bearer {ready_b1['session_token']}"},
+            )
+            self.assertEqual(b1_sse.status, 200)
+
+            expected_seq = 1
+            welcome_env = pack_dm_env(1, init_payload["welcome"])
+            welcome_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "phase2-welcome",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(welcome_env), "env": welcome_env},
+            }
+            welcome_resp = await self._post_inbox(ready_a1["session_token"], welcome_frame)
+            self.assertEqual(welcome_resp.status, 200)
+            welcome_ack = await welcome_resp.json()
+            self.assertEqual(welcome_ack["seq"], expected_seq)
+
+            _, welcome_evt_a1 = await read_sse_event(a1_sse)
+            _, welcome_evt_b1 = await read_sse_event(b1_sse)
+            self.assertEqual(welcome_evt_a1["body"]["seq"], expected_seq)
+            self.assertEqual(welcome_evt_b1["body"]["seq"], expected_seq)
+            self.assertEqual(welcome_evt_b1["body"]["msg_id"], msg_id_for_env(welcome_evt_b1["body"]["env"]))
+            _, welcome_payload = unpack_dm_env(welcome_evt_b1["body"]["env"])
+            await self._run_harness(env, "dm-join", "--state-dir", b1_dir, "--welcome", welcome_payload)
+
+            expected_seq += 1
+            commit_env = pack_dm_env(2, init_payload["commit"])
+            commit_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "phase2-commit",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(commit_env), "env": commit_env},
+            }
+            commit_resp = await self._post_inbox(ready_a1["session_token"], commit_frame)
+            self.assertEqual(commit_resp.status, 200)
+            commit_ack = await commit_resp.json()
+            self.assertEqual(commit_ack["seq"], expected_seq)
+
+            retry_resp = await self._post_inbox(ready_a1["session_token"], commit_frame)
+            self.assertEqual(retry_resp.status, 200)
+            retry_ack = await retry_resp.json()
+            self.assertEqual(retry_ack["seq"], expected_seq)
+
+            _, commit_evt_a1 = await read_sse_event(a1_sse)
+            _, commit_evt_b1 = await read_sse_event(b1_sse)
+            self.assertEqual(commit_evt_a1["body"]["seq"], expected_seq)
+            self.assertEqual(commit_evt_b1["body"]["seq"], expected_seq)
+            _, commit_payload_a1 = unpack_dm_env(commit_evt_a1["body"]["env"])
+            _, commit_payload_b1 = unpack_dm_env(commit_evt_b1["body"]["env"])
+            await self._run_harness(env, "dm-commit-apply", "--state-dir", a1_dir, "--commit", commit_payload_a1)
+            await self._run_harness(env, "dm-commit-apply", "--state-dir", b1_dir, "--commit", commit_payload_b1)
+
+            def _clone_state(src: str, dest: str):
+                if os.path.exists(dest):
+                    shutil.rmtree(dest)
+                shutil.copytree(src, dest)
+
+            _clone_state(a1_dir, a2_dir)
+            _clone_state(b1_dir, b2_dir)
+
+            expected_seq += 1
+            app_plaintext = "phase2-hello"
+            app_cipher = await self._run_harness(
+                env, "dm-encrypt", "--state-dir", a1_dir, "--plaintext", app_plaintext
+            )
+            app_env = pack_dm_env(3, app_cipher)
+            app_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "phase2-app-1",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(app_env), "env": app_env},
+            }
+            app_resp = await self._post_inbox(ready_a1["session_token"], app_frame)
+            self.assertEqual(app_resp.status, 200)
+            app_ack = await app_resp.json()
+            self.assertEqual(app_ack["seq"], expected_seq)
+
+            retry_app_resp = await self._post_inbox(ready_a1["session_token"], app_frame)
+            self.assertEqual(retry_app_resp.status, 200)
+            retry_app_ack = await retry_app_resp.json()
+            self.assertEqual(retry_app_ack["seq"], expected_seq)
+
+            _, app_evt_a1 = await read_sse_event(a1_sse)
+            _, app_evt_b1 = await read_sse_event(b1_sse)
+            self.assertEqual(app_evt_a1["body"]["seq"], expected_seq)
+            self.assertEqual(app_evt_b1["body"]["seq"], expected_seq)
+            self.assertEqual(app_evt_b1["body"]["msg_id"], msg_id_for_env(app_evt_b1["body"]["env"]))
+            _, app_payload_b1 = unpack_dm_env(app_evt_b1["body"]["env"])
+            decrypted_b1 = await self._run_harness(
+                env, "dm-decrypt", "--state-dir", b1_dir, "--ciphertext", app_payload_b1
+            )
+            self.assertEqual(decrypted_b1, app_plaintext)
+            decrypted_a2 = await self._run_harness(
+                env, "dm-decrypt", "--state-dir", a2_dir, "--ciphertext", app_payload_b1
+            )
+            decrypted_b2 = await self._run_harness(
+                env, "dm-decrypt", "--state-dir", b2_dir, "--ciphertext", app_payload_b1
+            )
+            self.assertEqual(decrypted_a2, app_plaintext)
+            self.assertEqual(decrypted_b2, app_plaintext)
+
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(read_sse_event(b1_sse), timeout=0.2)
+
+            ack_resp = await self._post_inbox(
+                ready_a1["session_token"], {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": expected_seq}}
+            )
+            self.assertEqual(ack_resp.status, 200)
+            await ack_resp.json()
+
+            resumed = await self._resume_session_http(resume_token=ready_a1["resume_token"])
+            cursors = {cursor["conv_id"]: cursor["next_seq"] for cursor in resumed.get("cursors", [])}
+            self.assertEqual(cursors.get(conv_id), expected_seq + 1)
+            resume_token = resumed["resume_token"]
+
+            expected_seq += 1
+            follow_plaintext = "phase2-follow"
+            follow_cipher = await self._run_harness(
+                env, "dm-encrypt", "--state-dir", b1_dir, "--plaintext", follow_plaintext
+            )
+            follow_env = pack_dm_env(3, follow_cipher)
+            follow_frame = {
+                "v": 1,
+                "t": "conv.send",
+                "id": "phase2-app-2",
+                "body": {"conv_id": conv_id, "msg_id": msg_id_for_env(follow_env), "env": follow_env},
+            }
+            follow_resp = await self._post_inbox(ready_b1["session_token"], follow_frame)
+            self.assertEqual(follow_resp.status, 200)
+            follow_ack = await follow_resp.json()
+            self.assertEqual(follow_ack["seq"], expected_seq)
+
+            _, follow_evt_a1 = await read_sse_event(a1_sse)
+            _, follow_evt_b1 = await read_sse_event(b1_sse)
+            self.assertEqual(follow_evt_a1["body"]["seq"], expected_seq)
+            self.assertEqual(follow_evt_b1["body"]["seq"], expected_seq)
+            _, follow_payload_a1 = unpack_dm_env(follow_evt_a1["body"]["env"])
+            decrypted_a1 = await self._run_harness(
+                env, "dm-decrypt", "--state-dir", a1_dir, "--ciphertext", follow_payload_a1
+            )
+            self.assertEqual(decrypted_a1, follow_plaintext)
+
+            ack_resp2 = await self._post_inbox(
+                ready_a1["session_token"], {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": expected_seq}}
+            )
+            self.assertEqual(ack_resp2.status, 200)
+            await ack_resp2.json()
+
+            resumed_again = await self._resume_session_http(resume_token=resume_token)
+            cursors_again = {cursor["conv_id"]: cursor["next_seq"] for cursor in resumed_again.get("cursors", [])}
+            self.assertGreaterEqual(cursors_again.get(conv_id, 0), expected_seq + 1)
+
+            replay_sse = await self.client.get(
+                "/v1/sse",
+                params={"conv_id": conv_id, "from_seq": str(expected_seq)},
+                headers={"Authorization": f"Bearer {ready_a1['session_token']}"},
+            )
+            self.assertEqual(replay_sse.status, 200)
+            _, replay_event = await read_sse_event(replay_sse)
+            self.assertEqual(replay_event["body"]["seq"], expected_seq)
+            await replay_sse.release()
+
+            shutil.rmtree(b2_dir)
+            os.makedirs(b2_dir, exist_ok=True)
+            rc, _, _ = await self._run_harness_raw(
+                env, "dm-decrypt", "--state-dir", b2_dir, "--ciphertext", follow_payload_a1
+            )
+            self.assertIsNotNone(rc)
+            self.assertNotEqual(rc, 0)
+            await self._run_harness(env, "dm-keypackage", "--state-dir", b2_dir, "--name", "b1", "--seed", b1_seed)
+
+            replay_b2 = await self.client.get(
+                "/v1/sse",
+                params={"conv_id": conv_id, "from_seq": "1"},
+                headers={"Authorization": f"Bearer {ready_b2['session_token']}"},
+            )
+            self.assertEqual(replay_b2.status, 200)
+
+            replay_events: Dict[int, dict] = {}
+            expected_events = expected_seq
+            while len(replay_events) < expected_events:
+                _, replay_event = await read_sse_event(replay_b2)
+                replay_events[replay_event["body"]["seq"]] = replay_event
+
+            expected_app_plaintexts = {expected_seq - 1: app_plaintext, expected_seq: follow_plaintext}
+            for seq in range(1, expected_seq + 1):
+                event = replay_events[seq]
+                kind, payload = unpack_dm_env(event["body"]["env"])
+                if kind == 1:
+                    await self._run_harness(env, "dm-join", "--state-dir", b2_dir, "--welcome", payload)
+                elif kind == 2:
+                    await self._run_harness(env, "dm-commit-apply", "--state-dir", b2_dir, "--commit", payload)
+                else:
+                    plaintext = await self._run_harness(
+                        env, "dm-decrypt", "--state-dir", b2_dir, "--ciphertext", payload
+                    )
+                    self.assertEqual(plaintext, expected_app_plaintexts[seq])
+
+            await a1_sse.release()
+            await b1_sse.release()
+            await replay_b2.release()
 
     async def test_room_bootstrap_add_and_app_roundtrip_over_ds(self):
         env: Dict[str, str] = dict(self.harness_env)
