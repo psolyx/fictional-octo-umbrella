@@ -1,11 +1,10 @@
 import asyncio
-import http.server
 import json
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
-import threading
 import time
 import unittest
 import urllib.request
@@ -22,6 +21,9 @@ TOOLS_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_PATH = WEB_DIR / "vendor" / "mls_harness.wasm"
 WASM_EXEC = WEB_DIR / "vendor" / "wasm_exec.js"
 VECTORS_JSON = VECTORS_DIR / "room_seeded_bootstrap_v1.json"
+HELPERS_DIR = Path(__file__).resolve().parent / "helpers"
+sys.path.insert(0, str(HELPERS_DIR))
+from smoke_server import SmokeServer  # noqa: E402
 
 CSP_VALUE = (
     "default-src 'self'; "
@@ -60,6 +62,11 @@ def _format_cdp_logs(lines: Deque[str]) -> str:
     if not lines:
         return "cdp logs: <none captured>"
     return "cdp logs (last lines):\n" + "\n".join(lines)
+
+def _format_server_logs(entries: list[str]) -> str:
+    if not entries:
+        return "server logs: <none captured>"
+    return "server logs:\n" + "\n".join(entries)
 
 
 def _terminate_process(proc: subprocess.Popen[str], *, label: str) -> None:
@@ -337,20 +344,101 @@ def _prepare_smoke_assets(temp_root: Path) -> tuple[Path, Path]:
 window.__SMOKE_DONE__ = false;
 window.__SMOKE_RESULT__ = { ok: false, error: 'not started' };
 
-window.addEventListener('error', (event) => {
-  if (!window.__SMOKE_DONE__) {
-    window.__SMOKE_RESULT__ = { ok: false, error: `unhandled error: ${event.message}` };
-    window.__SMOKE_DONE__ = true;
+const post_log = async (entry) => {
+  try {
+    await fetch('/__log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry })
+    });
+  } catch (error) {
+    if (window.__SMOKE_DONE__ === false) {
+      // swallow to keep the harness deterministic
+    }
   }
-});
+};
+
+const format_args = (args) =>
+  args
+    .map((item) => {
+      if (item instanceof Error) {
+        return item.stack || item.message || String(item);
+      }
+      if (typeof item === 'string') {
+        return item;
+      }
+      try {
+        return JSON.stringify(item);
+      } catch (error) {
+        return String(item);
+      }
+    })
+    .join(' ');
+
+const hook_console = () => {
+  const original = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error
+  };
+  ['log', 'info', 'warn', 'error'].forEach((level) => {
+    console[level] = (...args) => {
+      original[level](...args);
+      post_log(`[console.${level}] ${format_args(args)}`);
+    };
+  });
+};
+
+hook_console();
+
+const set_done = (ok, error_text) => {
+  if (window.__SMOKE_DONE__ === true) {
+    return;
+  }
+  clearTimeout(window.__SMOKE_WATCHDOG__);
+  if (ok) {
+    window.__SMOKE_RESULT__ = { ok: true };
+    post_log('[smoke] completed ok');
+  } else {
+    window.__SMOKE_RESULT__ = { ok: false, error: error_text };
+    post_log(`[smoke] failed: ${error_text}`);
+  }
+  window.__SMOKE_DONE__ = true;
+};
+
+window.addEventListener(
+  'error',
+  (event) => {
+    let details = event && event.message ? event.message : 'unknown error';
+    const target = event && event.target ? event.target : null;
+    if (target && (target.src || target.href)) {
+      const url = target.src || target.href;
+      const tag = target.tagName || 'resource';
+      details = `resource load failed (${tag}): ${url}`;
+    }
+    post_log(`[error] ${details}`);
+    if (!window.__SMOKE_DONE__) {
+      set_done(false, `unhandled error: ${details}`);
+    }
+  },
+  true
+);
 
 window.addEventListener('unhandledrejection', (event) => {
   const reason = event && event.reason ? event.reason : 'unknown';
+  const message = reason && reason.message ? reason.message : String(reason);
+  post_log(`[unhandledrejection] ${message}`);
   if (!window.__SMOKE_DONE__) {
-    window.__SMOKE_RESULT__ = { ok: false, error: `unhandled rejection: ${reason}` };
-    window.__SMOKE_DONE__ = true;
+    set_done(false, `unhandled rejection: ${message}`);
   }
 });
+
+window.__SMOKE_WATCHDOG__ = setTimeout(() => {
+  if (!window.__SMOKE_DONE__) {
+    set_done(false, 'watchdog timeout after 15000ms');
+  }
+}, 15000);
 
 const bytes_to_base64 = (bytes) => {
   let output = '';
@@ -367,15 +455,6 @@ const require_ok = (result, label) => {
     throw new Error(`${label} failed: ${error_text}`);
   }
   return result;
-};
-
-const set_done = (ok, error_text) => {
-  if (ok) {
-    window.__SMOKE_RESULT__ = { ok: true };
-  } else {
-    window.__SMOKE_RESULT__ = { ok: false, error: error_text };
-  }
-  window.__SMOKE_DONE__ = true;
 };
 
 const run = async () => {
@@ -407,7 +486,7 @@ const run = async () => {
   const outbound = require_ok(await dm_encrypt(alice_commit.participant_b64, 'hello bob'), 'encrypt a->b');
   const inbound = require_ok(await dm_decrypt(bob_commit.participant_b64, outbound.ciphertext_b64), 'decrypt a->b');
   if (inbound.plaintext !== 'hello bob') {
-    throw new Error(`unexpected a->b plaintext: ${inbound.plaintext}`);
+    throw new Error('unexpected a->b plaintext');
   }
 
   const outbound2 = require_ok(await dm_encrypt(bob_commit.participant_b64, 'hello alice'), 'encrypt b->a');
@@ -416,7 +495,7 @@ const run = async () => {
     'decrypt b->a'
   );
   if (inbound2.plaintext !== 'hello alice') {
-    throw new Error(`unexpected b->a plaintext: ${inbound2.plaintext}`);
+    throw new Error('unexpected b->a plaintext');
   }
 };
 
@@ -448,24 +527,6 @@ run().then(
     return html_file, module_file
 
 
-def _start_csp_server(root: Path) -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
-    class csp_handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(root), **kwargs)
-
-        def end_headers(self) -> None:
-            self.send_header("Content-Security-Policy", CSP_VALUE)
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Cache-Control", "no-store")
-            super().end_headers()
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), csp_handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
 class BrowserRuntimeSmokeTest(unittest.TestCase):
     def test_browser_runtime_smoke(self) -> None:
         chromium_bin = _find_chromium()
@@ -477,15 +538,15 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
             raise unittest.SkipTest("Go toolchain not available for WASM build")
 
         chromium_proc: Optional[subprocess.Popen[str]] = None
-        server: Optional[http.server.ThreadingHTTPServer] = None
-        server_thread: Optional[threading.Thread] = None
+        server: Optional[SmokeServer] = None
         try:
             _ensure_wasm_assets()
             with tempfile.TemporaryDirectory(prefix="phase5-browser-assets-") as temp_dir:
                 temp_root = Path(temp_dir)
                 _prepare_smoke_assets(temp_root)
-                server, server_thread = _start_csp_server(temp_root)
-                ready_url = f"http://127.0.0.1:{server.server_address[1]}"
+                server = SmokeServer(temp_root, csp_value=CSP_VALUE)
+                server.start()
+                ready_url = f"http://127.0.0.1:{server.port}"
                 _wait_for_http(f"{ready_url}/index.html", timeout_s=5.0)
 
                 cdp_port = _find_free_port()
@@ -523,16 +584,26 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                         ) from exc
 
                     page_url = f"{ready_url}/index.html"
-                    result, logs = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=180.0))
+                    server_logs: list[str] = []
+                    try:
+                        result, logs = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=25.0))
+                    except AssertionError as exc:
+                        if server is not None:
+                            server_logs = server.snapshot_logs()
+                        raise AssertionError(
+                            f"{exc}\n{_format_server_logs(server_logs)}"
+                        ) from exc
+                    if server is not None:
+                        server_logs = server.snapshot_logs()
                     if not result.get("ok"):
                         raise AssertionError(
-                            f"Browser runtime smoke failed: {result}\n{_format_cdp_logs(logs)}"
+                            "Browser runtime smoke failed.\n"
+                            f"result: {result}\n"
+                            f"{_format_server_logs(server_logs)}\n"
+                            f"{_format_cdp_logs(logs)}"
                         )
         finally:
             if chromium_proc is not None:
                 _terminate_process(chromium_proc, label="chromium")
             if server is not None:
                 server.shutdown()
-                server.server_close()
-            if server_thread is not None:
-                server_thread.join(timeout=2.0)
