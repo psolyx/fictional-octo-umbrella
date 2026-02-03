@@ -1,9 +1,9 @@
 import asyncio
+import http.server
 import json
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -17,9 +17,22 @@ from aiohttp import ClientSession, WSMsgType
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 WEB_DIR = ROOT_DIR / "clients" / "web"
-DEV_SERVER = WEB_DIR / "tools" / "csp_dev_server.py"
+VECTORS_DIR = WEB_DIR / "vectors"
+TOOLS_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_PATH = WEB_DIR / "vendor" / "mls_harness.wasm"
 WASM_EXEC = WEB_DIR / "vendor" / "wasm_exec.js"
+VECTORS_JSON = VECTORS_DIR / "room_seeded_bootstrap_v1.json"
+
+CSP_VALUE = (
+    "default-src 'self'; "
+    "script-src 'self' 'wasm-unsafe-eval'; "
+    "connect-src 'self' ws: wss:; "
+    "img-src 'self'; "
+    "style-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'none'"
+)
 
 
 def _find_free_port() -> int:
@@ -43,34 +56,15 @@ def _find_chromium() -> Optional[str]:
     return None
 
 
-def _format_output(lines: Deque[str]) -> str:
-    if not lines:
-        return "stdout/stderr: <no output captured>"
-    return "stdout/stderr (last lines):\n" + "\n".join(lines)
-
-
 def _format_cdp_logs(lines: Deque[str]) -> str:
     if not lines:
         return "cdp logs: <none captured>"
     return "cdp logs (last lines):\n" + "\n".join(lines)
 
 
-def _start_output_reader(
-    stream,
-    *,
-    output_lines: Deque[str],
-    label: str,
-) -> threading.Thread:
-    def _reader() -> None:
-        for line in stream:
-            output_lines.append(f"[{label}] {line.rstrip()}")
-
-    thread = threading.Thread(target=_reader, daemon=True)
-    thread.start()
-    return thread
-
-
 def _terminate_process(proc: subprocess.Popen[str], *, label: str) -> None:
+    if proc.poll() is not None:
+        return
     proc.terminate()
     try:
         proc.wait(timeout=5.0)
@@ -82,21 +76,10 @@ def _terminate_process(proc: subprocess.Popen[str], *, label: str) -> None:
             raise AssertionError(f"{label} failed to terminate") from None
 
 
-def _wait_for_http(
-    url: str,
-    timeout_s: float,
-    *,
-    process: subprocess.Popen[str],
-    output_lines: Deque[str],
-) -> None:
+def _wait_for_http(url: str, timeout_s: float) -> None:
     deadline = time.time() + timeout_s
     last_error: Optional[Exception] = None
     while time.time() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(
-                "dev server exited before becoming ready.\n"
-                f"{_format_output(output_lines)}"
-            )
         try:
             with urllib.request.urlopen(url, timeout=0.5) as resp:
                 if resp.status == 200:
@@ -106,41 +89,7 @@ def _wait_for_http(
         time.sleep(0.1)
     raise AssertionError(
         "dev server did not become ready.\n"
-        f"last_error: {last_error}\n"
-        f"{_format_output(output_lines)}"
-    )
-
-
-def _wait_for_ready_file(
-    ready_file: Path,
-    timeout_s: float,
-    *,
-    process: subprocess.Popen[str],
-    output_lines: Deque[str],
-) -> dict:
-    deadline = time.time() + timeout_s
-    last_error: Optional[Exception] = None
-    while time.time() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(
-                "dev server exited before becoming ready.\n"
-                f"{_format_output(output_lines)}"
-            )
-        if ready_file.exists():
-            try:
-                payload = json.loads(ready_file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                last_error = exc
-            else:
-                url = payload.get("url")
-                if isinstance(url, str) and url:
-                    return payload
-                last_error = ValueError(f"invalid ready payload: {payload}")
-        time.sleep(0.1)
-    raise AssertionError(
-        "Timed out waiting for dev server readiness file.\n"
-        f"last_error: {last_error}\n"
-        f"{_format_output(output_lines)}"
+        f"last_error: {last_error}"
     )
 
 
@@ -271,7 +220,7 @@ async def _cdp_eval(ws, expression: str, *, msg_id: int, deadline: float, logs: 
     return result.get("value")
 
 
-async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
+async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> tuple[dict, Deque[str]]:
     async with ClientSession() as session:
         async with session.ws_connect(ws_url) as ws:
             cdp_logs: Deque[str] = deque(maxlen=50)
@@ -345,50 +294,37 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> dict:
                     )
                     if not isinstance(result, dict):
                         raise AssertionError(f"Unexpected smoke result: {result}")
-                    return result
+                    return result, cdp_logs
                 await asyncio.sleep(0.1)
 
 
-class BrowserRuntimeSmokeTest(unittest.TestCase):
-    def test_browser_runtime_smoke(self) -> None:
-        chromium_bin = _find_chromium()
-        if not chromium_bin:
-            raise unittest.SkipTest("Chromium not available in PATH")
-        if not WASM_EXEC.exists():
-            raise unittest.SkipTest("wasm_exec.js missing from clients/web/vendor")
-        if not WASM_PATH.exists() and not shutil.which("go"):
-            raise unittest.SkipTest("Go toolchain not available for WASM build")
+def _ensure_wasm_assets() -> None:
+    if WASM_PATH.exists() and WASM_EXEC.exists():
+        return
+    if not shutil.which("go"):
+        raise unittest.SkipTest("Go toolchain not available for WASM build")
+    build_script = TOOLS_DIR / "build_wasm.sh"
+    subprocess.run(["bash", str(build_script)], cwd=str(ROOT_DIR), check=True)
+    if not WASM_PATH.exists():
+        raise AssertionError("WASM build completed but mls_harness.wasm is missing")
+    if not WASM_EXEC.exists():
+        raise AssertionError("WASM build completed but wasm_exec.js is missing")
 
-        html_file = None
-        module_file = None
-        ready_dir: Optional[tempfile.TemporaryDirectory[str]] = None
-        ready_file: Optional[Path] = None
-        server_proc: Optional[subprocess.Popen[str]] = None
-        chromium_proc: Optional[subprocess.Popen[str]] = None
-        output_lines: Deque[str] = deque(maxlen=120)
-        stdout_thread: Optional[threading.Thread] = None
-        stderr_thread: Optional[threading.Thread] = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                suffix=".html",
-                prefix="phase5_browser_runtime_smoke_",
-                dir=WEB_DIR,
-                delete=False,
-            ) as temp_html:
-                html_file = Path(temp_html.name)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                suffix=".js",
-                prefix="phase5_browser_runtime_smoke_",
-                dir=WEB_DIR,
-                delete=False,
-            ) as temp_module:
-                module_file = Path(temp_module.name)
-                temp_module.write(
-                    """import {
+
+def _prepare_smoke_assets(temp_root: Path) -> tuple[Path, Path]:
+    vendor_dir = temp_root / "vendor"
+    vectors_dir = temp_root / "vectors"
+    vendor_dir.mkdir(parents=True, exist_ok=True)
+    vectors_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy(WASM_EXEC, vendor_dir / "wasm_exec.js")
+    shutil.copy(WASM_PATH, vendor_dir / "mls_harness.wasm")
+    shutil.copy(WEB_DIR / "mls_vectors_loader.js", temp_root / "mls_vectors_loader.js")
+    shutil.copy(VECTORS_JSON, vectors_dir / VECTORS_JSON.name)
+
+    module_file = temp_root / "phase5_browser_runtime_smoke.js"
+    module_file.write_text(
+        """import {
   verify_vectors_from_url,
   dm_create_participant,
   dm_init,
@@ -488,128 +424,115 @@ run().then(
   () => set_done(true, ''),
   (error) => set_done(false, error && error.message ? error.message : String(error))
 );
-"""
-                )
-            if html_file is None or module_file is None:
-                raise AssertionError("failed to create smoke test assets")
-            html_file.write_text(
-                f"""<!doctype html>
-<html lang="en">
+""",
+        encoding="utf-8",
+    )
+
+    html_file = temp_root / "index.html"
+    html_file.write_text(
+        f"""<!doctype html>
+<html lang=\"en\">
   <head>
-    <meta charset="utf-8" />
+    <meta charset=\"utf-8\" />
+    <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP_VALUE}\" />
     <title>Phase5 Browser Runtime Smoke</title>
   </head>
   <body>
-    <script src="vendor/wasm_exec.js"></script>
-    <script type="module" src="{module_file.name}"></script>
+    <script src=\"vendor/wasm_exec.js\"></script>
+    <script type=\"module\" src=\"{module_file.name}\"></script>
   </body>
 </html>
 """,
-                encoding="utf-8",
-            )
+        encoding="utf-8",
+    )
+    return html_file, module_file
 
-            ready_dir = tempfile.TemporaryDirectory(prefix="csp-dev-ready-")
-            ready_file = Path(ready_dir.name) / "ready.json"
 
-            server_proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(DEV_SERVER),
-                    "--serve",
-                    "--build-wasm-if-missing",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "0",
-                    "--ready-file",
-                    str(ready_file),
-                ],
-                cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if server_proc.stdout is None or server_proc.stderr is None:
-                raise AssertionError("dev server stdout/stderr unavailable")
-            stdout_thread = _start_output_reader(
-                server_proc.stdout, output_lines=output_lines, label="stdout"
-            )
-            stderr_thread = _start_output_reader(
-                server_proc.stderr, output_lines=output_lines, label="stderr"
-            )
-            if ready_file is None:
-                raise AssertionError("ready file path missing")
-            wasm_missing = not WASM_PATH.exists()
-            ready_timeout_s = 120.0 if wasm_missing else 60.0
-            ready_payload = _wait_for_ready_file(
-                ready_file,
-                timeout_s=ready_timeout_s,
-                process=server_proc,
-                output_lines=output_lines,
-            )
-            ready_url_value = ready_payload.get("url")
-            if not isinstance(ready_url_value, str) or not ready_url_value:
-                raise AssertionError(f"dev server ready payload invalid: {ready_payload}")
-            ready_url = ready_url_value.rstrip("/")
-            _wait_for_http(
-                f"{ready_url}/index.html",
-                timeout_s=20.0,
-                process=server_proc,
-                output_lines=output_lines,
-            )
+def _start_csp_server(root: Path) -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
+    class csp_handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(root), **kwargs)
 
-            cdp_port = _find_free_port()
-            with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
-                chromium_proc = subprocess.Popen(
-                    [
-                        chromium_bin,
-                        "--headless=new",
-                        "--disable-gpu",
-                        "--no-sandbox",
-                        "--disable-background-networking",
-                        "--disable-default-apps",
-                        "--disable-extensions",
-                        "--disable-sync",
-                        "--metrics-recording-only",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--mute-audio",
-                        "--disable-popup-blocking",
-                        "--disable-dev-shm-usage",
-                        "--remote-debugging-address=127.0.0.1",
-                        f"--remote-debugging-port={cdp_port}",
-                        f"--user-data-dir={profile_dir}",
-                        "about:blank",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                )
-                try:
-                    cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
-                except Exception as exc:  # noqa: BLE001 - skip on CDP failure
-                    raise unittest.SkipTest(f"chromium remote debugging unavailable: {exc}") from exc
+        def end_headers(self) -> None:
+            self.send_header("Content-Security-Policy", CSP_VALUE)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
 
-                page_url = f"{ready_url}/{html_file.name}"
-                result = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=180.0))
-                if not result.get("ok"):
-                    raise AssertionError(f"Browser runtime smoke failed: {result}")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), csp_handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+class BrowserRuntimeSmokeTest(unittest.TestCase):
+    def test_browser_runtime_smoke(self) -> None:
+        chromium_bin = _find_chromium()
+        if not chromium_bin:
+            raise unittest.SkipTest("Chromium not available in PATH")
+        if not WASM_EXEC.exists():
+            raise unittest.SkipTest("wasm_exec.js missing from clients/web/vendor")
+        if not WASM_PATH.exists() and not shutil.which("go"):
+            raise unittest.SkipTest("Go toolchain not available for WASM build")
+
+        chromium_proc: Optional[subprocess.Popen[str]] = None
+        server: Optional[http.server.ThreadingHTTPServer] = None
+        server_thread: Optional[threading.Thread] = None
+        try:
+            _ensure_wasm_assets()
+            with tempfile.TemporaryDirectory(prefix="phase5-browser-assets-") as temp_dir:
+                temp_root = Path(temp_dir)
+                _prepare_smoke_assets(temp_root)
+                server, server_thread = _start_csp_server(temp_root)
+                ready_url = f"http://127.0.0.1:{server.server_address[1]}"
+                _wait_for_http(f"{ready_url}/index.html", timeout_s=5.0)
+
+                cdp_port = _find_free_port()
+                with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
+                    chromium_proc = subprocess.Popen(
+                        [
+                            chromium_bin,
+                            "--headless=new",
+                            "--disable-gpu",
+                            "--no-sandbox",
+                            "--disable-background-networking",
+                            "--disable-default-apps",
+                            "--disable-extensions",
+                            "--disable-sync",
+                            "--metrics-recording-only",
+                            "--no-first-run",
+                            "--no-default-browser-check",
+                            "--mute-audio",
+                            "--disable-popup-blocking",
+                            "--disable-dev-shm-usage",
+                            "--remote-debugging-address=127.0.0.1",
+                            f"--remote-debugging-port={cdp_port}",
+                            f"--user-data-dir={profile_dir}",
+                            "about:blank",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    try:
+                        cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
+                    except Exception as exc:  # noqa: BLE001 - skip on CDP failure
+                        raise unittest.SkipTest(
+                            f"chromium remote debugging unavailable: {exc}"
+                        ) from exc
+
+                    page_url = f"{ready_url}/index.html"
+                    result, logs = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=180.0))
+                    if not result.get("ok"):
+                        raise AssertionError(
+                            f"Browser runtime smoke failed: {result}\n{_format_cdp_logs(logs)}"
+                        )
         finally:
             if chromium_proc is not None:
                 _terminate_process(chromium_proc, label="chromium")
-            if server_proc is not None:
-                _terminate_process(server_proc, label="dev server")
-                if server_proc.stdout is not None:
-                    server_proc.stdout.close()
-                if server_proc.stderr is not None:
-                    server_proc.stderr.close()
-            if stdout_thread is not None:
-                stdout_thread.join(timeout=1.0)
-            if stderr_thread is not None:
-                stderr_thread.join(timeout=1.0)
-            if ready_dir is not None:
-                ready_dir.cleanup()
-            if html_file is not None and html_file.exists():
-                html_file.unlink()
-            if module_file is not None and module_file.exists():
-                module_file.unlink()
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=2.0)
