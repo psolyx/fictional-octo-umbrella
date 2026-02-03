@@ -96,12 +96,17 @@ def _terminate_process(proc: Optional[subprocess.Popen[str]], label: str, timeou
         return
     if proc.poll() is not None:
         return
-    proc.terminate()
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
     try:
         proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=timeout_s)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"Timed out waiting for {label} (pid={proc.pid}) to exit") from exc
 
 
 def _format_cdp_state(ws_url: str) -> str:
