@@ -91,6 +91,37 @@ def _wait_for_cdp_url(port: int, timeout_s: float = 5.0) -> str:
     raise AssertionError(f"Timed out waiting for Chromium DevTools URL: {last_error}")
 
 
+def _terminate_process(proc: Optional[subprocess.Popen[str]], label: str, timeout_s: float = 5.0) -> None:
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"Timed out waiting for {label} (pid={proc.pid}) to exit") from exc
+
+
+def _format_cdp_state(ws_url: str) -> str:
+    parsed = urllib.parse.urlparse(ws_url)
+    if not parsed.hostname or not parsed.port:
+        return "unavailable"
+    url = f"http://{parsed.hostname}:{parsed.port}/json/version"
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        return f"error: {exc}"
+    return json.dumps(payload, sort_keys=True)
+
+
 async def _ws_receive_payload(ws, *, deadline: float) -> dict:
     loop = asyncio.get_running_loop()
     while True:
@@ -196,6 +227,7 @@ async def _ws_assert_no_conv_event(ws, *, conv_id: str, timeout_s: float) -> Non
 
 
 async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -> None:
+    console_lines: list[str] = []
     async with ClientSession() as session:
         async with session.ws_connect(ws_url) as ws:
             await ws.send_json({"id": 1, "method": "Runtime.enable"})
@@ -206,7 +238,12 @@ async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
-                    raise AssertionError("Timed out waiting for browser sentinel")
+                    cdp_state = await asyncio.to_thread(_format_cdp_state, ws_url)
+                    console_tail = console_lines[-5:]
+                    raise AssertionError(
+                        "Timed out waiting for browser sentinel; "
+                        f"cdp_ws_url={ws_url}; cdp_state={cdp_state}; console_tail={console_tail}"
+                    )
                 msg = await ws.receive(timeout=remaining)
                 if msg.type == WSMsgType.TEXT:
                     payload = json.loads(msg.data)
@@ -220,16 +257,22 @@ async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -
                 args = params.get("args")
                 if not isinstance(args, list):
                     continue
+                console_text = None
                 for arg in args:
                     if not isinstance(arg, dict):
                         continue
                     value = arg.get("value")
                     if not isinstance(value, str):
                         continue
+                    console_text = value
                     if value.startswith("PHASE5_BROWSER_SMOKE_PASS"):
                         return
                     if value.startswith("PHASE5_BROWSER_SMOKE_FAIL"):
                         raise AssertionError(value)
+                if console_text:
+                    console_lines.append(console_text)
+                    if len(console_lines) > 20:
+                        console_lines = console_lines[-20:]
 
 
 class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
@@ -936,10 +979,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                 static_server.server_close()
             if static_thread is not None:
                 static_thread.join(timeout=2.0)
-            if chromium_proc is not None:
-                chromium_proc.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    chromium_proc.wait(timeout=5.0)
+            _terminate_process(chromium_proc, "chromium")
 
 
 if __name__ == "__main__":
