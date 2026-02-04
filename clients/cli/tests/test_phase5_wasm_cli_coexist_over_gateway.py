@@ -1,10 +1,11 @@
 import hashlib
 import os
 import re
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from wasm_asset_cache import build_wasm_deterministic
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 WASM_MAIN = ROOT_DIR / "tools" / "mls_harness" / "cmd" / "mls-wasm" / "main.go"
@@ -88,20 +89,6 @@ def _assert_subset(label: str, found: set[str], allowed: set[str]) -> None:
     raise AssertionError("\n".join(lines))
 
 
-def _build_wasm(output_path: Path) -> None:
-    env = os.environ.copy()
-    env["GOOS"] = "js"
-    env["GOARCH"] = "wasm"
-    env["GOFLAGS"] = "-mod=vendor -trimpath -buildvcs=false"
-    env["GOTOOLCHAIN"] = "local"
-    subprocess.run(
-        ["go", "-C", str(WASM_MODULE_DIR), "build", "-o", str(output_path), "./cmd/mls-wasm"],
-        cwd=ROOT_DIR,
-        env=env,
-        check=True,
-    )
-
-
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -154,11 +141,30 @@ class Phase5WasmCliCoexistOverGatewayTests(unittest.TestCase):
             raise AssertionError("\n".join(lines))
 
     def test_wasm_build_is_offline_and_deterministic(self) -> None:
-        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+        with (
+            tempfile.TemporaryDirectory() as first_dir,
+            tempfile.TemporaryDirectory() as second_dir,
+            tempfile.TemporaryDirectory() as first_gocache,
+            tempfile.TemporaryDirectory() as first_gomodcache,
+            tempfile.TemporaryDirectory() as second_gocache,
+            tempfile.TemporaryDirectory() as second_gomodcache,
+        ):
             first_output = Path(first_dir) / "mls_harness.wasm"
             second_output = Path(second_dir) / "mls_harness.wasm"
-            _build_wasm(first_output)
-            _build_wasm(second_output)
+            build_wasm_deterministic(
+                tools_dir=WASM_MODULE_DIR,
+                output_path=first_output,
+                gocache_dir=Path(first_gocache),
+                gomodcache_dir=Path(first_gomodcache),
+                max_procs=1,
+            )
+            build_wasm_deterministic(
+                tools_dir=WASM_MODULE_DIR,
+                output_path=second_output,
+                gocache_dir=Path(second_gocache),
+                gomodcache_dir=Path(second_gomodcache),
+                max_procs=1,
+            )
 
             self.assertTrue(first_output.exists(), "first wasm output missing")
             self.assertTrue(second_output.exists(), "second wasm output missing")
