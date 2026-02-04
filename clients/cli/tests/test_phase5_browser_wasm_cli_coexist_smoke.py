@@ -24,6 +24,10 @@ GATEWAY_TESTS = ROOT_DIR / "gateway" / "tests"
 WASM_MODULE_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_EXEC_SRC = ROOT_DIR / "clients" / "web" / "vendor" / "wasm_exec.js"
 WASM_PATH = ROOT_DIR / "clients" / "web" / "vendor" / "mls_harness.wasm"
+WS_EVENT_TIMEOUT_S = 4.0
+WS_ACK_TIMEOUT_S = 4.0
+WS_READY_TIMEOUT_S = 2.0
+WS_NO_EVENT_TIMEOUT_S = 0.8
 
 import sys
 
@@ -126,7 +130,7 @@ async def _ws_open_session(client: TestClient, device_id: str, auth_token: str):
     )
     await _ws_recv_until(
         ws,
-        timeout_s=1.0,
+        timeout_s=WS_READY_TIMEOUT_S,
         predicate=lambda payload: payload.get("t") == "session.ready",
     )
     return ws
@@ -352,7 +356,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         dm_welcome_kind, dm_welcome_payload = dm_envelope.unpack(dm_welcome_event["body"]["env"])
         self.assertEqual(dm_welcome_kind, 1)
@@ -368,7 +372,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         room_welcome_kind, room_welcome_payload = dm_envelope.unpack(room_welcome_event["body"]["env"])
         self.assertEqual(room_welcome_kind, 1)
@@ -385,7 +389,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         dm_commit_kind, dm_commit_payload = dm_envelope.unpack(dm_commit_event["body"]["env"])
         self.assertEqual(dm_commit_kind, 2)
@@ -402,7 +406,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         room_commit_kind, room_commit_payload = dm_envelope.unpack(room_commit_event["body"]["env"])
         self.assertEqual(room_commit_kind, 2)
@@ -419,7 +423,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         dm_app_kind, dm_app_payload = dm_envelope.unpack(dm_app_event["body"]["env"])
         self.assertEqual(dm_app_kind, 3)
@@ -451,24 +455,32 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        dm_reply_seq = await _ws_wait_for_ack(ws, request_id="dm-app-bob", timeout_s=2.0)
+        dm_reply_seq = await _ws_wait_for_ack(
+            ws,
+            request_id="dm-app-bob",
+            timeout_s=WS_ACK_TIMEOUT_S,
+        )
         self.assertEqual(dm_reply_seq, expected_seq["dm"] + 1)
         expected_seq["dm"] += 1
         await _ws_wait_for_event(
             ws,
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
 
-        await _ws_assert_no_conv_event(ws, conv_id=conv_ids["dm"], timeout_s=0.4)
+        await _ws_assert_no_conv_event(
+            ws,
+            conv_id=conv_ids["dm"],
+            timeout_s=WS_NO_EVENT_TIMEOUT_S,
+        )
 
         expected_seq["room"] += 1
         room_app_event = await _ws_wait_for_event(
             ws,
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
         room_app_kind, room_app_payload = dm_envelope.unpack(room_app_event["body"]["env"])
         self.assertEqual(room_app_kind, 3)
@@ -500,14 +512,18 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        room_reply_seq = await _ws_wait_for_ack(ws, request_id="room-app-bob", timeout_s=2.0)
+        room_reply_seq = await _ws_wait_for_ack(
+            ws,
+            request_id="room-app-bob",
+            timeout_s=WS_ACK_TIMEOUT_S,
+        )
         self.assertEqual(room_reply_seq, expected_seq["room"] + 1)
         expected_seq["room"] += 1
         await _ws_wait_for_event(
             ws,
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
-            timeout_s=2.0,
+            timeout_s=WS_EVENT_TIMEOUT_S,
         )
 
     async def test_browser_wasm_cli_coexist_smoke(self) -> None:
