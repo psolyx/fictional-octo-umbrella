@@ -224,6 +224,54 @@ def _build_wasm_assets(build_script: Path, tools_dir: Path) -> None:
     subprocess.run(["bash", str(build_script)], cwd=str(tools_dir), check=True)
 
 
+def build_wasm_deterministic(
+    *,
+    tools_dir: Path,
+    output_path: Path,
+    gocache_dir: Path,
+    gomodcache_dir: Path,
+    max_procs: int = 1,
+) -> None:
+    if not shutil.which("go"):
+        raise unittest.SkipTest("Go toolchain not available for WASM build")
+    if max_procs < 1:
+        raise ValueError("max_procs must be >= 1")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    gocache_dir.mkdir(parents=True, exist_ok=True)
+    gomodcache_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "GOOS": "js",
+            "GOARCH": "wasm",
+            "GOFLAGS": "-mod=vendor -trimpath -buildvcs=false",
+            "GOTOOLCHAIN": "local",
+            "GOPROXY": "off",
+            "GOSUMDB": "off",
+            "GOCACHE": str(gocache_dir),
+            "GOMODCACHE": str(gomodcache_dir),
+        }
+    )
+    subprocess.run(
+        [
+            "go",
+            "-C",
+            str(tools_dir),
+            "build",
+            "-p",
+            str(max_procs),
+            "-o",
+            str(output_path),
+            "./cmd/mls-wasm",
+        ],
+        cwd=str(tools_dir),
+        env=env,
+        check=True,
+    )
+
+
 def ensure_wasm_assets(
     *,
     wasm_exec_path: Path,
