@@ -5,13 +5,10 @@ import functools
 import hashlib
 import http.server
 import json
-import os
 import shutil
-import socket
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 import urllib.parse
 import urllib.request
@@ -26,6 +23,7 @@ GATEWAY_SRC = ROOT_DIR / "gateway" / "src"
 GATEWAY_TESTS = ROOT_DIR / "gateway" / "tests"
 WASM_MODULE_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_EXEC_SRC = ROOT_DIR / "clients" / "web" / "vendor" / "wasm_exec.js"
+WASM_PATH = ROOT_DIR / "clients" / "web" / "vendor" / "mls_harness.wasm"
 
 import sys
 
@@ -33,38 +31,20 @@ if str(GATEWAY_SRC) not in sys.path:
     sys.path.insert(0, str(GATEWAY_SRC))
 if str(GATEWAY_TESTS) not in sys.path:
     sys.path.insert(0, str(GATEWAY_TESTS))
+HELPERS_DIR = Path(__file__).resolve().parent / "helpers"
+if str(HELPERS_DIR) not in sys.path:
+    sys.path.insert(0, str(HELPERS_DIR))
 
 from cli_app import dm_envelope
 from gateway.ws_transport import create_app
 from mls_harness_util import HARNESS_DIR, ensure_harness_binary, make_harness_env, run_harness
+from chromium_cdp import find_chromium, find_free_port, start_chromium_cdp, terminate_process_group
+from wasm_asset_cache import ensure_wasm_assets
 
 
 def _msg_id_for_env(env_b64: str) -> str:
     env_bytes = base64.b64decode(env_b64, validate=True)
     return hashlib.sha256(env_bytes).hexdigest()
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _build_wasm(output_path: Path) -> None:
-    go_bin = shutil.which("go")
-    if not go_bin:
-        raise unittest.SkipTest("Go toolchain not available")
-    env = os.environ.copy()
-    env["GOOS"] = "js"
-    env["GOARCH"] = "wasm"
-    env["GOFLAGS"] = "-mod=vendor -trimpath -buildvcs=false"
-    env["GOTOOLCHAIN"] = "local"
-    subprocess.run(
-        [go_bin, "-C", str(WASM_MODULE_DIR), "build", "-o", str(output_path), "./cmd/mls-wasm"],
-        cwd=ROOT_DIR,
-        env=env,
-        check=True,
-    )
 
 
 def _start_static_server(root: Path) -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
@@ -75,38 +55,15 @@ def _start_static_server(root: Path) -> tuple[http.server.ThreadingHTTPServer, t
     return server, thread
 
 
-def _wait_for_cdp_url(port: int, timeout_s: float = 5.0) -> str:
-    deadline = time.time() + timeout_s
-    last_error: Optional[Exception] = None
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1.0) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                ws_url = payload.get("webSocketDebuggerUrl")
-                if ws_url:
-                    return ws_url
-        except Exception as exc:  # noqa: BLE001 - error details not needed here
-            last_error = exc
-        time.sleep(0.1)
-    raise AssertionError(f"Timed out waiting for Chromium DevTools URL: {last_error}")
-
-
-def _terminate_process(proc: Optional[subprocess.Popen[str]], label: str, timeout_s: float = 5.0) -> None:
-    if proc is None:
-        return
-    if proc.poll() is not None:
-        return
-    with contextlib.suppress(ProcessLookupError):
-        proc.terminate()
-    try:
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        try:
-            proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            raise AssertionError(f"Timed out waiting for {label} (pid={proc.pid}) to exit") from exc
+def _format_cdp_tail(*, console_lines: list[str], exception_lines: list[str]) -> str:
+    chunks: list[str] = []
+    if console_lines:
+        chunks.append("console tail:\n" + "\n".join(console_lines))
+    if exception_lines:
+        chunks.append("exceptions tail:\n" + "\n".join(exception_lines))
+    if not chunks:
+        return "cdp logs: <none captured>"
+    return "cdp logs:\n" + "\n".join(chunks)
 
 
 def _format_cdp_state(ws_url: str) -> str:
@@ -228,6 +185,7 @@ async def _ws_assert_no_conv_event(ws, *, conv_id: str, timeout_s: float) -> Non
 
 async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -> None:
     console_lines: list[str] = []
+    exception_lines: list[str] = []
     async with ClientSession() as session:
         async with session.ws_connect(ws_url) as ws:
             await ws.send_json({"id": 1, "method": "Runtime.enable"})
@@ -239,40 +197,65 @@ async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     cdp_state = await asyncio.to_thread(_format_cdp_state, ws_url)
-                    console_tail = console_lines[-5:]
+                    console_tail = console_lines[-20:]
+                    exception_tail = exception_lines[-20:]
                     raise AssertionError(
                         "Timed out waiting for browser sentinel; "
-                        f"cdp_ws_url={ws_url}; cdp_state={cdp_state}; console_tail={console_tail}"
+                        f"cdp_ws_url={ws_url}; cdp_state={cdp_state}; "
+                        f"{_format_cdp_tail(console_lines=console_tail, exception_lines=exception_tail)}"
                     )
                 msg = await ws.receive(timeout=remaining)
                 if msg.type == WSMsgType.TEXT:
-                    payload = json.loads(msg.data)
+                    try:
+                        payload = json.loads(msg.data)
+                    except ValueError:
+                        continue
                 else:
                     continue
-                if payload.get("method") != "Runtime.consoleAPICalled":
-                    continue
-                params = payload.get("params")
-                if not isinstance(params, dict):
-                    continue
-                args = params.get("args")
-                if not isinstance(args, list):
-                    continue
-                console_text = None
-                for arg in args:
-                    if not isinstance(arg, dict):
+                method = payload.get("method")
+                if method == "Runtime.consoleAPICalled":
+                    params = payload.get("params")
+                    if not isinstance(params, dict):
                         continue
-                    value = arg.get("value")
-                    if not isinstance(value, str):
+                    args = params.get("args")
+                    if not isinstance(args, list):
                         continue
-                    console_text = value
-                    if value.startswith("PHASE5_BROWSER_SMOKE_PASS"):
-                        return
-                    if value.startswith("PHASE5_BROWSER_SMOKE_FAIL"):
-                        raise AssertionError(value)
-                if console_text:
-                    console_lines.append(console_text)
-                    if len(console_lines) > 20:
-                        console_lines = console_lines[-20:]
+                    console_text = None
+                    for arg in args:
+                        if not isinstance(arg, dict):
+                            continue
+                        value = arg.get("value")
+                        if not isinstance(value, str):
+                            continue
+                        console_text = value
+                        if value.startswith("PHASE5_BROWSER_SMOKE_PASS"):
+                            return
+                        if value.startswith("PHASE5_BROWSER_SMOKE_FAIL"):
+                            console_tail = console_lines[-20:]
+                            exception_tail = exception_lines[-20:]
+                            raise AssertionError(
+                                f"{value}\n"
+                                f"{_format_cdp_tail(console_lines=console_tail, exception_lines=exception_tail)}"
+                            )
+                    if console_text:
+                        console_lines.append(console_text)
+                        if len(console_lines) > 50:
+                            console_lines = console_lines[-50:]
+                elif method == "Runtime.exceptionThrown":
+                    params = payload.get("params")
+                    if not isinstance(params, dict):
+                        continue
+                    details = params.get("exceptionDetails", {})
+                    if not isinstance(details, dict):
+                        continue
+                    exception = details.get("exception", {})
+                    if isinstance(exception, dict):
+                        description = exception.get("description") or details.get("text") or "exception"
+                    else:
+                        description = details.get("text") or "exception"
+                    exception_lines.append(str(description))
+                    if len(exception_lines) > 50:
+                        exception_lines = exception_lines[-50:]
 
 
 class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
@@ -528,9 +511,9 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_browser_wasm_cli_coexist_smoke(self) -> None:
-        chromium_bin = shutil.which("chromium")
+        chromium_bin = find_chromium()
         if not chromium_bin:
-            raise unittest.SkipTest("chromium not available in PATH")
+            raise unittest.SkipTest("Chromium not available in PATH")
 
         conv_ids = {"dm": "conv_dm_browser", "room": "conv_room_browser"}
         group_ids = {
@@ -547,27 +530,34 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             await self._create_room(alice_ready["session_token"], conv_id)
             await self._invite_member(alice_ready["session_token"], conv_id, bob_ready["user_id"])
 
-        bob_ws = await _ws_open_session(self.client, "dev-bob", bob_auth)
-        for conv_id in conv_ids.values():
-            await _ws_subscribe(bob_ws, conv_id=conv_id, from_seq=1)
-
         chromium_proc: Optional[subprocess.Popen[str]] = None
         static_server: Optional[http.server.ThreadingHTTPServer] = None
         static_thread: Optional[threading.Thread] = None
+        bob_ws = None
 
         try:
             with (
                 tempfile.TemporaryDirectory(prefix="bob-dm-") as bob_dm_dir,
                 tempfile.TemporaryDirectory(prefix="bob-room-") as bob_room_dir,
-                tempfile.TemporaryDirectory(prefix="wasm-build-") as wasm_dir,
                 tempfile.TemporaryDirectory(prefix="browser-static-") as static_dir,
                 tempfile.TemporaryDirectory(prefix="chromium-user-") as chrome_profile,
             ):
                 bob_dm_dir = Path(bob_dm_dir)
                 bob_room_dir = Path(bob_room_dir)
-                wasm_dir = Path(wasm_dir)
                 static_dir = Path(static_dir)
                 chrome_profile = Path(chrome_profile)
+
+                cdp_port = find_free_port()
+                chromium_proc, cdp_ws_url = start_chromium_cdp(
+                    chromium_bin,
+                    cdp_port=cdp_port,
+                    profile_dir=str(chrome_profile),
+                    timeout_s=2.5,
+                )
+
+                bob_ws = await _ws_open_session(self.client, "dev-bob", bob_auth)
+                for conv_id in conv_ids.values():
+                    await _ws_subscribe(bob_ws, conv_id=conv_id, from_seq=1)
 
                 bob_dm_kp = await self._run_harness(
                     "dm-keypackage",
@@ -590,11 +580,16 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
 
                 await self._publish_keypackages(bob_ready["session_token"], "dev-bob", [bob_dm_kp, bob_room_kp])
 
-                wasm_output = wasm_dir / "mls_harness.wasm"
-                _build_wasm(wasm_output)
+                cache_dir = Path(tempfile.gettempdir()) / "phase5-wasm-cache"
+                ensure_wasm_assets(
+                    wasm_exec_path=WASM_EXEC_SRC,
+                    wasm_path=WASM_PATH,
+                    tools_dir=WASM_MODULE_DIR,
+                    cache_dir=cache_dir,
+                )
 
                 shutil.copy(WASM_EXEC_SRC, static_dir / "wasm_exec.js")
-                shutil.copy(wasm_output, static_dir / "mls_harness.wasm")
+                shutil.copy(WASM_PATH, static_dir / "mls_harness.wasm")
 
                 smoke_js = static_dir / "smoke.js"
                 smoke_js.write_text(
@@ -935,26 +930,6 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                 query = urllib.parse.urlencode({"payload": payload_b64})
                 page_url = f"http://127.0.0.1:{static_server.server_port}/index.html?{query}"
 
-                cdp_port = _find_free_port()
-                chromium_proc = subprocess.Popen(
-                    [
-                        chromium_bin,
-                        "--headless",
-                        "--disable-gpu",
-                        f"--remote-debugging-port={cdp_port}",
-                        f"--user-data-dir={chrome_profile}",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-
-                try:
-                    cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
-                except AssertionError as exc:
-                    raise unittest.SkipTest(f"chromium remote debugging unavailable: {exc}") from exc
-
                 bob_task = asyncio.create_task(
                     self._bob_flow(
                         ws=bob_ws,
@@ -973,13 +948,15 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                     raise
 
         finally:
-            await bob_ws.close()
+            if bob_ws is not None:
+                await bob_ws.close()
             if static_server is not None:
                 static_server.shutdown()
                 static_server.server_close()
             if static_thread is not None:
                 static_thread.join(timeout=2.0)
-            _terminate_process(chromium_proc, "chromium")
+            if chromium_proc is not None:
+                terminate_process_group(chromium_proc, label="chromium")
 
 
 if __name__ == "__main__":
