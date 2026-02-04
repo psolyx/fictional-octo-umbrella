@@ -29,6 +29,7 @@ from chromium_cdp import (  # noqa: E402
     terminate_process_group,
 )
 from smoke_server import SmokeServer  # noqa: E402
+from wasm_asset_cache import ensure_wasm_assets  # noqa: E402
 
 CSP_VALUE = (
     "default-src 'self'; "
@@ -264,19 +265,6 @@ async def _cdp_run(ws_url: str, page_url: str, timeout_s: float) -> tuple[dict, 
                 await asyncio.sleep(0.1)
 
 
-def _ensure_wasm_assets() -> None:
-    if WASM_PATH.exists() and WASM_EXEC.exists():
-        return
-    if not shutil.which("go"):
-        raise unittest.SkipTest("Go toolchain not available for WASM build")
-    build_script = TOOLS_DIR / "build_wasm.sh"
-    subprocess.run(["bash", str(build_script)], cwd=str(ROOT_DIR), check=True)
-    if not WASM_PATH.exists():
-        raise AssertionError("WASM build completed but mls_harness.wasm is missing")
-    if not WASM_EXEC.exists():
-        raise AssertionError("WASM build completed but wasm_exec.js is missing")
-
-
 def _prepare_smoke_assets(temp_root: Path) -> tuple[Path, Path]:
     vendor_dir = temp_root / "vendor"
     vectors_dir = temp_root / "vectors"
@@ -491,36 +479,41 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
         chromium_bin = find_chromium()
         if not chromium_bin:
             raise unittest.SkipTest("Chromium not available in PATH")
-        if not WASM_EXEC.exists():
-            raise unittest.SkipTest("wasm_exec.js missing from clients/web/vendor")
-        if not WASM_PATH.exists() and not shutil.which("go"):
-            raise unittest.SkipTest("Go toolchain not available for WASM build")
 
         chromium_proc: Optional[subprocess.Popen[str]] = None
         server: Optional[SmokeServer] = None
         try:
-            _ensure_wasm_assets()
-            with tempfile.TemporaryDirectory(prefix="phase5-browser-assets-") as temp_dir:
-                temp_root = Path(temp_dir)
-                _prepare_smoke_assets(temp_root)
-                server = SmokeServer(temp_root, csp_value=CSP_VALUE)
-                server.start()
-                ready_url = f"http://127.0.0.1:{server.port}"
-                _wait_for_http(f"{ready_url}/index.html", timeout_s=5.0)
+            cdp_port = find_free_port()
+            with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
+                chromium_proc, cdp_ws_url = start_chromium_cdp(
+                    chromium_bin,
+                    cdp_port=cdp_port,
+                    profile_dir=profile_dir,
+                    timeout_s=2.5,
+                )
 
-                cdp_port = find_free_port()
-                with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
-                    chromium_proc, cdp_ws_url = start_chromium_cdp(
-                        chromium_bin,
-                        cdp_port=cdp_port,
-                        profile_dir=profile_dir,
-                        timeout_s=2.5,
-                    )
+                cache_dir = Path(tempfile.gettempdir()) / "phase5-wasm-cache"
+                ensure_wasm_assets(
+                    wasm_exec_path=WASM_EXEC,
+                    wasm_path=WASM_PATH,
+                    tools_dir=TOOLS_DIR,
+                    cache_dir=cache_dir,
+                )
+
+                with tempfile.TemporaryDirectory(prefix="phase5-browser-assets-") as temp_dir:
+                    temp_root = Path(temp_dir)
+                    _prepare_smoke_assets(temp_root)
+                    server = SmokeServer(temp_root, csp_value=CSP_VALUE)
+                    server.start()
+                    ready_url = f"http://127.0.0.1:{server.port}"
+                    _wait_for_http(f"{ready_url}/index.html", timeout_s=5.0)
 
                     page_url = f"{ready_url}/index.html"
                     server_logs: list[str] = []
                     try:
-                        result, logs = asyncio.run(_cdp_run(cdp_ws_url, page_url, timeout_s=25.0))
+                        result, logs = asyncio.run(
+                            _cdp_run(cdp_ws_url, page_url, timeout_s=25.0)
+                        )
                     except AssertionError as exc:
                         if server is not None:
                             server_logs = server.snapshot_logs()
