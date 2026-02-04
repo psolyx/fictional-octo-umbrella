@@ -1,7 +1,6 @@
 import asyncio
 import json
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -23,6 +22,12 @@ WASM_EXEC = WEB_DIR / "vendor" / "wasm_exec.js"
 VECTORS_JSON = VECTORS_DIR / "room_seeded_bootstrap_v1.json"
 HELPERS_DIR = Path(__file__).resolve().parent / "helpers"
 sys.path.insert(0, str(HELPERS_DIR))
+from chromium_cdp import (  # noqa: E402
+    find_chromium,
+    find_free_port,
+    start_chromium_cdp,
+    terminate_process_group,
+)
 from smoke_server import SmokeServer  # noqa: E402
 
 CSP_VALUE = (
@@ -37,50 +42,16 @@ CSP_VALUE = (
 )
 
 
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _find_chromium() -> Optional[str]:
-    candidates = [
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "google-chrome-stable",
-        "chrome",
-    ]
-    for name in candidates:
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
-
-
 def _format_cdp_logs(lines: Deque[str]) -> str:
     if not lines:
         return "cdp logs: <none captured>"
     return "cdp logs (last lines):\n" + "\n".join(lines)
 
+
 def _format_server_logs(entries: list[str]) -> str:
     if not entries:
         return "server logs: <none captured>"
     return "server logs:\n" + "\n".join(entries)
-
-
-def _terminate_process(proc: subprocess.Popen[str], *, label: str) -> None:
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            raise AssertionError(f"{label} failed to terminate") from None
 
 
 def _wait_for_http(url: str, timeout_s: float) -> None:
@@ -98,22 +69,6 @@ def _wait_for_http(url: str, timeout_s: float) -> None:
         "dev server did not become ready.\n"
         f"last_error: {last_error}"
     )
-
-
-def _wait_for_cdp_url(port: int, timeout_s: float) -> str:
-    deadline = time.time() + timeout_s
-    last_error: Optional[Exception] = None
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                ws_url = payload.get("webSocketDebuggerUrl")
-                if ws_url:
-                    return ws_url
-        except Exception as exc:  # noqa: BLE001 - polling for CDP
-            last_error = exc
-        time.sleep(0.1)
-    raise AssertionError(f"Timed out waiting for Chromium DevTools URL: {last_error}")
 
 
 def _format_remote_object(obj: dict) -> str:
@@ -533,7 +488,7 @@ run().then(
 
 class BrowserRuntimeSmokeTest(unittest.TestCase):
     def test_browser_runtime_smoke(self) -> None:
-        chromium_bin = _find_chromium()
+        chromium_bin = find_chromium()
         if not chromium_bin:
             raise unittest.SkipTest("Chromium not available in PATH")
         if not WASM_EXEC.exists():
@@ -553,39 +508,14 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                 ready_url = f"http://127.0.0.1:{server.port}"
                 _wait_for_http(f"{ready_url}/index.html", timeout_s=5.0)
 
-                cdp_port = _find_free_port()
+                cdp_port = find_free_port()
                 with tempfile.TemporaryDirectory(prefix="chromium-profile-") as profile_dir:
-                    chromium_proc = subprocess.Popen(
-                        [
-                            chromium_bin,
-                            "--headless=new",
-                            "--disable-gpu",
-                            "--no-sandbox",
-                            "--disable-background-networking",
-                            "--disable-default-apps",
-                            "--disable-extensions",
-                            "--disable-sync",
-                            "--metrics-recording-only",
-                            "--no-first-run",
-                            "--no-default-browser-check",
-                            "--mute-audio",
-                            "--disable-popup-blocking",
-                            "--disable-dev-shm-usage",
-                            "--remote-debugging-address=127.0.0.1",
-                            f"--remote-debugging-port={cdp_port}",
-                            f"--user-data-dir={profile_dir}",
-                            "about:blank",
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        text=True,
+                    chromium_proc, cdp_ws_url = start_chromium_cdp(
+                        chromium_bin,
+                        cdp_port=cdp_port,
+                        profile_dir=profile_dir,
+                        timeout_s=2.5,
                     )
-                    try:
-                        cdp_ws_url = _wait_for_cdp_url(cdp_port, timeout_s=5.0)
-                    except Exception as exc:  # noqa: BLE001 - skip on CDP failure
-                        raise unittest.SkipTest(
-                            f"chromium remote debugging unavailable: {exc}"
-                        ) from exc
 
                     page_url = f"{ready_url}/index.html"
                     server_logs: list[str] = []
@@ -608,6 +538,6 @@ class BrowserRuntimeSmokeTest(unittest.TestCase):
                         )
         finally:
             if chromium_proc is not None:
-                _terminate_process(chromium_proc, label="chromium")
+                terminate_process_group(chromium_proc, label="chromium")
             if server is not None:
                 server.shutdown()
