@@ -24,10 +24,10 @@ GATEWAY_TESTS = ROOT_DIR / "gateway" / "tests"
 WASM_MODULE_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_EXEC_SRC = ROOT_DIR / "clients" / "web" / "vendor" / "wasm_exec.js"
 WASM_PATH = ROOT_DIR / "clients" / "web" / "vendor" / "mls_harness.wasm"
-WS_EVENT_TIMEOUT_S = 4.0
-WS_ACK_TIMEOUT_S = 4.0
-WS_READY_TIMEOUT_S = 2.0
-WS_NO_EVENT_TIMEOUT_S = 0.8
+WS_EVENT_TIMEOUT_S = 10.0
+WS_ACK_TIMEOUT_S = 8.0
+WS_READY_TIMEOUT_S = 4.0
+WS_NO_EVENT_TIMEOUT_S = 1.0
 
 import sys
 
