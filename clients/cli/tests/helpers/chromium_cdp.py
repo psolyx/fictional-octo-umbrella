@@ -31,6 +31,41 @@ def find_chromium() -> Optional[str]:
     return None
 
 
+def _fetch_cdp_targets(port: int) -> list[dict]:
+    last_error: Optional[Exception] = None
+    for path in ("json/list", "json"):
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/{path}", timeout=0.5
+            ) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                if isinstance(payload, list):
+                    return payload
+        except Exception as exc:  # noqa: BLE001 - preflight polling
+            last_error = exc
+    if last_error is None:
+        raise RuntimeError("chromium remote debugging returned no targets")
+    raise last_error
+
+
+def _select_cdp_page_target(targets: list[dict], port: int) -> Optional[str]:
+    candidate: Optional[str] = None
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        ws_url = target.get("webSocketDebuggerUrl")
+        if not ws_url and target.get("id"):
+            ws_url = f"ws://127.0.0.1:{port}/devtools/page/{target['id']}"
+        if not ws_url:
+            continue
+        if "/devtools/browser/" in ws_url:
+            continue
+        if target.get("url") == "about:blank":
+            return ws_url
+        candidate = candidate or ws_url
+    return candidate
+
+
 def _wait_for_cdp_url(proc: subprocess.Popen[str], port: int, timeout_s: float) -> str:
     deadline = time.time() + timeout_s
     last_error: Optional[Exception] = None
@@ -38,13 +73,10 @@ def _wait_for_cdp_url(proc: subprocess.Popen[str], port: int, timeout_s: float) 
         if proc.poll() is not None:
             raise RuntimeError("chromium exited before remote debugging was ready")
         try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/json/version", timeout=0.5
-            ) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                ws_url = payload.get("webSocketDebuggerUrl")
-                if ws_url:
-                    return ws_url
+            targets = _fetch_cdp_targets(port)
+            ws_url = _select_cdp_page_target(targets, port)
+            if ws_url:
+                return ws_url
         except Exception as exc:  # noqa: BLE001 - preflight polling
             last_error = exc
         time.sleep(0.1)
@@ -106,14 +138,16 @@ def start_chromium_cdp(
     try:
         ws_url = _wait_for_cdp_url(proc, cdp_port, timeout_s)
     except Exception as exc:  # noqa: BLE001 - convert to SkipTest
-        terminate_process_group(proc, label="chromium preflight")
+        terminate_process_group(proc, label="chromium preflight", timeout_s=0.5)
         raise unittest.SkipTest(
             f"chromium remote debugging unavailable: {exc}"
         ) from exc
     return proc, ws_url
 
 
-def terminate_process_group(proc: subprocess.Popen[str], *, label: str) -> None:
+def terminate_process_group(
+    proc: subprocess.Popen[str], *, label: str, timeout_s: float = 5.0
+) -> None:
     if proc.poll() is not None:
         return
     try:
@@ -121,13 +155,13 @@ def terminate_process_group(proc: subprocess.Popen[str], *, label: str) -> None:
     except ProcessLookupError:
         return
     try:
-        proc.wait(timeout=5.0)
+        proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
         try:
-            proc.wait(timeout=5.0)
+            proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             raise AssertionError(f"{label} failed to terminate") from None
