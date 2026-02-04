@@ -145,6 +145,10 @@ def _record_cdp_event(payload: dict, *, logs: Deque[str]) -> None:
 
 def _should_skip_cdp_error(message: str) -> Optional[str]:
     lowered = message.lower()
+    if "runtime.evaluate" in lowered and "not found" in lowered:
+        return "CDP runtime.evaluate unavailable"
+    if "method not found" in lowered:
+        return "CDP method not found"
     if "target closed" in lowered or "session closed" in lowered:
         return "CDP target closed"
     if "connection closed" in lowered or "websocket is closed" in lowered:
