@@ -138,7 +138,12 @@ def start_chromium_cdp(
     try:
         ws_url = _wait_for_cdp_url(proc, cdp_port, timeout_s)
     except Exception as exc:  # noqa: BLE001 - convert to SkipTest
-        terminate_process_group(proc, label="chromium preflight", timeout_s=0.5)
+        terminate_process_group(
+            proc,
+            label="chromium preflight",
+            timeout_s=0.5,
+            kill_timeout_s=0.5,
+        )
         raise unittest.SkipTest(
             f"chromium remote debugging unavailable: {exc}"
         ) from exc
@@ -146,7 +151,11 @@ def start_chromium_cdp(
 
 
 def terminate_process_group(
-    proc: subprocess.Popen[str], *, label: str, timeout_s: float = 5.0
+    proc: subprocess.Popen[str],
+    *,
+    label: str,
+    timeout_s: float = 5.0,
+    kill_timeout_s: Optional[float] = None,
 ) -> None:
     if proc.poll() is not None:
         return
@@ -161,7 +170,9 @@ def terminate_process_group(
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
+        if kill_timeout_s is None:
+            kill_timeout_s = timeout_s
         try:
-            proc.wait(timeout=timeout_s)
+            proc.wait(timeout=kill_timeout_s)
         except subprocess.TimeoutExpired:
             raise AssertionError(f"{label} failed to terminate") from None
