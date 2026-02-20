@@ -70,6 +70,56 @@
   </fieldset>
 
   <fieldset>
+    <legend>Social (Polycentric)</legend>
+    <p>Fetch signed social events via gateway HTTP and optionally use an author as a DM bootstrap peer.</p>
+    <label>
+      social_user_id
+      <input type="text" id="social_user_id" size="48" placeholder="u_..." />
+    </label>
+    <label>
+      limit
+      <input type="number" id="social_limit" min="1" max="200" value="20" />
+    </label>
+    <div class="button-row">
+      <button id="social_fetch_btn">Fetch events</button>
+      <span id="social_status">idle</span>
+    </div>
+    <label>
+      debug_etag
+      <input type="text" id="social_etag" size="64" readonly />
+    </label>
+    <div id="social_event_list"></div>
+
+    <details>
+      <summary>Publish (advanced/debug)</summary>
+      <p>Advanced path: paste a precomputed signature; browser-side signing is intentionally out of scope.</p>
+      <label>
+        prev_hash (optional)
+        <input type="text" id="social_prev_hash" size="64" />
+      </label>
+      <label>
+        kind
+        <input type="text" id="social_kind" size="24" value="post" />
+      </label>
+      <label>
+        ts_ms
+        <input type="number" id="social_ts_ms" min="0" />
+      </label>
+      <label>
+        payload_json
+        <textarea id="social_payload_json" rows="4" cols="64">{"text":"hello"}</textarea>
+      </label>
+      <label>
+        sig_b64
+        <input type="text" id="social_sig_b64" size="64" />
+      </label>
+      <div class="button-row">
+        <button id="social_publish_btn">Publish event</button>
+      </div>
+    </details>
+  </fieldset>
+
+  <fieldset>
     <legend>Received events</legend>
     <div id="event_log"></div>
   </fieldset>
@@ -136,6 +186,7 @@
   <script src="vendor/wasm_exec.js"></script>
   <script type="module" src="vectors_ui.js"></script>
   <script type="module" src="dm_ui.js"></script>
+  <script type="module" src="social_ui.js"></script>
   <script src="gateway_ws_client.js"></script>
 </body>
 </html>

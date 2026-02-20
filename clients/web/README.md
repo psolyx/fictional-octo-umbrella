@@ -1,6 +1,6 @@
 # Web client skeleton
 
-This static web client is a protocol/interop harness for gateway v1 (WS flows, rooms helpers, DM harness, and MLS vector checks) without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. It is **not** a product-grade Polycentric social+chat UI, and browser social feed/profile UI is not implemented in this repo yet. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations. The MLS WASM verifier requires being served over HTTP (for example, `python -m http.server`) so that the browser can fetch `wasm_exec.js`, the harness module, and the vector JSON.
+This static web client is a protocol/interop harness for gateway v1 (WS flows, rooms helpers, DM harness, MLS vector checks, and a minimal social event viewer) without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. It is **not** a product-grade Polycentric social+chat UI; the Social panel is intentionally a small scaffold for signed event inspection/debugging. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations. The MLS WASM verifier requires being served over HTTP (for example, `python -m http.server`) so that the browser can fetch `wasm_exec.js`, the harness module, and the vector JSON.
 
 ## Usage
 1. Build the MLS harness WASM module: `tools/mls_harness/build_wasm.sh`. The generated `clients/web/vendor/mls_harness.wasm` is local-only and must not be committed.
@@ -17,10 +17,34 @@ This static web client is a protocol/interop harness for gateway v1 (WS flows, r
      - `open http://127.0.0.1:8081/index.html`
    - **Tip:** If you see a 404 for `/clients/web/...`, you likely started the server inside `clients/web/`; use `/index.html` instead.
    - **Tip:** The CSP dev server serves the `clients/web` directory root, so `/index.html` works while `clients/web/index.html` returns `Not found`.
+   - **Tip:** If a browser automation/forwarded-port session shows a blank `Not found` page, retry on an alternate local port (for example `python -m http.server 8765`) and open `/index.html` from that port.
 3. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
 4. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
 5. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
 6. Incoming `conv.event` entries are rendered with their ciphertext payload and any routing metadata (`conv_home`, `origin_gateway`). Heartbeat `ping` frames are answered automatically with `pong`.
+
+## Social (Polycentric) panel
+- The **Social (Polycentric)** fieldset fetches signed events with `GET /v1/social/events?user_id=...&limit=...` and renders `ts_ms`, `kind`, payload preview, `event_hash`, and `prev_hash`.
+- Each rendered row includes **Use as DM peer**. Clicking it dispatches `social.peer.selected` and auto-fills the DM bootstrap `peer_user_id` input.
+- `debug_etag` displays the response `ETag` header when present.
+
+### Optional advanced publish path
+- The panel includes an advanced/debug publish form that sends `POST /v1/social/events` with:
+  - `kind`
+  - `payload` (JSON)
+  - `ts_ms`
+  - `sig_b64` (manually pasted signature)
+  - `prev_hash` (optional)
+- The publish call uses `Authorization: Bearer <session_token>` from the existing `gateway.session.ready` event.
+- Browser-side signing is intentionally out of scope for this static harness.
+
+### Example flow (CLI publish → web view)
+1. Start the gateway locally.
+2. Publish a social post with CLI:
+   - `python -m cli_app.hello social publish --kind post --payload '{"text":"hi"}' --gateway-url http://127.0.0.1:8787`
+3. Open the web harness and start a gateway session.
+4. In **Social (Polycentric)**, enter the same `user_id`, click **Fetch events**, and verify the post renders.
+5. Click **Use as DM peer** and verify the DM bootstrap `peer_user_id` input is filled.
 
 ## Supported gateway operations
 - `session.start`

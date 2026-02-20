@@ -91,6 +91,7 @@ class TestWebUiContracts(unittest.TestCase):
         cls.readme = read_repo_text("clients", "web", "README.md")
         cls.gateway_ws_client = read_repo_text("clients", "web", "gateway_ws_client.js")
         cls.dm_ui = read_repo_text("clients", "web", "dm_ui.js")
+        cls.social_ui = read_repo_text("clients", "web", "social_ui.js")
         cls.mls_vectors_loader = read_repo_text("clients", "web", "mls_vectors_loader.js")
 
     def test_custom_event_contracts_gateway(self):
@@ -143,6 +144,16 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("bound to conv_id", self.dm_ui)
         self.assertIn("/v1/keypackages/fetch", self.dm_ui)
         self.assertIn("/v1/keypackages", self.dm_ui)
+
+    def test_social_panel_contracts(self):
+        self.assertIn("Social (Polycentric)", self.index_html)
+        self.assertIn("social_ui.js", self.index_html)
+        self.assertIn("/v1/social/events", self.social_ui)
+        marker = "CustomEvent('social.peer.selected'"
+        self.assertIn(marker, self.social_ui)
+        window = slice_after(self.social_ui, marker)
+        assert_detail_keys(self, window, ("user_id",))
+        self.assertIn("addEventListener('social.peer.selected'", self.dm_ui)
 
     def test_dm_echo_before_apply_gate(self):
         marker = "addEventListener('dm.commit.echoed'"
@@ -275,6 +286,7 @@ class TestWebUiContracts(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertNotIn(token, self.gateway_ws_client)
                 self.assertNotIn(token, self.dm_ui)
+                self.assertNotIn(token, self.social_ui)
 
 
 if __name__ == "__main__":
