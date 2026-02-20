@@ -1,10 +1,13 @@
 import pathlib
+import signal
 import socket
 import subprocess
+import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -20,7 +23,7 @@ def pick_free_port():
 def fetch_url(url, timeout=1.0):
     request = urllib.request.Request(url)
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        response.read(1)
+        response.read()
         return response.getcode(), response.headers
 
 
@@ -39,12 +42,34 @@ def wait_for_url(url, timeout=2.0):
 def stop_process(proc):
     if proc.poll() is not None:
         return
-    proc.terminate()
+    proc.send_signal(signal.SIGINT)
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=2)
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def start_static_server(root_dir):
+    class RootHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(root_dir), **kwargs)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RootHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def stop_static_server(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
 
 
 class TestWebStaticServing(unittest.TestCase):
@@ -68,13 +93,8 @@ class TestWebStaticServing(unittest.TestCase):
             self.assertEqual(status, 200, msg=f"Expected 200 for {path}")
 
     def test_repo_root_static_server(self):
-        port = pick_free_port()
-        proc = subprocess.Popen(
-            ["python", "-m", "http.server", str(port)],
-            cwd=REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        server, thread = start_static_server(REPO_ROOT)
+        port = server.server_address[1]
         base_url = f"http://127.0.0.1:{port}"
         try:
             self.assert_paths_ok(
@@ -89,16 +109,11 @@ class TestWebStaticServing(unittest.TestCase):
                 ],
             )
         finally:
-            stop_process(proc)
+            stop_static_server(server, thread)
 
     def test_clients_web_static_server(self):
-        port = pick_free_port()
-        proc = subprocess.Popen(
-            ["python", "-m", "http.server", str(port)],
-            cwd=CLIENTS_WEB_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        server, thread = start_static_server(CLIENTS_WEB_ROOT)
+        port = server.server_address[1]
         base_url = f"http://127.0.0.1:{port}"
         try:
             self.assert_paths_ok(
@@ -113,7 +128,7 @@ class TestWebStaticServing(unittest.TestCase):
                 ],
             )
         finally:
-            stop_process(proc)
+            stop_static_server(server, thread)
 
     def test_csp_dev_server_headers(self):
         port = pick_free_port()

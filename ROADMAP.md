@@ -134,7 +134,12 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Exit criteria**
 - Multi-device test: 2 users × 2 devices, device loss/wipe + resume via `resume_token` and MLS state resync, all decrypt.
-- KeyPackage exhaustion test: system degrades gracefully (rate limit + optional last-resort).
+- KeyPackage exhaustion test: system degrades gracefully via rate limits; optional "last-resort" issuance is deferred/not implemented in the current repo.
+
+**Implementation reality (current repo)**
+- Retention/GC remains operator-managed in this PoC: conversation/idempotency rows are retained until an operator rotates or prunes the backing database.
+- Idempotency (`conv_id`, `msg_id`) is enforced for the retained window only; if operators delete old rows, retries against deleted history may no longer dedupe.
+- See `gateway/docs/retention_and_idempotency.md` for operational guidance.
 
 **Risk retired**
 - KeyPackage lifecycle and offline delivery semantics are proven.
@@ -157,6 +162,9 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 **Exit criteria**
 - Scrape simulation: bots attempting large watchlists get throttled/blocked without harming normal users.
 - Privacy review signoff: presence does not become a convenient tracking API.
+
+**Signoff artifact**
+- Presence privacy review mapping + test anchors: `gateway/docs/presence_privacy_review.md`.
 
 **Risk retired**
 - Presence is safe enough to ship.
@@ -190,6 +198,8 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 **Exit criteria**
 - Load test: 1k-member room, 100 msg/s for 1 hour, no MLS divergence.
+- CI validates scaled-down/lite profiles in `gateway/tests/test_room_fanout_load_lite.py` and `gateway/tests/test_mls_dm_over_ds.py` (scaled profile).
+- Operator-run soak profile is available (not CI-gated) via `scripts/phase4_room_soak.sh`.
 - Join/leave churn test with offline users.
 
 **Risk retired**
@@ -217,6 +227,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - `clients/web/index.html` — static harness shell with gateway/session controls and panels for rooms, DM, and vectors.
 - `clients/web/gateway_ws_client.js` — session lifecycle, `conv.subscribe`/`conv.ack`/`conv.send`, and Rooms v1 panel helpers.
 - `clients/web/dm_ui.js` — local MLS DM demo with commit echo gating and import/export flows.
+- `clients/web/social_ui.js` — minimal signed-event viewer scaffold (read-only/debug; not product-grade social UX).
 - `clients/web/mls_vectors_loader.js` + `clients/web/vectors_ui.js` — WASM vector loader and vectors test UI wiring.
 
 #### Phase 5b — Web social+chat UI integration (deferred)
