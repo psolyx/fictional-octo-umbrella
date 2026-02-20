@@ -1,6 +1,6 @@
 # Web client skeleton
 
-This static demo exercises the gateway v1 WebSocket protocol without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations. The MLS WASM verifier requires being served over HTTP (for example, `python -m http.server`) so that the browser can fetch `wasm_exec.js`, the harness module, and the vector JSON.
+This static web client is a protocol/interop harness for gateway v1 (WS flows, rooms helpers, DM harness, and MLS vector checks) without any build tooling or package manager dependencies. It is intentionally frameworkless (plain JS/HTML/CSS) to keep the supply chain small. It is **not** a product-grade Polycentric social+chat UI, and browser social feed/profile UI is not implemented in this repo yet. Open `index.html` directly in a browser (or serve the directory with any static file server) to test session lifecycle and conversation operations. The MLS WASM verifier requires being served over HTTP (for example, `python -m http.server`) so that the browser can fetch `wasm_exec.js`, the harness module, and the vector JSON.
 
 ## Usage
 1. Build the MLS harness WASM module: `tools/mls_harness/build_wasm.sh`. The generated `clients/web/vendor/mls_harness.wasm` is local-only and must not be committed.
