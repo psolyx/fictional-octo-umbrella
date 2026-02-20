@@ -6244,6 +6244,16 @@ return;
 set_dm_bootstrap_status('gateway session not ready');
 });
 
+window.addEventListener('social.peer.selected', (event) => {
+const detail = event && event.detail ? event.detail : null;
+const next_peer_user_id = detail && typeof detail.user_id === 'string' ? detail.user_id.trim() : '';
+if (!next_peer_user_id || !dm_bootstrap_peer_input) {
+return;
+}
+dm_bootstrap_peer_input.value = next_peer_user_id;
+set_dm_bootstrap_status(`peer selected from social: ${next_peer_user_id}`);
+});
+
 window.addEventListener('dm.commit.echoed', (event) => {
 const detail = event && event.detail ? event.detail : null;
 if (!detail || typeof detail.env_b64 !== 'string') {

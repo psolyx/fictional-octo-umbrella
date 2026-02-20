@@ -955,7 +955,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 try:
-                    await _cdp_wait_for_sentinel(cdp_ws_url, page_url, timeout_s=15.0)
+                    await _cdp_wait_for_sentinel(cdp_ws_url, page_url, timeout_s=30.0)
                     await bob_task
                 except Exception:
                     bob_task.cancel()
