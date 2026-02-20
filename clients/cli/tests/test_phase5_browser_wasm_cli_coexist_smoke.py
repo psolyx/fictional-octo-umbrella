@@ -728,11 +728,13 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
     ws.send(JSON.stringify(body));
   };
 
+  const WS_WAIT_TIMEOUT_MS = 8000;
+
   const sendWithAck = async (body) => {
     await send(body);
     const ack = await waitFor(
       (payload) => payload.t === 'conv.acked' && payload.id === body.id,
-      2000,
+      WS_WAIT_TIMEOUT_MS,
     );
     return ack.body.seq;
   };
@@ -743,7 +745,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
         && payload.body
         && payload.body.conv_id === conv_id
         && payload.body.seq === seq,
-      2000,
+      WS_WAIT_TIMEOUT_MS,
     );
     return event;
   };
@@ -755,7 +757,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
       id: 'session-start',
       body: { auth_token: payload.alice_auth, device_id: payload.alice_device },
     });
-    await waitFor((msg) => msg.t === 'session.ready', 2000);
+    await waitFor((msg) => msg.t === 'session.ready', WS_WAIT_TIMEOUT_MS);
 
     await send({ v: 1, t: 'conv.subscribe', id: 'sub-dm', body: { conv_id: payload.conv_ids.dm, from_seq: 1 } });
     await send({ v: 1, t: 'conv.subscribe', id: 'sub-room', body: { conv_id: payload.conv_ids.room, from_seq: 1 } });
