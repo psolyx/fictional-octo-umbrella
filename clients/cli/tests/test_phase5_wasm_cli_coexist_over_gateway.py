@@ -1,9 +1,15 @@
 import hashlib
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+TESTS_DIR = Path(__file__).resolve().parent
+HELPERS_DIR = TESTS_DIR / "helpers"
+if str(HELPERS_DIR) not in sys.path:
+    sys.path.insert(0, str(HELPERS_DIR))
 
 from wasm_asset_cache import build_wasm_deterministic
 
