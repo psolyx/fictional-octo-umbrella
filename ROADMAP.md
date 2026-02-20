@@ -27,15 +27,16 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Abuse controls: rate limits, watchlist caps, blocklists
 
 ### MVP-3
-- Frameworkless Web UI integration (browser MLS via WASM) with no React/Vue or similar frameworks and no Node/npm required.
-- Interop: CLI + Web in same DM/room
+- Frameworkless web protocol/interop harness (browser MLS via WASM, static assets, no Node/npm required) for gateway+MLS validation.
+- Interop: CLI + web harness in the same DM/room.
+- Deferred product goal: Polycentric social+chat browser UI integration lands after harness parity.
 
 ---
 
 ### MVP ↔ phases mapping
 - MVP-1 spans Phase 0, Phase 0.5, Phase 1 (gateway skeleton + resume + SSE fallback), Phase 1.5 reservations, and Phase 3.5 Polycentric social.
 - MVP-2 adds Phase 4 (rooms v1).
-- MVP-3 corresponds to Phase 5 (web integration).
+- MVP-3 corresponds to Phase 5a (web harness + interop), with social UI integration deferred to Phase 5b.
 
 ---
 
@@ -197,22 +198,38 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 ---
 
 ### Phase 5 — Web integration (retire: browser crypto + UX parity)
+#### Phase 5a — Web protocol/interop harness
 **Deliverables**
 - Web MLS binding (WASM) and storage (secure key management story).
-- Web chat UI integrated with Polycentric social UI using a frameworkless/static stack; no Node/npm in the critical path.
+- Frameworkless/static web protocol harness for gateway WS flows, rooms API helpers, DM MLS demo, vectors UI, and IndexedDB proof-of-concept storage.
 - Web MLS binding remains via the Go-to-WASM harness (ADR 0005). UI stack stays minimal even as interop expands.
+- Web posture remains frameworkless/static with no Node/npm in the critical path (ADR 0007).
 - Interop test suite: web + CLI in same conversations.
 
 **Exit criteria**
-- Web and CLI can co-exist in the same DM/room with no decryption failures.
+- Web harness and CLI can co-exist in the same DM/room with no decryption failures.
 - “Device bootstrap” threat model documented and reviewed (see `clients/web/THREAT_MODEL.md`).
 
 **Risk retired**
 - Browser MLS and cross-client interop is real.
 
+**Current web UI inventory (repo snapshot)**
+- `clients/web/index.html` — static harness shell with gateway/session controls and panels for rooms, DM, and vectors.
+- `clients/web/gateway_ws_client.js` — session lifecycle, `conv.subscribe`/`conv.ack`/`conv.send`, and Rooms v1 panel helpers.
+- `clients/web/dm_ui.js` — local MLS DM demo with commit echo gating and import/export flows.
+- `clients/web/mls_vectors_loader.js` + `clients/web/vectors_ui.js` — WASM vector loader and vectors test UI wiring.
+
+#### Phase 5b — Web social+chat UI integration (deferred)
+**Deliverables**
+- Integrate chat surfaces with Polycentric social feed/profile browser UI.
+- Product-grade browser UX beyond protocol harness scope (navigation, social views, and chat/social cohesion).
+
+**Exit criteria**
+- Deferred to a later iteration (Phase 6+ planning gate) and not required for current Phase 5a completion.
+
 ### Phase 5.1 — Web UI posture hardening (retire: dependency/supply-chain creep)
 **Deliverables**
-- Dependency minimization policy for the web client (frameworkless/static, no Node/npm in critical path).
+- Dependency minimization policy for the web client (frameworkless/static, no Node/npm in critical path; see ADR 0007).
 - CSP baseline documented for WS/SSE with wasm-friendly extensions only as required.
 - Offline-friendly development workflow for committed web assets.
 
