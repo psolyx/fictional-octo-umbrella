@@ -46,3 +46,44 @@ pre {
 .replay-window-banner button {
   margin-left: 10px;
 }
+
+.profile_shell {
+  border: 1px solid #aaa;
+  background: #faf7ff;
+  padding: 10px;
+  margin-top: 10px;
+}
+
+.profile_banner {
+  height: 80px;
+  border: 1px solid #777;
+  background: linear-gradient(90deg, #d7d4ff, #b2ffd8);
+  background-size: cover;
+}
+
+.profile_headline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: -18px;
+}
+
+.profile_avatar {
+  width: 72px;
+  height: 72px;
+  border: 2px solid #333;
+  background: #fff;
+  object-fit: cover;
+}
+
+.profile_card {
+  border: 1px dashed #888;
+  background: #fff;
+  padding: 8px;
+  margin-top: 8px;
+}
+
+.home_feed {
+  max-height: 220px;
+  overflow-y: auto;
+}

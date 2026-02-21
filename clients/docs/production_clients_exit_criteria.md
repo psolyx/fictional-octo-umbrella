@@ -140,7 +140,8 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - Expected outcomes:
   - Session enters ready/authenticated state.
   - Resume path works until token/session expiry window closes.
-  - Sign-out removes session state from active runtime + durable storage.
+  - Identity create/import and identity import/export UX boundaries are explicit and safe.
+  - Device rotate flow is documented (implementation can be staged) and sign-out removes session state from active runtime + durable storage.
 - Error contracts:
   - Auth failure exposes deterministic error category and retry path.
   - Resume failure degrades to explicit fresh-login requirement.
@@ -154,6 +155,21 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - Error contracts:
   - Validation failure identifies invalid fields.
   - Publish failure preserves unsent edits for retry.
+
+### MySpace-like profile acceptance contract
+- Required marker:
+  - Surface includes literal text `MySpace-style profile` for deterministic contract checks.
+- Required sections/ids:
+  - `profile_banner`, `profile_avatar`, `profile_about`, `profile_interests`, `profile_friends`, `profile_bulletins`.
+- Required outcomes:
+  - Banner + avatar render as a nostalgic personal homepage shell.
+  - About Me maps to latest `description` event value.
+  - Interests maps to latest `interests` event value.
+  - Friends list is derived from latest `follow` state per target and supports profile navigation.
+  - Latest Bulletins uses `post` events in descending timestamp order.
+- Non-goals:
+  - Not a Twitter clone UI.
+  - No algorithmic trending, ranking, or engagement optimization.
 
 ### DMs acceptance contract
 - Preconditions:
@@ -188,6 +204,18 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
   - Author profile navigation is available from timeline entry.
 - Error contracts:
   - Fetch/publish failures provide retry affordance and non-destructive recovery.
+
+### Friends + Home feed acceptance contract
+- Preconditions:
+  - Authenticated session for follow/unfollow and post publish.
+  - `/v1/social/profile` and `/v1/social/feed` endpoints are reachable.
+- Expected outcomes:
+  - Follow/unfollow controls publish `follow` events and update Friends list state.
+  - Home feed aggregates `post` events from self + currently-followed friends.
+  - Feed ordering and pagination cursor behavior remain deterministic.
+- Error contracts:
+  - Follow/unfollow publish failures are surfaced without dropping current profile view.
+  - Feed fetch failures provide explicit refresh/retry action and preserve last rendered items.
 
 ## Pruning recovery UX requirements
 - Trigger: replay request exceeds retained history window.

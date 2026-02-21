@@ -145,6 +145,30 @@ class InMemorySocialStore:
                 return []
             return events[:limit]
 
+    def list_all_events(self, user_id: str) -> List[SocialEvent]:
+        with self._lock:
+            return list(self._events.get(user_id, []))
+
+    def list_posts_for_users(
+        self,
+        user_ids: list[str],
+        *,
+        limit: int,
+        cursor: tuple[int, str] | None,
+    ) -> List[SocialEvent]:
+        with self._lock:
+            events: list[SocialEvent] = []
+            user_id_set = set(user_ids)
+            for events_for_user in self._events.values():
+                for social_event in events_for_user:
+                    if social_event.user_id not in user_id_set or social_event.kind != "post":
+                        continue
+                    if cursor and (social_event.ts_ms, social_event.event_hash) >= cursor:
+                        continue
+                    events.append(social_event)
+            events.sort(key=lambda item: (item.ts_ms, item.event_hash), reverse=True)
+            return events[:limit]
+
 
 class SQLiteSocialStore:
     def __init__(self, backend) -> None:
@@ -239,3 +263,94 @@ class SQLiteSocialStore:
                 (user_id, after_rowid, limit),
             ).fetchall()
         return [SocialEvent(**row) for row in rows]
+
+    def list_all_events(self, user_id: str) -> List[SocialEvent]:
+        with self._backend.lock:
+            rows = self._backend.connection.execute(
+                """
+                SELECT user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64
+                FROM social_events
+                WHERE user_id = ?
+                ORDER BY rowid ASC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [SocialEvent(**row) for row in rows]
+
+    def list_posts_for_users(
+        self,
+        user_ids: list[str],
+        *,
+        limit: int,
+        cursor: tuple[int, str] | None,
+    ) -> List[SocialEvent]:
+        if not user_ids:
+            return []
+        placeholders = ",".join("?" for _ in user_ids)
+        query = (
+            """
+            SELECT user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64
+            FROM social_events
+            WHERE kind = 'post' AND user_id IN (
+            """
+            + placeholders
+            + ")"
+        )
+        params: list[Any] = list(user_ids)
+        if cursor:
+            query += " AND (ts_ms < ? OR (ts_ms = ? AND event_hash < ?))"
+            params.extend([cursor[0], cursor[0], cursor[1]])
+        query += " ORDER BY ts_ms DESC, event_hash DESC LIMIT ?"
+        params.append(limit)
+        with self._backend.lock:
+            rows = self._backend.connection.execute(query, tuple(params)).fetchall()
+        return [SocialEvent(**row) for row in rows]
+
+
+def social_event_sort_key(social_event: SocialEvent) -> tuple[int, str]:
+    return (int(social_event.ts_ms), social_event.event_hash)
+
+
+def latest_event_by_kind(events: list[SocialEvent], kind: str) -> SocialEvent | None:
+    latest: SocialEvent | None = None
+    for social_event in events:
+        if social_event.kind != kind:
+            continue
+        if latest is None or social_event_sort_key(social_event) > social_event_sort_key(latest):
+            latest = social_event
+    return latest
+
+
+def parse_follow_payload(payload: dict[str, Any]) -> tuple[str, bool] | None:
+    target_user_id = payload.get("target_user_id") or payload.get("target") or payload.get("user_id")
+    if not isinstance(target_user_id, str) or not target_user_id:
+        return None
+    if "following" in payload:
+        following = bool(payload.get("following"))
+    elif "value" in payload:
+        following = bool(payload.get("value"))
+    elif "state" in payload:
+        following = str(payload.get("state")).lower() in ("follow", "following", "true", "1")
+    else:
+        following = True
+    return (target_user_id, following)
+
+
+def decode_payload_json(social_event: SocialEvent) -> dict[str, Any]:
+    parsed = json.loads(social_event.payload_json)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def parse_feed_cursor(cursor: str | None) -> tuple[int, str] | None:
+    if not cursor:
+        return None
+    ts_text, sep, event_hash = cursor.partition(":")
+    if not sep:
+        return None
+    try:
+        ts_ms = int(ts_text)
+    except ValueError:
+        return None
+    if ts_ms < 0 or not event_hash:
+        return None
+    return (ts_ms, event_hash)

@@ -267,7 +267,9 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Account lifecycle:
   - Sign in/session bootstrap, device resume, sign out/session revoke UX for web + TUI.
   - Deterministic reconnect + replay UX with cursor continuity and user-visible status.
+  - Explicit identity UX: create/import identity, identity import/export safe boundary, and device rotate guidance (implementation may follow later milestones).
 - Profile:
+  - MySpace-like nostalgic profile page layout with banner + avatar, About Me (description), Interests (simple text), Friends list (derived from follow events), and Latest Posts/Bulletins (post kind).
   - View/edit profile fields, publish signed profile updates, and render verification/state errors.
 - DMs:
   - Create/open DM, send/receive ciphertext-backed messages, replay catch-up, and commit echo-before-apply behavior.
@@ -275,6 +277,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
   - Create room, invite/remove members, send/receive room messages, and membership-state rendering.
 - Timeline:
   - Publish post, fetch timeline entries, render per-user event-log ordering, and open author profile from timeline.
+  - follow/unfollow UX and Home feed aggregation from self + friends.
 
 **Exit criteria**
 - Happy-path flows (web + TUI) are documented and pass smoke checks for:

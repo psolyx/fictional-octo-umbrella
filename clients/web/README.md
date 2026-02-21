@@ -19,6 +19,13 @@ This static web client is a protocol/interop harness for gateway v1 (WS flows, r
    - **Tip:** The CSP dev server serves the `clients/web` directory root, so `/index.html` works while `clients/web/index.html` returns `Not found`.
    - **Tip:** If a browser automation/forwarded-port session shows a blank `Not found` page, retry on an alternate local port (for example `python -m http.server 8765`) and open `/index.html` from that port.
    - **Automation tip:** prefer `http://127.0.0.1:<port>/index.html` (not hostnames rewritten by tooling) when capturing screenshots in containerized browser sessions.
+
+### Screenshot sanity check (avoid blank Not Found captures)
+- Confirm the served path with `curl -I` before taking the screenshot:
+  - If serving from repo root: `curl -I http://127.0.0.1:<port>/<repo-root-web-path>/index.html`
+  - If serving from `clients/web`: `curl -I http://127.0.0.1:<port>/index.html`
+- Only capture once the response is `HTTP/1.0 200 OK` (or `HTTP/1.1 200 OK`).
+- For browser-container captures, prefer an alternate local port (for example `8765`) and `127.0.0.1` URL forms to avoid forwarded-host rewrites that can produce false 404 pages.
 3. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
 4. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
 5. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.
