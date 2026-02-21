@@ -10,6 +10,51 @@ import urllib.request
 from typing import Dict, Iterator, Optional
 
 
+class ReplayWindowExceededError(Exception):
+    def __init__(self, *, requested_from_seq: int, earliest_seq: int, latest_seq: int):
+        self.requested_from_seq = requested_from_seq
+        self.earliest_seq = earliest_seq
+        self.latest_seq = latest_seq
+        super().__init__(
+            f"Requested replay from seq {requested_from_seq}, but earliest retained seq is {earliest_seq} (latest={latest_seq})."
+        )
+
+
+def _parse_replay_window_error(http_error: urllib.error.HTTPError) -> ReplayWindowExceededError | None:
+    if http_error.code != 410:
+        return None
+    try:
+        raw = http_error.read().decode("utf-8")
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("code") != "replay_window_exceeded":
+        return None
+    requested_from_seq = payload.get("requested_from_seq")
+    earliest_seq = payload.get("earliest_seq")
+    latest_seq = payload.get("latest_seq")
+    if not isinstance(requested_from_seq, int):
+        requested_from_seq = earliest_seq if isinstance(earliest_seq, int) else 1
+    if not isinstance(earliest_seq, int) or not isinstance(latest_seq, int):
+        return None
+    return ReplayWindowExceededError(
+        requested_from_seq=requested_from_seq,
+        earliest_seq=earliest_seq,
+        latest_seq=latest_seq,
+    )
+
+
+def _emit_reset_event(exc: ReplayWindowExceededError) -> Dict[str, object]:
+    return {
+        "t": "control.replay_window_reset",
+        "body": {
+            "requested_from_seq": exc.requested_from_seq,
+            "earliest_seq": exc.earliest_seq,
+            "latest_seq": exc.latest_seq,
+        },
+    }
+
+
 def _build_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}{path}"
 
@@ -243,7 +288,59 @@ def sse_tail(
             yield event
     except socket.timeout:
         return
+    except urllib.error.HTTPError as exc:
+        replay_error = _parse_replay_window_error(exc)
+        if replay_error is not None:
+            raise replay_error from exc
+        raise
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return
         raise
+
+
+def sse_tail_resilient(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    from_seq: int,
+    *,
+    max_events: Optional[int] = None,
+    idle_timeout_s: Optional[float] = None,
+    on_reset_callback=None,
+    max_resets: int = 1,
+    emit_reset_control_event: bool = False,
+) -> Iterator[Dict[str, object]]:
+    resets = 0
+    emitted = 0
+    next_from_seq = from_seq
+    while True:
+        batch_limit = None if max_events is None else max(0, max_events - emitted)
+        if batch_limit == 0:
+            return
+        try:
+            for event in sse_tail(
+                base_url,
+                session_token,
+                conv_id,
+                next_from_seq,
+                max_events=batch_limit,
+                idle_timeout_s=idle_timeout_s,
+            ):
+                yield event
+                emitted += 1
+                body = event.get("body") if isinstance(event, dict) else None
+                if isinstance(body, dict) and isinstance(body.get("seq"), int):
+                    next_from_seq = int(body["seq"]) + 1
+                if max_events is not None and emitted >= max_events:
+                    return
+            return
+        except ReplayWindowExceededError as exc:
+            if resets >= max_resets:
+                raise
+            resets += 1
+            next_from_seq = exc.earliest_seq
+            if on_reset_callback is not None:
+                on_reset_callback(exc)
+            if emit_reset_control_event:
+                yield _emit_reset_event(exc)

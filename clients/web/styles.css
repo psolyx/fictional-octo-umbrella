@@ -34,3 +34,15 @@ pre {
 .button-row {
   margin-top: 8px;
 }
+
+.replay-window-banner {
+  border: 1px solid #b35a00;
+  background: #fff5eb;
+  color: #7a2f00;
+  padding: 8px;
+  margin-bottom: 12px;
+}
+
+.replay-window-banner button {
+  margin-left: 10px;
+}

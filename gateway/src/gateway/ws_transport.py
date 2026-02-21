@@ -1187,8 +1187,17 @@ def create_app(
     return app
 
 
-def _error_frame(code: str, message: str, *, request_id: str | None = None) -> dict[str, Any]:
-    return {"v": 1, "t": "error", "id": request_id, "body": {"code": code, "message": message}}
+def _error_frame(
+    code: str,
+    message: str,
+    *,
+    request_id: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"code": code, "message": message}
+    if extra_body:
+        body.update(extra_body)
+    return {"v": 1, "t": "error", "id": request_id, "body": body}
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -1379,6 +1388,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                                 "replay_window_exceeded",
                                 f"requested_from_seq={exc.requested_from_seq} earliest_seq={exc.earliest_seq}",
                                 request_id=frame.get("id"),
+                                extra_body={
+                                    "requested_from_seq": exc.requested_from_seq,
+                                    "earliest_seq": exc.earliest_seq,
+                                    "latest_seq": exc.latest_seq,
+                                },
                             )
                         )
                         continue

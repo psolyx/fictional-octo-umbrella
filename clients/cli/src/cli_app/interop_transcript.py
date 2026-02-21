@@ -80,13 +80,14 @@ def capture_sse_transcript(
     matched_app_msg = False
     start = time.monotonic()
 
-    for event in gateway_client.sse_tail(
+    for event in gateway_client.sse_tail_resilient(
         base_url,
         session_token,
         conv_id,
         from_seq,
         max_events=max_events,
         idle_timeout_s=timeout_s,
+        max_resets=1,
     ):
         if time.monotonic() - start > timeout_s:
             break

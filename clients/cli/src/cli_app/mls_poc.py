@@ -1310,15 +1310,31 @@ def handle_gw_tail(args: argparse.Namespace) -> int:
         if args.from_seq is not None
         else gateway_store.get_next_seq(args.conv_id, args.profile_paths.cursors_path)
     )
-    for event in gateway_client.sse_tail(
-        base_url,
-        session_token,
-        args.conv_id,
-        from_seq,
-        max_events=args.max_events,
-        idle_timeout_s=args.idle_timeout_s,
-    ):
-        sys.stdout.write(f"{json.dumps(event, sort_keys=True)}\n")
+    def _on_replay_reset(exc: gateway_client.ReplayWindowExceededError) -> None:
+        sys.stderr.write(
+            "Replay window exceeded; resyncing from earliest retained seq "
+            f"{exc.earliest_seq} (requested {exc.requested_from_seq}).\n"
+        )
+
+    try:
+        for event in gateway_client.sse_tail_resilient(
+            base_url,
+            session_token,
+            args.conv_id,
+            from_seq,
+            max_events=args.max_events,
+            idle_timeout_s=args.idle_timeout_s,
+            on_reset_callback=_on_replay_reset,
+            max_resets=1,
+            emit_reset_control_event=True,
+        ):
+            sys.stdout.write(f"{json.dumps(event, sort_keys=True)}\n")
+    except gateway_client.ReplayWindowExceededError as exc:
+        sys.stderr.write(
+            "Replay window exceeded and auto-resync limit reached. "
+            f"Retry from earliest seq {exc.earliest_seq}.\n"
+        )
+        return 1
     return 0
 
 
@@ -1666,12 +1682,13 @@ def _wait_for_peer_app(
     deadline = time.time() + timeout_s
     next_seq = from_seq
     while time.time() < deadline:
-        for event in gateway_client.sse_tail(
+        for event in gateway_client.sse_tail_resilient(
             base_url,
             session_token,
             conv_id,
             next_seq,
             idle_timeout_s=idle_timeout_s,
+            max_resets=1,
         ):
             body = event.get("body", {})
             seq = body.get("seq")
@@ -2632,13 +2649,14 @@ def handle_gw_dm_tail(args: argparse.Namespace) -> int:
         )
     if joined and pending_commits:
         _flush_pending_commits(args.state_dir, pending_commits, pending_path)
-    for event in gateway_client.sse_tail(
+    for event in gateway_client.sse_tail_resilient(
         base_url,
         session_token,
         args.conv_id,
         from_seq,
         max_events=args.max_events,
         idle_timeout_s=args.idle_timeout_s,
+        max_resets=1,
     ):
         body = event.get("body", {})
         seq = body.get("seq")
