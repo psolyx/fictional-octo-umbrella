@@ -72,6 +72,11 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - CLI and TUI both complete the Phase 0 MLS simulation workflow end-to-end on two devices.
 - Minimal accessibility checks (keyboard-only navigation) pass in the TUI DM flow.
 
+**Implementation reality (current repo)**
+- CLI exists today under `clients/cli/` and is used for the current integration + protocol tests.
+- TUI production shell is not implemented yet; roadmap scaffolding is tracked for Phase 5.2 completion gating.
+- Current UX validation is CLI-first while TUI scope is being formalized in `clients/docs/production_clients_exit_criteria.md`.
+
 **Risk retired**
 - CLI/TUI are first-class and unblock MVP-1 without waiting on web client milestones.
 
@@ -182,6 +187,11 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Social events retrievable via HTTP queries with signature verification and replay protection exercised in automation.
 - CLI/TUI users can publish and fetch social events without bypassing caching posture.
 
+**Implementation reality (current repo)**
+- Social integration is currently implemented as per-user signed event-log publishing and retrieval surfaces.
+- Feed/profile UX is intentionally minimal and primarily exposed through CLI + web harness tooling, not a fully productized browser or TUI experience.
+- Phase 5.2 formalizes production UX gates for account/profile/DM/rooms/timeline parity before calling clients production-ready.
+
 **Risk retired**
 - “Polycentric-based social platform” claim is grounded with signed events and client UX parity for MVP-1.
 
@@ -248,6 +258,47 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 **Exit criteria**
 - Documentation confirms the “no-npm-required” web dev path and dependency policy.
 - CSP guidance published and validated against the static artifacts.
+
+### Phase 5.2 — Production clients (Web UI + TUI) (retire: product-readiness ambiguity)
+**Deliverables**
+- Production gate applies to both clients:
+  - Web UI remains frameworkless/static and must not add Node/npm to the critical path.
+  - TUI remains stdlib-first unless a dependency has explicit justification and review.
+- Account lifecycle:
+  - Sign in/session bootstrap, device resume, sign out/session revoke UX for web + TUI.
+  - Deterministic reconnect + replay UX with cursor continuity and user-visible status.
+- Profile:
+  - View/edit profile fields, publish signed profile updates, and render verification/state errors.
+- DMs:
+  - Create/open DM, send/receive ciphertext-backed messages, replay catch-up, and commit echo-before-apply behavior.
+- Rooms:
+  - Create room, invite/remove members, send/receive room messages, and membership-state rendering.
+- Timeline:
+  - Publish post, fetch timeline entries, render per-user event-log ordering, and open author profile from timeline.
+
+**Exit criteria**
+- Happy-path flows (web + TUI) are documented and pass smoke checks for:
+  - Account lifecycle
+  - Profile
+  - DMs
+  - Rooms
+  - Timeline
+- Pruning recovery UX is implemented and verified for both web + TUI:
+  - Users receive explicit “history pruned” guidance when replay windows are exceeded.
+  - Recovery path (resubscribe from earliest retained seq / refresh local view) is one action away and documented.
+- Baseline security checklist is complete for both clients (OWASP ASVS themes):
+  - Authentication/session handling
+  - Token lifecycle + storage constraints
+  - Secure local persistence defaults and secret redaction
+  - Input/output handling + transport guarantees
+- Baseline accessibility checklist passes for web keyboard operation (WCAG 2.x themes):
+  - Keyboard-only operability for all primary actions
+  - Focus visibility/order and semantic labeling of controls
+  - Status/error messaging announced without pointer-only affordances
+- Phase 5a remains a harness milestone; production readiness is gated only when Phase 5.2 criteria are satisfied.
+
+**Risk retired**
+- “Production-ready web UI + TUI” claim becomes testable, auditable, and resistant to roadmap drift.
 
 ---
 
