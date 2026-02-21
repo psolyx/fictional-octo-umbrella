@@ -837,12 +837,23 @@ def _start_tail_thread(
         while not stop_event.is_set():
             from_seq = gateway_store.get_next_seq(conv_id)
             try:
-                for event in gateway_client.sse_tail(
+                for event in gateway_client.sse_tail_resilient(
                     session.base_url,
                     session.session_token,
                     conv_id,
                     from_seq,
                     idle_timeout_s=idle_timeout_s,
+                    max_resets=1,
+                    on_reset_callback=lambda exc: event_queue.put(
+                        {
+                            "type": "conv",
+                            "conv_id": conv_id,
+                            "error": (
+                                "Replay window exceeded; resynced from earliest seq "
+                                f"{exc.earliest_seq}."
+                            ),
+                        }
+                    ),
                 ):
                     if stop_event.is_set():
                         return

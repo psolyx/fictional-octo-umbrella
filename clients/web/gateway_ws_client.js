@@ -3,6 +3,9 @@
   const connection_status = document.getElementById('connection_status');
   const debug_log = document.getElementById('debug_log');
   const event_log = document.getElementById('event_log');
+  const replay_window_banner = document.getElementById('replay_window_banner');
+  const replay_window_text = document.getElementById('replay_window_text');
+  const replay_window_resubscribe_btn = document.getElementById('replay_window_resubscribe_btn');
 
   const gateway_url_input = document.getElementById('gateway_url');
   const bootstrap_token_input = document.getElementById('bootstrap_token');
@@ -89,6 +92,62 @@
   let transcript_last_import = null;
   const last_from_seq_by_conv_id = {};
   let last_selected_conv_id = null;
+  let replay_window_conv_id = null;
+  let replay_window_earliest_seq = null;
+
+  const parse_replay_window_details = (body) => {
+    if (!body || typeof body !== 'object') {
+      return null;
+    }
+    let earliest_seq = Number.isInteger(body.earliest_seq) ? body.earliest_seq : null;
+    let latest_seq = Number.isInteger(body.latest_seq) ? body.latest_seq : null;
+    let requested_from_seq = Number.isInteger(body.requested_from_seq) ? body.requested_from_seq : null;
+    if (earliest_seq !== null && latest_seq !== null) {
+      return { earliest_seq, latest_seq, requested_from_seq };
+    }
+    const message_text = typeof body.message === 'string' ? body.message : '';
+    const pairs = message_text.match(/(requested_from_seq|earliest_seq|latest_seq)=\d+/g) || [];
+    for (const pair of pairs) {
+      const split = pair.split('=');
+      if (split.length !== 2) {
+        continue;
+      }
+      const key = split[0];
+      const value = Number(split[1]);
+      if (!Number.isInteger(value)) {
+        continue;
+      }
+      if (key === 'earliest_seq') earliest_seq = value;
+      if (key === 'latest_seq') latest_seq = value;
+      if (key === 'requested_from_seq') requested_from_seq = value;
+    }
+    if (earliest_seq === null || latest_seq === null) {
+      return null;
+    }
+    return { earliest_seq, latest_seq, requested_from_seq };
+  };
+
+  const show_replay_window_banner = (conv_id, details) => {
+    if (!replay_window_banner || !replay_window_text || !details) {
+      return;
+    }
+    replay_window_conv_id = conv_id;
+    replay_window_earliest_seq = details.earliest_seq;
+    const requested_text = Number.isInteger(details.requested_from_seq)
+      ? ` Requested from_seq was ${details.requested_from_seq}.`
+      : '';
+    replay_window_text.textContent = `History pruned. Earliest available seq: ${details.earliest_seq}.${requested_text}`;
+    replay_window_banner.hidden = false;
+  };
+
+  const hide_replay_window_banner = () => {
+    if (!replay_window_banner) {
+      return;
+    }
+    replay_window_banner.hidden = true;
+    replay_window_conv_id = null;
+    replay_window_earliest_seq = null;
+  };
 
   const bytes_to_hex = (bytes) =>
     Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -1338,6 +1397,7 @@
       if (typeof from_seq === 'number' && !Number.isNaN(from_seq)) {
         body.from_seq = from_seq;
       }
+      hide_replay_window_banner();
       this.send_frame('conv.subscribe', body);
     }
 
@@ -1421,6 +1481,18 @@
         return;
       }
       if (message.t === 'error') {
+        if (body.code === 'replay_window_exceeded') {
+          const details = parse_replay_window_details(body);
+          const active_conv_id = conv_id_input && conv_id_input.value ? conv_id_input.value.trim() : '';
+          if (details && active_conv_id) {
+            last_from_seq_by_conv_id[active_conv_id] = details.earliest_seq;
+            from_seq_input.value = String(details.earliest_seq);
+            write_cursor(active_conv_id, details.earliest_seq).catch((err) =>
+              append_log(`failed to persist replay_window_exceeded cursor: ${err.message}`)
+            );
+            show_replay_window_banner(active_conv_id, details);
+          }
+        }
         append_log(`error ${JSON.stringify(body)}`);
         return;
       }
@@ -1966,6 +2038,19 @@
   }
 
   window.addEventListener('gateway.subscribe', handle_gateway_subscribe);
+
+  if (replay_window_resubscribe_btn) {
+    replay_window_resubscribe_btn.addEventListener('click', () => {
+      if (!replay_window_conv_id || !Number.isInteger(replay_window_earliest_seq)) {
+        append_log('replay-window resubscribe unavailable: missing conv_id or earliest_seq');
+        return;
+      }
+      conv_id_input.value = replay_window_conv_id;
+      from_seq_input.value = String(replay_window_earliest_seq);
+      last_from_seq_by_conv_id[replay_window_conv_id] = replay_window_earliest_seq;
+      client.subscribe(replay_window_conv_id, replay_window_earliest_seq);
+    });
+  }
 
   window.addEventListener('dm.outbox.updated', (event) => {
     const detail = event && event.detail ? event.detail : null;

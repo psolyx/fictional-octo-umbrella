@@ -167,6 +167,20 @@ class TestWebUiContracts(unittest.TestCase):
         )
         self.assertIn("set_commit_echo_state('received'", window)
 
+
+    def test_replay_window_error_contracts(self):
+        self.assertIn("replay_window_exceeded", self.gateway_ws_client)
+        self.assertIn("earliest_seq", self.gateway_ws_client)
+        self.assertIn("latest_seq", self.gateway_ws_client)
+        self.assertIn("requested_from_seq", self.gateway_ws_client)
+        self.assertIn("parse_replay_window_details", self.gateway_ws_client)
+        self.assertIn("replay_window_resubscribe_btn", self.gateway_ws_client)
+        self.assertIn("client.subscribe(replay_window_conv_id, replay_window_earliest_seq)", self.gateway_ws_client)
+
+    def test_replay_window_ui_marker(self):
+        self.assertIn("History pruned", self.index_html)
+        self.assertIn("replay_window_banner", self.index_html)
+        self.assertIn("replay_window_resubscribe_btn", self.index_html)
     def test_serving_path_regressions(self):
         self.assertNotIn("/clients/web/", self.index_html)
         self.assertIn("open http://localhost:8000/index.html", self.readme)

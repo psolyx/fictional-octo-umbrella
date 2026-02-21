@@ -23,6 +23,7 @@ class RetentionGCTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         for server, client in self._servers:
+            await client.close()
             await server.close()
         self.tmpdir.cleanup()
 
@@ -109,6 +110,9 @@ class RetentionGCTests(unittest.IsolatedAsyncioTestCase):
             ws_error = await ws.receive_json()
             self.assertEqual(ws_error["t"], "error")
             self.assertEqual(ws_error["body"]["code"], "replay_window_exceeded")
+            self.assertEqual(ws_error["body"]["requested_from_seq"], 1)
+            self.assertEqual(ws_error["body"]["earliest_seq"], earliest_seq)
+            self.assertGreaterEqual(ws_error["body"]["latest_seq"], earliest_seq)
             await ws.close()
 
             replay_resp = await client.get(
@@ -121,6 +125,64 @@ class RetentionGCTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(body["code"], "replay_window_exceeded")
             self.assertEqual(body["earliest_seq"], earliest_seq)
             self.assertGreaterEqual(body["latest_seq"], earliest_seq)
+
+
+    async def test_ws_replay_window_error_includes_structured_fields(self) -> None:
+        env = {
+            "GATEWAY_RETENTION_MAX_EVENTS_PER_CONV": "2",
+            "GATEWAY_RETENTION_MAX_AGE_S": "0",
+            "GATEWAY_RETENTION_HARD_LIMITS": "1",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            client = await self._start_runtime()
+            ready = await self._start_session_http(client, device_id="d1")
+            session_token = ready["session_token"]
+            await self._create_room(client, session_token, "c1")
+
+            for idx in range(4):
+                await self._send_inbox(
+                    client,
+                    session_token,
+                    {
+                        "v": 1,
+                        "t": "conv.send",
+                        "body": {"conv_id": "c1", "msg_id": f"m{idx}", "env": "ZW4=", "ts": idx + 1},
+                    },
+                )
+
+            runtime = self._servers[-1][0].app[RUNTIME_KEY]
+            assert isinstance(runtime.log, SQLiteConversationLog)
+            earliest_seq = runtime.log.earliest_seq("c1")
+            latest_seq = runtime.log.latest_seq("c1")
+            self.assertIsNotNone(earliest_seq)
+            self.assertIsNotNone(latest_seq)
+
+            ws = await client.ws_connect("/v1/ws")
+            await ws.send_json(
+                {
+                    "v": 1,
+                    "t": "session.start",
+                    "id": "start_ws",
+                    "body": {"auth_token": "u1", "device_id": "d_ws"},
+                }
+            )
+            await ws.receive_json()
+            await ws.send_json(
+                {
+                    "v": 1,
+                    "t": "conv.subscribe",
+                    "id": "sub_old",
+                    "body": {"conv_id": "c1", "from_seq": 1},
+                }
+            )
+            ws_error = await ws.receive_json()
+            self.assertEqual(ws_error["t"], "error")
+            self.assertEqual(ws_error["body"]["code"], "replay_window_exceeded")
+            self.assertEqual(ws_error["body"]["requested_from_seq"], 1)
+            self.assertEqual(ws_error["body"]["earliest_seq"], earliest_seq)
+            self.assertEqual(ws_error["body"]["latest_seq"], latest_seq)
+            self.assertIn("requested_from_seq=1", ws_error["body"]["message"])
+            await ws.close()
 
     async def test_safe_mode_preserves_unacked_history_for_active_cursors(self) -> None:
         env = {

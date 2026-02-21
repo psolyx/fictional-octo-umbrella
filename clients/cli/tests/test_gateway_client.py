@@ -2,9 +2,11 @@ import argparse
 import io
 import json
 import socket
+import urllib.error
 from pathlib import Path
 from typing import Iterable
 from unittest import mock
+
 
 from cli_app import gateway_client, mls_poc
 
@@ -269,3 +271,62 @@ def test_load_session_uses_explicit_path():
     load_session.assert_called_once_with(session_path)
     assert base_url == "https://gw.test"
     assert session_token == "st"
+
+
+def test_sse_tail_raises_replay_window_typed_error():
+    payload = json.dumps(
+        {
+            "code": "replay_window_exceeded",
+            "message": "requested history has been pruned",
+            "requested_from_seq": 1,
+            "earliest_seq": 7,
+            "latest_seq": 12,
+        }
+    ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            410,
+            "Gone",
+            hdrs=None,
+            fp=io.BytesIO(payload),
+        )
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            list(gateway_client.sse_tail("https://gw.test", "st", "c_123", 1))
+            raise AssertionError("expected ReplayWindowExceededError")
+        except gateway_client.ReplayWindowExceededError as caught:
+            assert caught.requested_from_seq == 1
+            assert caught.earliest_seq == 7
+            assert caught.latest_seq == 12
+
+
+def test_sse_tail_resilient_resets_from_earliest_seq_once():
+    calls = []
+
+    def fake_sse_tail(base_url, session_token, conv_id, from_seq, max_events=None, idle_timeout_s=None):
+        calls.append(from_seq)
+        if from_seq == 1:
+            raise gateway_client.ReplayWindowExceededError(
+                requested_from_seq=1,
+                earliest_seq=5,
+                latest_seq=9,
+            )
+        yield {"v": 1, "t": "conv.event", "body": {"seq": 5}}
+
+    with mock.patch("cli_app.gateway_client.sse_tail", fake_sse_tail):
+        events = list(
+            gateway_client.sse_tail_resilient(
+                "https://gw.test",
+                "st",
+                "c_123",
+                1,
+                max_events=1,
+                emit_reset_control_event=True,
+            )
+        )
+
+    assert calls == [1, 5]
+    assert events[0]["t"] == "control.replay_window_reset"

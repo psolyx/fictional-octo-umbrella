@@ -261,7 +261,21 @@ Semantics match WS frames.
 - Server behavior:
   - Validate membership; reject with `error` if unauthorized.
   - Perform bounded replay (implementation-defined window) and then stream new events.
-  - If `from_seq` is older than retained history, server MAY reject replay with `error.code = replay_window_exceeded` and include the earliest retained sequence in the message payload.
+  - If `from_seq` is older than retained history, server MAY reject replay with `error.code = replay_window_exceeded`. `body.message` remains a human-readable compatibility string. Servers MAY additionally include optional structured fields `body.requested_from_seq`, `body.earliest_seq`, and `body.latest_seq` so clients can recover deterministically without string parsing.
+  - Structured replay-window payload example (fields are additive/optional):
+    ```json
+    {
+      "v": 1,
+      "t": "error",
+      "body": {
+        "code": "replay_window_exceeded",
+        "message": "requested_from_seq=1 earliest_seq=42",
+        "requested_from_seq": 1,
+        "earliest_seq": 42,
+        "latest_seq": 84
+      }
+    }
+    ```
   - Each delivered message uses `conv.event`:
     ```json
     {
