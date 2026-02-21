@@ -261,6 +261,7 @@ Semantics match WS frames.
 - Server behavior:
   - Validate membership; reject with `error` if unauthorized.
   - Perform bounded replay (implementation-defined window) and then stream new events.
+  - If `from_seq` is older than retained history, server MAY reject replay with `error.code = replay_window_exceeded` and include the earliest retained sequence in the message payload.
   - Each delivered message uses `conv.event`:
     ```json
     {
@@ -373,6 +374,7 @@ Semantics match WS frames.
   - Query params: `conv_id` (required), `from_seq` (optional inclusive start), `after_seq` (optional legacy; maps to `from_seq = after_seq + 1` when `from_seq` is omitted).
   - Membership MUST be enforced on connect and during the stream; revoked members stop receiving events and the stream closes.
   - Replay + live stream: server delivers `conv.event` starting at `from_seq` inclusive, then streams new events in `seq` order.
+  - If requested `from_seq` was pruned by retention policy, server MAY return HTTP `410` with `{ "code": "replay_window_exceeded", "message": "requested history has been pruned", "earliest_seq": <int>, "latest_seq": <int> }`.
     - SSE wire format:
       ```
       event: conv.event
