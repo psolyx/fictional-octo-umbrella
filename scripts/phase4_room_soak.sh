@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+GIT_ERR_FILE="$(mktemp)"
+if ROOT="$(git rev-parse --show-toplevel 2>"$GIT_ERR_FILE")"; then
+  rm -f "$GIT_ERR_FILE"
+  cd "$ROOT"
+else
+  GIT_ERR="$(cat "$GIT_ERR_FILE")"
+  rm -f "$GIT_ERR_FILE"
+  if [[ "$GIT_ERR" == *"detected dubious ownership"* ]]; then
+    echo "Git blocked this repo due to ownership safety checks. You may need:" >&2
+    echo "  git config --global --add safe.directory $(pwd)" >&2
+  fi
+  echo "git rev-parse failed; falling back to script-relative root. Run from a git checkout for best results." >&2
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  cd "$ROOT"
+fi
 
 usage() {
   cat <<'USAGE'
@@ -54,6 +68,11 @@ if (( DURATION_S > 300 || MEMBERS > 200 || MSG_COUNT > 1200 )); then
   SCRIPT_SET_SOAK=1
 fi
 
+SOAK_MODE_WARNING=""
+if (( DURATION_S > 300 || MEMBERS > 200 || MSG_COUNT > 1200 )) && [[ -z "${RUN_SOAK_TESTS+x}" ]]; then
+  SOAK_MODE_WARNING="warning=large_profile_detected script_enabled_run_soak_tests=1"
+fi
+
 if [[ "${RUN_SOAK_TESTS:-0}" == "1" ]]; then
   SCRIPT_SET_SOAK=1
 fi
@@ -71,6 +90,9 @@ DM_LOG="$OUT_DIR/dm_scaled_${STAMP}.log"
   echo "members=$MEMBERS"
   echo "run_slow_tests=$RUN_SLOW_TESTS"
   echo "run_soak_tests=$SCRIPT_SET_SOAK"
+  if [[ -n "$SOAK_MODE_WARNING" ]]; then
+    echo "$SOAK_MODE_WARNING"
+  fi
   echo "timestamp_utc=$STAMP"
 } | tee "$OUT_DIR/profile_${STAMP}.txt"
 
