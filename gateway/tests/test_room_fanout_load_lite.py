@@ -1,8 +1,38 @@
 import os
+from pathlib import Path
 import random
+import sys
 import unittest
 
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import gateway as _gateway_pkg
+
+_GATEWAY_SRC_PKG = str(SRC_DIR / "gateway")
+if _GATEWAY_SRC_PKG not in _gateway_pkg.__path__:
+    _gateway_pkg.__path__.append(_GATEWAY_SRC_PKG)
+
 from gateway.ws_transport import RUNTIME_KEY, _process_conv_send, create_app
+
+
+def _read_int_env(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _read_float_env(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _clamp(value: int, *, lower: int, upper: int) -> int:
+    return max(lower, min(value, upper))
 
 
 class DeviceTracker:
@@ -36,8 +66,36 @@ class RoomFanoutLoadLiteTests(unittest.TestCase):
         runtime = app[RUNTIME_KEY]
 
         run_slow = os.getenv("RUN_SLOW_TESTS") == "1"
-        member_count = 900 if run_slow else 200
-        message_count = 300 if run_slow else 120
+        run_soak = os.getenv("RUN_SOAK_TESTS") == "1"
+
+        default_member_count = 900 if run_slow else 200
+        default_message_count = 300 if run_slow else 120
+
+        requested_member_count = _read_int_env("ROOM_MEMBERS")
+        requested_duration_s = _read_int_env("ROOM_DURATION_S")
+        requested_message_count = _read_int_env("ROOM_MSG_COUNT")
+        requested_message_rate = _read_float_env("ROOM_MSG_RATE")
+
+        if requested_message_count is None and requested_message_rate is not None:
+            duration_for_rate = (
+                requested_duration_s if requested_duration_s is not None else 60
+            )
+            requested_message_count = int(round(requested_message_rate * duration_for_rate))
+
+        member_count = (
+            requested_member_count
+            if requested_member_count is not None
+            else default_member_count
+        )
+        message_count = (
+            requested_message_count
+            if requested_message_count is not None
+            else default_message_count
+        )
+
+        if not run_soak:
+            member_count = _clamp(member_count, lower=2, upper=200)
+            message_count = _clamp(message_count, lower=1, upper=120)
 
         conv_id = "room-load-lite"
         members = [f"user-{i}" for i in range(member_count)]
