@@ -137,9 +137,10 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - KeyPackage exhaustion test: system degrades gracefully via rate limits; optional "last-resort" issuance is deferred/not implemented in the current repo.
 
 **Implementation reality (current repo)**
-- Retention/GC remains operator-managed in this PoC: conversation/idempotency rows are retained until an operator rotates or prunes the backing database.
-- Idempotency (`conv_id`, `msg_id`) is enforced for the retained window only; if operators delete old rows, retries against deleted history may no longer dedupe.
-- See `gateway/docs/retention_and_idempotency.md` for operational guidance.
+- Retention/GC policy is implemented for SQLite mode with operator-tuned knobs (`GATEWAY_RETENTION_MAX_EVENTS_PER_CONV`, `GATEWAY_RETENTION_MAX_AGE_S`, sweeper interval, SAFE/HARD enforcement).
+- Replay remains bounded: requests older than retained history can fail with `replay_window_exceeded` (WS error / SSE HTTP 410).
+- Idempotency (`conv_id`, `msg_id`) is enforced for retained rows; pruning old rows intentionally bounds dedupe history.
+- See `gateway/docs/retention_and_idempotency.md` for operational guidance and retention drill expectations.
 
 **Risk retired**
 - KeyPackage lifecycle and offline delivery semantics are proven.

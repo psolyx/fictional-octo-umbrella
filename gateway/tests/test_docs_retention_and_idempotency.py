@@ -10,7 +10,7 @@ class RetentionAndIdempotencyDocTests(unittest.TestCase):
     def test_retention_and_idempotency_doc_exists_and_has_required_anchors(self) -> None:
         self.assertTrue(DOC_PATH.exists(), "retention/idempotency doc is missing")
         text = DOC_PATH.read_text(encoding="utf-8").lower()
-        for anchor in ("no automatic ttl/gc", "operator", "idempotency", "last-resort"):
+        for anchor in ("retention policy knobs", "safe mode", "hard mode", "replay_window_exceeded", "idempotency", "last-resort"):
             self.assertIn(anchor, text)
 
 

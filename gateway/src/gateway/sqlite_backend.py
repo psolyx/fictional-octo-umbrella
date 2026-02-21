@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6, 7):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -73,7 +73,11 @@ class SQLiteBackend:
             self._migrate_v6_to_v7()
             user_version = 7
 
-        if user_version != 7:
+        if user_version == 7:
+            self._migrate_v7_to_v8()
+            user_version = 8
+
+        if user_version != 8:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -237,3 +241,12 @@ class SQLiteBackend:
             "CREATE UNIQUE INDEX IF NOT EXISTS social_events_user_event_hash_idx ON social_events (user_id, event_hash)"
         )
         self._conn.execute("PRAGMA user_version = 7")
+
+    def _migrate_v7_to_v8(self) -> None:
+        cursor_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(cursors)").fetchall()}
+        if "updated_ms" not in cursor_columns:
+            self._conn.execute("ALTER TABLE cursors ADD COLUMN updated_ms INTEGER NOT NULL DEFAULT 0")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS cursors_conv_updated_idx ON cursors (conv_id, updated_ms, next_seq)"
+        )
+        self._conn.execute("PRAGMA user_version = 8")

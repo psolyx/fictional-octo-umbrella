@@ -21,6 +21,7 @@ from .hub import Subscription, SubscriptionHub
 from .keypackages import InMemoryKeyPackageStore, SQLiteKeyPackageStore
 from .log import ConversationEvent, ConversationLog
 from .presence import FixedWindowRateLimiter, LimitExceeded, Presence, RateLimitExceeded
+from .retention import ReplayWindowExceeded, RetentionPolicy, load_retention_policy_from_env
 from .social import InMemorySocialStore, InvalidChain, InvalidSignature, SQLiteSocialStore
 from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
@@ -119,6 +120,7 @@ class Runtime:
         gateway_public_url: str,
         gateway_directory: dict[str, str],
         social,
+        retention_policy: RetentionPolicy | None = None,
     ) -> None:
         self.log = log
         self.cursors = cursors
@@ -134,6 +136,8 @@ class Runtime:
         self.gateway_public_url = gateway_public_url
         self.gateway_directory = gateway_directory
         self.social = social
+        self.retention_policy = retention_policy
+        self.retention_task: asyncio.Task[None] | None = None
 
 
 if hasattr(web, "AppKey"):
@@ -295,8 +299,45 @@ def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any])
         return None, None, ("forbidden", "not a member")
     seq, event, created = runtime.log.append(conv_id, msg_id, env, session.device_id, ts)
     if created:
+        _opportunistic_prune(runtime, conv_id)
         runtime.hub.broadcast(event)
     return seq, event, None
+
+
+def _sqlite_active_min_next_seq(runtime: Runtime, conv_id: str, now_ms: int) -> int | None:
+    if runtime.retention_policy is None or not isinstance(runtime.cursors, SQLiteCursorStore):
+        return None
+    return runtime.cursors.active_min_next_seq(
+        conv_id,
+        now_ms,
+        runtime.retention_policy.cursor_stale_after_ms,
+    )
+
+
+def _opportunistic_prune(runtime: Runtime, conv_id: str) -> int:
+    if runtime.retention_policy is None or not runtime.retention_policy.enabled:
+        return 0
+    if not isinstance(runtime.log, SQLiteConversationLog):
+        return 0
+    now_ms = runtime.now_func()
+    return runtime.log.prune_conv(
+        conv_id,
+        runtime.retention_policy,
+        now_ms,
+        _sqlite_active_min_next_seq(runtime, conv_id, now_ms),
+    )
+
+
+def _replay_window_exceeded_response(exc: ReplayWindowExceeded) -> web.Response:
+    return web.json_response(
+        {
+            "code": "replay_window_exceeded",
+            "message": "requested history has been pruned",
+            "earliest_seq": exc.earliest_seq,
+            "latest_seq": exc.latest_seq,
+        },
+        status=410,
+    )
 
 
 def _process_conv_ack(runtime: Runtime, session: Session, body: dict[str, Any]) -> tuple[str, str] | None:
@@ -644,6 +685,11 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
     if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
         return _forbidden("not a member")
 
+    try:
+        events = runtime.log.list_from(conv_id, from_seq)
+    except ReplayWindowExceeded as exc:
+        return _replay_window_exceeded_response(exc)
+
     response = web.StreamResponse(
         status=200,
         headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store"},
@@ -692,7 +738,6 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
     subscription = runtime.hub.subscribe(session.device_id, conv_id, subscription_callback)
     sse_writer = SSEWriter(response, lambda: stop_subscription(subscription))
 
-    events = runtime.log.list_from(conv_id, from_seq)
     for event in events:
         guarded_enqueue(event, subscription)
 
@@ -1010,9 +1055,11 @@ def create_app(
     gateway_directory_path: str | None = None,
 ) -> web.Application:
     backend: SQLiteBackend | None = None
+    retention_policy: RetentionPolicy | None = None
     if db_path is not None:
         backend = SQLiteBackend(db_path)
-        log = SQLiteConversationLog(backend)
+        retention_policy = load_retention_policy_from_env()
+        log = SQLiteConversationLog(backend, retention_policy=retention_policy)
         cursors = SQLiteCursorStore(backend)
         sessions: SessionStore = SQLiteSessionStore(backend)
         keypackages = SQLiteKeyPackageStore(backend)
@@ -1049,6 +1096,7 @@ def create_app(
         gateway_public_url=resolved_gateway_public_url,
         gateway_directory=gateway_directory,
         social=social,
+        retention_policy=retention_policy,
     )
     app = web.Application()
     app[RUNTIME_KEY] = runtime
@@ -1080,6 +1128,47 @@ def create_app(
     app.router.add_get("/v1/social/events", handle_social_events)
     app.router.add_get("/v1/gateways/resolve", handle_gateway_resolve)
     app.router.add_get("/v1/ws", websocket_handler)
+
+    async def retention_sweeper(app_: web.Application) -> None:
+        runtime_ = app_[RUNTIME_KEY]
+        policy = runtime_.retention_policy
+        if policy is None or not policy.enabled or not isinstance(runtime_.log, SQLiteConversationLog):
+            return
+        interval = policy.sweep_interval_s
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                now_ms = runtime_.now_func()
+                for conv_id in runtime_.log.list_conversations():
+                    runtime_.log.prune_conv(
+                        conv_id,
+                        policy,
+                        now_ms,
+                        _sqlite_active_min_next_seq(runtime_, conv_id, now_ms),
+                    )
+            except asyncio.CancelledError:
+                return
+
+    async def start_retention(_: web.Application) -> None:
+        if runtime.retention_policy is None or not runtime.retention_policy.enabled:
+            return
+        if not isinstance(runtime.log, SQLiteConversationLog):
+            return
+        runtime.retention_task = asyncio.create_task(retention_sweeper(app))
+
+    async def stop_retention(_: web.Application) -> None:
+        if runtime.retention_task is None:
+            return
+        runtime.retention_task.cancel()
+        try:
+            await runtime.retention_task
+        except asyncio.CancelledError:
+            pass
+        runtime.retention_task = None
+
+    app.on_startup.append(start_retention)
+    app.on_cleanup.append(stop_retention)
+
     if backend is not None:
         async def close_db(_: web.Application) -> None:
             backend.close()
@@ -1282,7 +1371,17 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             from_seq = after_seq + 1
                         else:
                             from_seq = runtime.cursors.next_seq(session.device_id, conv_id)
-                    events = runtime.log.list_from(conv_id, from_seq, limit=1000)
+                    try:
+                        events = runtime.log.list_from(conv_id, from_seq, limit=1000)
+                    except ReplayWindowExceeded as exc:
+                        await ws.send_json(
+                            _error_frame(
+                                "replay_window_exceeded",
+                                f"requested_from_seq={exc.requested_from_seq} earliest_seq={exc.earliest_seq}",
+                                request_id=frame.get("id"),
+                            )
+                        )
+                        continue
 
                     buffered_events: List[ConversationEvent] = []
                     buffering = True
