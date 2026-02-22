@@ -509,7 +509,9 @@ def _profile_value(profile: Dict[str, object], key: str) -> str:
 def _build_profile_lines(render: object) -> list[str]:
     profile = render.profile_data if isinstance(render.profile_data, dict) else {}
     friends = profile.get("friends", []) if isinstance(profile.get("friends"), list) else []
-    bulletins = profile.get("bulletins", []) if isinstance(profile.get("bulletins"), list) else []
+    latest_posts = profile.get("latest_posts")
+    if not isinstance(latest_posts, list):
+        latest_posts = profile.get("bulletins", []) if isinstance(profile.get("bulletins"), list) else []
     lines = [
         "MySpace-style profile",
         f"User: {_profile_value(profile, 'user_id') or render.profile_user_id}",
@@ -523,9 +525,9 @@ def _build_profile_lines(render: object) -> list[str]:
     for friend in friends:
         lines.append(f"  - {friend}")
     lines.append(
-        f"Latest Bulletins ({len(bulletins)}) [{'selected' if render.profile_selected_section == 'bulletins' else 'tab to select'}]"
+        f"Latest Bulletins ({len(latest_posts)}) [{'selected' if render.profile_selected_section == 'bulletins' else 'tab to select'}]"
     )
-    for item in bulletins:
+    for item in latest_posts:
         if isinstance(item, dict):
             lines.append(_format_bulletin_item(item))
     return lines
@@ -533,7 +535,22 @@ def _build_profile_lines(render: object) -> list[str]:
 
 def _format_bulletin_item(item: Dict[str, object]) -> str:
     ts = str(item.get("ts_ms") or item.get("ts") or "")
-    text = str(item.get("text", "")).replace("\n", " ").strip()
+    payload = item.get("payload")
+    text = ""
+    if isinstance(payload, dict):
+        payload_value = payload.get("value")
+        payload_text = payload.get("text")
+        if payload_value is not None:
+            text = str(payload_value)
+        elif payload_text is not None:
+            text = str(payload_text)
+        else:
+            text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    elif item.get("text") is not None:
+        text = str(item.get("text"))
+    elif payload is not None:
+        text = str(payload)
+    text = text.replace("\n", " ").strip()
     if len(text) > 56:
         text = f"{text[:56]}…"
     return f"  - {ts}: {text}"
@@ -542,7 +559,21 @@ def _format_bulletin_item(item: Dict[str, object]) -> str:
 def _format_feed_item(item: Dict[str, object]) -> str:
     author = str(item.get("author") or item.get("user_id") or "")
     ts = str(item.get("ts_ms") or item.get("ts") or "")
-    text = str(item.get("text") or item.get("payload", ""))
+    payload = item.get("payload")
+    text = ""
+    if isinstance(payload, dict):
+        payload_value = payload.get("value")
+        payload_text = payload.get("text")
+        if payload_value is not None:
+            text = str(payload_value)
+        elif payload_text is not None:
+            text = str(payload_text)
+        else:
+            text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    elif item.get("text") is not None:
+        text = str(item.get("text"))
+    elif payload is not None:
+        text = str(payload)
     text = text.replace("\n", " ").strip()
     if len(text) > 72:
         text = f"{text[:72]}…"

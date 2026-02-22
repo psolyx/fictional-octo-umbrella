@@ -65,6 +65,10 @@ class InvalidChain(Exception):
     pass
 
 
+class CursorNotFound(Exception):
+    pass
+
+
 def _verify_signature(user_id: str, sig_b64: str, canonical_bytes: bytes) -> None:
     try:
         public_key = _b64url_decode(user_id)
@@ -96,6 +100,8 @@ def _canon_and_hash(
 class InMemorySocialStore:
     def __init__(self) -> None:
         self._events: dict[str, list[SocialEvent]] = {}
+        self._append_seq = 0
+        self._event_seq: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def head(self, user_id: str) -> SocialEvent | None:
@@ -133,6 +139,8 @@ class InMemorySocialStore:
             )
             events.append(event)
             self._events[user_id] = events
+            self._append_seq += 1
+            self._event_seq[event_hash] = self._append_seq
             return event
 
     def list_events(self, user_id: str, *, limit: int, after_hash: str | None) -> List[SocialEvent]:
@@ -159,14 +167,45 @@ class InMemorySocialStore:
         with self._lock:
             events: list[SocialEvent] = []
             user_id_set = set(user_ids)
+            cursor_seq = None
+            if cursor:
+                cursor_ts_ms, cursor_hash = cursor
+                cursor_event = next(
+                    (
+                        social_event
+                        for events_for_user in self._events.values()
+                        for social_event in events_for_user
+                        if social_event.event_hash == cursor_hash
+                        and social_event.ts_ms == cursor_ts_ms
+                        and social_event.kind == "post"
+                    ),
+                    None,
+                )
+                if cursor_event is None:
+                    raise CursorNotFound("cursor not found")
+                cursor_seq = self._event_seq.get(cursor_hash)
+                if cursor_seq is None:
+                    raise CursorNotFound("cursor not found")
             for events_for_user in self._events.values():
                 for social_event in events_for_user:
                     if social_event.user_id not in user_id_set or social_event.kind != "post":
                         continue
-                    if cursor and (social_event.ts_ms, social_event.event_hash) >= cursor:
+                    if cursor and cursor_seq is not None:
+                        event_seq = self._event_seq.get(social_event.event_hash)
+                        if event_seq is None:
+                            continue
+                        if not (
+                            social_event.ts_ms < cursor[0]
+                            or (social_event.ts_ms == cursor[0] and event_seq < cursor_seq)
+                        ):
+                            continue
+                    if social_event.event_hash not in self._event_seq:
                         continue
                     events.append(social_event)
-            events.sort(key=lambda item: (item.ts_ms, item.event_hash), reverse=True)
+            events.sort(
+                key=lambda item: (item.ts_ms, self._event_seq.get(item.event_hash, 0)),
+                reverse=True,
+            )
             return events[:limit]
 
 
@@ -289,7 +328,7 @@ class SQLiteSocialStore:
         placeholders = ",".join("?" for _ in user_ids)
         query = (
             """
-            SELECT user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64
+            SELECT rowid, user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64
             FROM social_events
             WHERE kind = 'post' AND user_id IN (
             """
@@ -298,13 +337,37 @@ class SQLiteSocialStore:
         )
         params: list[Any] = list(user_ids)
         if cursor:
-            query += " AND (ts_ms < ? OR (ts_ms = ? AND event_hash < ?))"
-            params.extend([cursor[0], cursor[0], cursor[1]])
-        query += " ORDER BY ts_ms DESC, event_hash DESC LIMIT ?"
+            with self._backend.lock:
+                cursor_row = self._backend.connection.execute(
+                    """
+                    SELECT rowid
+                    FROM social_events
+                    WHERE event_hash = ? AND ts_ms = ? AND kind = 'post'
+                    LIMIT 1
+                    """,
+                    (cursor[1], cursor[0]),
+                ).fetchone()
+            if cursor_row is None:
+                raise CursorNotFound("cursor not found")
+            cursor_rowid = cursor_row[0]
+            query += " AND (ts_ms < ? OR (ts_ms = ? AND rowid < ?))"
+            params.extend([cursor[0], cursor[0], cursor_rowid])
+        query += " ORDER BY ts_ms DESC, rowid DESC LIMIT ?"
         params.append(limit)
         with self._backend.lock:
             rows = self._backend.connection.execute(query, tuple(params)).fetchall()
-        return [SocialEvent(**row) for row in rows]
+        return [
+            SocialEvent(
+                user_id=row["user_id"],
+                event_hash=row["event_hash"],
+                prev_hash=row["prev_hash"],
+                ts_ms=row["ts_ms"],
+                kind=row["kind"],
+                payload_json=row["payload_json"],
+                sig_b64=row["sig_b64"],
+            )
+            for row in rows
+        ]
 
 
 def social_event_sort_key(social_event: SocialEvent) -> tuple[int, str]:

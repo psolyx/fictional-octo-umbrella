@@ -87,6 +87,45 @@ Semantics match WS frames.
   - `GET /v1/social/events?user_id=...&limit=...&after_hash=...`
     - Returns `{ "events": [ {user_id, event_hash, prev_hash, ts_ms, kind, payload, sig_b64}, ... ] }` ordered from oldest after `after_hash`.
     - Responses MUST include `Cache-Control: public, max-age=30` and SHOULD include a strong validator (`ETag` based on the returned head hash and `Last-Modified` based on the newest `ts_ms`).
+  - `GET /v1/social/profile?user_id=...&limit=...`
+    - Returns a profile aggregate:
+      ```json
+      {
+        "user_id": "u_...",
+        "username": "alice",
+        "description": "about text",
+        "avatar": "https://...",
+        "banner": "https://...",
+        "interests": "music, coding",
+        "friends": ["u_friend_1", "u_friend_2"],
+        "latest_posts": [
+          { "user_id": "u_...", "event_hash": "...", "ts_ms": 123, "kind": "post", "payload": {"value": "hello"}, "sig_b64": "..." }
+        ]
+      }
+      ```
+    - `limit` controls the maximum number of `latest_posts` returned (default `20`, max `100`).
+    - Latest profile fields are last-writer-wins by `(ts_ms, event_hash)` among that user's signed events.
+  - `GET /v1/social/feed?user_id=...&limit=...&cursor=...`
+    - Returns followed-user + self posts:
+      ```json
+      {
+        "items": [
+          { "user_id": "u_...", "event_hash": "...", "ts_ms": 123, "kind": "post", "payload": {"value": "hello"} }
+        ],
+        "next_cursor": "123:event_hash_hex",
+        "sources": ["u_self", "u_friend"]
+      }
+      ```
+    - Ordering MUST be deterministic across backends:
+      - primary sort: `ts_ms DESC`
+      - tie-break for equal `ts_ms`: append order DESC (later appended events are newer)
+    - `cursor` format is `ts_ms:event_hash`.
+      - Cursor semantics are positional in the total order above.
+      - Servers MAY resolve append-order tie-breaks via internal storage metadata (for example, row order/sequence lookup by `event_hash`).
+      - If a cursor cannot be resolved to a known post at that timestamp, server MUST return `400 invalid_request` (`cursor not found`).
+    - `next_cursor` is empty when there is no next page; otherwise it is derived from the oldest item in the current page under the deterministic order.
+
+- Note: `kind` and signed append-only event semantics here are Polycentric-inspired, while this v1 gateway profile/feed API intentionally uses plain JSON (no protobuf requirement).
 
 ---
 

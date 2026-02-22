@@ -138,6 +138,19 @@ class SocialProfileAndFeedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["payload"]["value"] for item in second_page["items"]], ["bob-100-a"])
         self.assertEqual(second_page["items"][0]["event_hash"], first["event_hash"])
 
+    async def test_feed_cursor_not_found_is_invalid_request(self):
+        await self._publish(self.bob, 100, "post", {"value": "bob-100-a"})
+        await self._publish(self.alice, 110, "follow", {"target_user_id": self.bob, "following": True})
+
+        missing_cursor_response = await self.client.get(
+            "/v1/social/feed",
+            params={"user_id": self.alice, "limit": "5", "cursor": "100:not-a-real-hash"},
+        )
+        self.assertEqual(missing_cursor_response.status, 400)
+        payload = await missing_cursor_response.json()
+        self.assertEqual(payload.get("code"), "invalid_request")
+        self.assertEqual(payload.get("message"), "cursor not found")
+
 
 if __name__ == "__main__":
     unittest.main()
