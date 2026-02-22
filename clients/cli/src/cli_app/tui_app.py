@@ -233,7 +233,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | Ctrl-N: new DM | L: refresh convs | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -1297,6 +1297,63 @@ def _start_presence_thread(
     return thread
 
 
+def _default_state_dir_for_conv(conv_id: str) -> str:
+    return str((Path.home() / ".mls_dm_states" / conv_id).expanduser())
+
+
+def _short_user_label(user_id: str) -> str:
+    if len(user_id) <= 12:
+        return user_id
+    return f"{user_id[:6]}…{user_id[-4:]}"
+
+
+def _refresh_conversations(
+    model: TuiModel,
+    session: SessionState | None,
+) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    payload = gateway_client.conversations_list(session.base_url, session.session_token)
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        _append_system_message(model, "Conversation refresh returned invalid payload.")
+        return
+    added = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        conv_id = str(item.get("conv_id", "")).strip()
+        if not conv_id:
+            continue
+        members = item.get("members") if isinstance(item.get("members"), list) else []
+        members = [member for member in members if isinstance(member, str)]
+        member_count = int(item.get("member_count") or len(members) or 0)
+        peer_user_id = ""
+        if member_count == 2 and members:
+            for member in members:
+                if member != model.identity.social_public_key_b64:
+                    peer_user_id = member
+                    break
+            if not peer_user_id and len(members) == 2:
+                peer_user_id = members[0]
+        if peer_user_id:
+            name = f"dm {_short_user_label(peer_user_id)}"
+        else:
+            name = f"room {conv_id[:8]} ({member_count})"
+        existed = model.find_conversation(conv_id) is not None
+        model.ensure_conversation(
+            conv_id=conv_id,
+            name=name,
+            state_dir=_default_state_dir_for_conv(conv_id),
+            peer_user_id=peer_user_id,
+            next_seq=1,
+        )
+        if not existed:
+            added += 1
+    _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
+
+
 def _send_dm_message(
     model: TuiModel,
     session: SessionState | None,
@@ -1345,10 +1402,12 @@ def _create_new_dm(
     if session is None:
         _append_system_message(model, "No active session. Press r to resume.")
         return
-    if not peer_user_id or not name or not state_dir:
-        _append_system_message(model, "New DM requires peer_user_id, name, and state_dir.")
+    if not peer_user_id:
+        _append_system_message(model, "New DM requires peer_user_id.")
         return
     conv_id = conv_id.strip() if conv_id.strip() else f"dm_{secrets.token_urlsafe(8)}"
+    name = name.strip() if name.strip() else f"dm {_short_user_label(peer_user_id)}"
+    state_dir = state_dir.strip() if state_dir.strip() else _default_state_dir_for_conv(conv_id)
     response = gateway_client.keypackages_fetch(session.base_url, session.session_token, peer_user_id, 1)
     keypackages = response.get("keypackages", [])
     if not keypackages:
@@ -1862,6 +1921,10 @@ def main() -> int:
                 session_state = _resume_or_start_session(model)
                 _stop_tail_threads()
                 _ensure_tail_threads()
+            if action == "conv_refresh":
+                _refresh_conversations(model, session_state)
+                _stop_tail_threads()
+                _ensure_tail_threads()
             if action == "social_toggle":
                 if model.social_active:
                     _set_social_status(model, "Social panel active.")
@@ -1920,6 +1983,7 @@ def main() -> int:
                     new_dm.get("state_dir", "").strip(),
                     new_dm.get("conv_id", "").strip(),
                 )
+                _refresh_conversations(model, session_state)
                 model.new_dm_active = False
                 model.focus_area = "conversations"
                 _ensure_tail_threads()

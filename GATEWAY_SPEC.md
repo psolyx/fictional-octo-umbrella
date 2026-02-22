@@ -467,6 +467,29 @@ Semantics match WS frames.
   - On success returns `{ "status": "ok" }`.
   - Errors: `invalid_request` (malformed payload or duplicate conversation), `limit_exceeded` (member cap).
 
+### 8.1a List member conversations
+- Endpoint: `GET /v1/conversations` (HTTP, authenticated as above).
+- Response:
+  ```json
+  {
+    "items": [
+      {
+        "conv_id": "c_7N7...",
+        "role": "owner",
+        "created_at_ms": 1766793600123,
+        "home_gateway": "gw_local",
+        "member_count": 2,
+        "members": ["u_01F...", "u_02F..."]
+      }
+    ]
+  }
+  ```
+- Semantics:
+  - Returns only conversations where the authenticated `user_id` is currently a member.
+  - Ordering MUST be deterministic: `created_at_ms` ascending, then `conv_id` ascending.
+  - `member_count` MUST always be present.
+  - `members` SHOULD be included only when `member_count <= 20`; for larger rooms it MAY be omitted to keep responses bounded.
+
 ### 8.2 Invite
 - Endpoint: `POST /v1/rooms/invite` (HTTP, authenticated as above).
 - Body:

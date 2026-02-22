@@ -11,6 +11,7 @@ from .sqlite_sessions import _now_ms
 MAX_MEMBERS_PER_CONV = 1024
 INVITES_PER_MIN = 60
 REMOVES_PER_MIN = 60
+MAX_INLINE_MEMBERS = 20
 
 
 @dataclass
@@ -113,6 +114,26 @@ class InMemoryConversationStore:
 
     def is_known(self, conv_id: str) -> bool:
         return conv_id in self._conversations
+
+    def list_for_user(self, user_id: str) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        for conv_id, conversation in self._conversations.items():
+            roster = self._members.get(conv_id, {})
+            role = roster.get(user_id)
+            if role is None:
+                continue
+            item: dict[str, object] = {
+                "conv_id": conv_id,
+                "role": role,
+                "created_at_ms": conversation.created_at_ms,
+                "home_gateway": conversation.home_gateway,
+                "member_count": len(roster),
+            }
+            if len(roster) <= MAX_INLINE_MEMBERS:
+                item["members"] = sorted(roster.keys())
+            items.append(item)
+        items.sort(key=lambda row: (int(row["created_at_ms"]), str(row["conv_id"])))
+        return items
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         conversation = self._conversations.get(conv_id)
@@ -313,6 +334,64 @@ class SQLiteConversationStore:
                     (home_gateway, conv_id),
                 )
         return home_gateway
+
+    def list_for_user(self, user_id: str) -> list[dict[str, object]]:
+        with self._backend.lock:
+            rows = self._backend.connection.execute(
+                """
+                SELECT
+                    c.conv_id,
+                    c.created_at_ms,
+                    c.home_gateway,
+                    cm.role,
+                    (
+                        SELECT COUNT(*)
+                        FROM conversation_members cm_count
+                        WHERE cm_count.conv_id = c.conv_id
+                    ) AS member_count
+                FROM conversations c
+                JOIN conversation_members cm ON cm.conv_id = c.conv_id
+                WHERE cm.user_id = ?
+                ORDER BY c.created_at_ms ASC, c.conv_id ASC
+                """,
+                (user_id,),
+            ).fetchall()
+            members_by_conv: dict[str, list[str]] = {}
+            small_conv_ids = [
+                str(row["conv_id"])
+                for row in rows
+                if int(row["member_count"]) <= MAX_INLINE_MEMBERS
+            ]
+            if small_conv_ids:
+                placeholders = ",".join("?" for _ in small_conv_ids)
+                member_rows = self._backend.connection.execute(
+                    f"""
+                    SELECT conv_id, user_id
+                    FROM conversation_members
+                    WHERE conv_id IN ({placeholders})
+                    ORDER BY conv_id ASC, user_id ASC
+                    """,
+                    tuple(small_conv_ids),
+                ).fetchall()
+                for member_row in member_rows:
+                    conv_id = str(member_row["conv_id"])
+                    members_by_conv.setdefault(conv_id, []).append(str(member_row["user_id"]))
+
+        items: list[dict[str, object]] = []
+        for row in rows:
+            conv_id = str(row["conv_id"])
+            item: dict[str, object] = {
+                "conv_id": conv_id,
+                "role": str(row["role"]),
+                "created_at_ms": int(row["created_at_ms"]),
+                "home_gateway": str(row["home_gateway"]),
+                "member_count": int(row["member_count"]),
+            }
+            members = members_by_conv.get(conv_id)
+            if members is not None:
+                item["members"] = members
+            items.append(item)
+        return items
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         with self._backend.lock:

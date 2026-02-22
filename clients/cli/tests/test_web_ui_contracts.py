@@ -192,6 +192,13 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("replay_window_resubscribe_btn", self.gateway_ws_client)
         self.assertIn("client.subscribe(replay_window_conv_id, replay_window_earliest_seq)", self.gateway_ws_client)
 
+
+    def test_conversations_discovery_contract(self):
+        self.assertIn('legend>Conversations<', self.index_html)
+        self.assertIn('/v1/conversations', self.gateway_ws_client)
+        self.assertIn("conv_id_input.value = item.conv_id", self.gateway_ws_client)
+        self.assertIn("subscribe_btn.click()", self.gateway_ws_client)
+
     def test_replay_window_ui_marker(self):
         self.assertIn("History pruned", self.index_html)
         self.assertIn("replay_window_banner", self.index_html)

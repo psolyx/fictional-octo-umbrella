@@ -846,6 +846,14 @@ async def handle_room_create(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_conversations_list(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    return web.json_response({"items": runtime.conversations.list_for_user(session.user_id)})
+
+
 async def handle_room_invite(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1270,6 +1278,7 @@ def create_app(
     app.router.add_post("/v1/presence/block", handle_presence_block)
     app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
     app.router.add_post("/v1/rooms/create", handle_room_create)
+    app.router.add_get("/v1/conversations", handle_conversations_list)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)

@@ -483,6 +483,48 @@ class TuiModel:
         self._persist()
         return conversation
 
+    def find_conversation(self, conv_id: str) -> Dict[str, Any] | None:
+        for conversation in self.dm_conversations:
+            if str(conversation.get("conv_id", "")) == conv_id:
+                return conversation
+        return None
+
+    def ensure_conversation(
+        self,
+        *,
+        conv_id: str,
+        name: str,
+        state_dir: str,
+        peer_user_id: str,
+        next_seq: int = 1,
+    ) -> Dict[str, Any]:
+        existing = self.find_conversation(conv_id)
+        if existing is not None:
+            if not existing.get("name"):
+                existing["name"] = name
+            if not existing.get("state_dir"):
+                existing["state_dir"] = state_dir
+            if peer_user_id and not existing.get("peer_user_id"):
+                existing["peer_user_id"] = peer_user_id
+            if int(existing.get("next_seq") or 1) < next_seq:
+                existing["next_seq"] = next_seq
+            self._persist()
+            return existing
+
+        conversation = self._normalize_conversation(
+            {
+                "name": name,
+                "state_dir": state_dir,
+                "peer_user_id": peer_user_id,
+                "conv_id": conv_id,
+                "next_seq": next_seq,
+            },
+            name,
+        )
+        self.dm_conversations.append(conversation)
+        self._persist()
+        return conversation
+
     def append_message(self, conv_id: str, direction: str, text: str) -> None:
         conv = self.get_selected_conv()
         if conv_id:
@@ -745,6 +787,8 @@ class TuiModel:
                 self.new_dm_active_field = 0
                 self.focus_area = "new_dm"
                 return None
+            if key == "CHAR" and char in {"l", "L"}:
+                return "conv_refresh"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()
