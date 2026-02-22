@@ -154,6 +154,21 @@ class TestWebUiContracts(unittest.TestCase):
         window = slice_after(self.social_ui, marker)
         assert_detail_keys(self, window, ("user_id",))
         self.assertIn("addEventListener('social.peer.selected'", self.dm_ui)
+        self.assertIn("MySpace-style profile", self.index_html)
+        for marker in (
+            'id="profile_banner"',
+            'id="profile_avatar"',
+            'id="profile_about"',
+            'id="profile_interests"',
+            'id="profile_friends"',
+            'id="profile_bulletins"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.index_html)
+        self.assertIn("/v1/social/profile", self.social_ui)
+        self.assertIn("/v1/social/feed", self.social_ui)
+        self.assertIn("Add Friend", self.social_ui)
+        self.assertIn("Remove Friend", self.social_ui)
 
     def test_dm_echo_before_apply_gate(self):
         marker = "addEventListener('dm.commit.echoed'"

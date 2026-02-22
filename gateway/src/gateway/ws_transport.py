@@ -22,7 +22,16 @@ from .keypackages import InMemoryKeyPackageStore, SQLiteKeyPackageStore
 from .log import ConversationEvent, ConversationLog
 from .presence import FixedWindowRateLimiter, LimitExceeded, Presence, RateLimitExceeded
 from .retention import ReplayWindowExceeded, RetentionPolicy, load_retention_policy_from_env
-from .social import InMemorySocialStore, InvalidChain, InvalidSignature, SQLiteSocialStore
+from .social import (
+    InMemorySocialStore,
+    InvalidChain,
+    InvalidSignature,
+    SQLiteSocialStore,
+    decode_payload_json,
+    latest_event_by_kind,
+    parse_feed_cursor,
+    parse_follow_payload,
+)
 from .sqlite_backend import SQLiteBackend
 from .sqlite_cursors import SQLiteCursorStore
 from .sqlite_log import SQLiteConversationLog
@@ -1024,6 +1033,143 @@ async def handle_social_events(request: web.Request) -> web.Response:
     return _with_cache(response, etag=etag, last_modified_ms=last_modified_ms)
 
 
+async def handle_social_profile(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return _invalid_request("user_id required")
+
+    limit_str = request.query.get("limit")
+    latest_posts_limit = 20
+    if limit_str is not None:
+        try:
+            latest_posts_limit = int(limit_str)
+        except ValueError:
+            return _invalid_request("limit must be an integer")
+    if latest_posts_limit <= 0:
+        return _invalid_request("limit must be positive")
+    latest_posts_limit = min(latest_posts_limit, 100)
+
+    social_events = runtime.social.list_all_events(user_id)
+    username_event = latest_event_by_kind(social_events, "username")
+    description_event = latest_event_by_kind(social_events, "description")
+    avatar_event = latest_event_by_kind(social_events, "avatar")
+    banner_event = latest_event_by_kind(social_events, "banner")
+    interests_event = latest_event_by_kind(social_events, "interests")
+
+    follow_state: dict[str, tuple[int, str, bool]] = {}
+    posts = []
+    last_modified_ms = None
+    for social_event in social_events:
+        last_modified_ms = max(last_modified_ms or 0, social_event.ts_ms)
+        payload = decode_payload_json(social_event)
+        if social_event.kind == "follow":
+            parsed = parse_follow_payload(payload)
+            if parsed is None:
+                continue
+            target_user_id, following = parsed
+            current = follow_state.get(target_user_id)
+            sort_key = (social_event.ts_ms, social_event.event_hash)
+            if current is None or sort_key > (current[0], current[1]):
+                follow_state[target_user_id] = (social_event.ts_ms, social_event.event_hash, following)
+        if social_event.kind == "post":
+            posts.append(social_event)
+
+    friends = sorted([friend for friend, state in follow_state.items() if state[2]])
+    posts.sort(key=lambda item: (item.ts_ms, item.event_hash), reverse=True)
+    latest_posts = [item.to_api_dict() for item in posts[:latest_posts_limit]]
+
+    def value_or_empty(social_event):
+        if social_event is None:
+            return ""
+        payload = decode_payload_json(social_event)
+        return str(payload.get("value", ""))
+
+    profile_body = {
+        "user_id": user_id,
+        "username": value_or_empty(username_event),
+        "description": value_or_empty(description_event),
+        "avatar": value_or_empty(avatar_event),
+        "banner": value_or_empty(banner_event),
+        "interests": value_or_empty(interests_event),
+        "friends": friends,
+        "latest_posts": latest_posts,
+    }
+
+    etag = None
+    if social_events:
+        etag = f'W/"{social_events[-1].event_hash}:{len(social_events)}:{latest_posts_limit}"'
+    response = web.json_response(profile_body)
+    return _with_cache(response, etag=etag, last_modified_ms=last_modified_ms)
+
+
+async def handle_social_feed(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return _invalid_request("user_id required")
+
+    limit_str = request.query.get("limit")
+    limit = 20
+    if limit_str is not None:
+        try:
+            limit = int(limit_str)
+        except ValueError:
+            return _invalid_request("limit must be an integer")
+    if limit <= 0:
+        return _invalid_request("limit must be positive")
+    limit = min(limit, 100)
+
+    cursor = parse_feed_cursor(request.query.get("cursor"))
+    if request.query.get("cursor") and cursor is None:
+        return _invalid_request("cursor must be shaped as ts_ms:event_hash")
+
+    user_events = runtime.social.list_all_events(user_id)
+    follow_state: dict[str, tuple[int, str, bool]] = {}
+    for social_event in user_events:
+        if social_event.kind != "follow":
+            continue
+        payload = decode_payload_json(social_event)
+        parsed = parse_follow_payload(payload)
+        if parsed is None:
+            continue
+        target_user_id, following = parsed
+        current = follow_state.get(target_user_id)
+        sort_key = (social_event.ts_ms, social_event.event_hash)
+        if current is None or sort_key > (current[0], current[1]):
+            follow_state[target_user_id] = (social_event.ts_ms, social_event.event_hash, following)
+
+    sources = {user_id}
+    for friend, state in follow_state.items():
+        if state[2]:
+            sources.add(friend)
+
+    posts = runtime.social.list_posts_for_users(sorted(sources), limit=limit, cursor=cursor)
+    items = [
+        {
+            "user_id": item.user_id,
+            "event_hash": item.event_hash,
+            "ts_ms": item.ts_ms,
+            "kind": item.kind,
+            "payload": decode_payload_json(item),
+        }
+        for item in posts
+    ]
+    next_cursor = ""
+    if posts:
+        last = posts[-1]
+        next_cursor = f"{last.ts_ms}:{last.event_hash}"
+
+    etag = None
+    last_modified_ms = None
+    if posts:
+        etag = f'W/"{posts[0].event_hash}:{next_cursor}:{len(posts)}"'
+        last_modified_ms = max(item.ts_ms for item in posts)
+
+    response = web.json_response({"items": items, "next_cursor": next_cursor, "sources": sorted(sources)})
+    return _with_cache(response, etag=etag, last_modified_ms=last_modified_ms)
+
+
 async def handle_gateway_resolve(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     gateway_id = request.query.get("gateway_id")
@@ -1126,6 +1272,8 @@ def create_app(
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
     app.router.add_post("/v1/social/events", handle_social_publish)
     app.router.add_get("/v1/social/events", handle_social_events)
+    app.router.add_get("/v1/social/profile", handle_social_profile)
+    app.router.add_get("/v1/social/feed", handle_social_feed)
     app.router.add_get("/v1/gateways/resolve", handle_gateway_resolve)
     app.router.add_get("/v1/ws", websocket_handler)
 

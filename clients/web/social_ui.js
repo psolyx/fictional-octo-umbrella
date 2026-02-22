@@ -4,6 +4,9 @@ const social_fetch_btn = document.getElementById('social_fetch_btn');
 const social_status = document.getElementById('social_status');
 const social_etag_input = document.getElementById('social_etag');
 const social_event_list = document.getElementById('social_event_list');
+const profile_refresh_btn = document.getElementById('profile_refresh_btn');
+const feed_refresh_btn = document.getElementById('feed_refresh_btn');
+const follow_toggle_btn = document.getElementById('follow_toggle_btn');
 
 const social_prev_hash_input = document.getElementById('social_prev_hash');
 const social_kind_input = document.getElementById('social_kind');
@@ -12,8 +15,29 @@ const social_payload_json_input = document.getElementById('social_payload_json')
 const social_sig_b64_input = document.getElementById('social_sig_b64');
 const social_publish_btn = document.getElementById('social_publish_btn');
 
+const profile_banner = document.getElementById('profile_banner');
+const profile_avatar = document.getElementById('profile_avatar');
+const profile_username = document.getElementById('profile_username');
+const profile_about_text = document.getElementById('profile_about_text');
+const profile_interests_text = document.getElementById('profile_interests_text');
+const profile_friends_list = document.getElementById('profile_friends_list');
+const profile_bulletins_list = document.getElementById('profile_bulletins_list');
+const home_feed = document.getElementById('home_feed');
+
+const bulletin_text_input = document.getElementById('bulletin_text');
+const bulletin_post_btn = document.getElementById('bulletin_post_btn');
+const profile_update_btn = document.getElementById('profile_update_btn');
+const profile_username_input = document.getElementById('profile_username_input');
+const profile_description_input = document.getElementById('profile_description_input');
+const profile_avatar_input = document.getElementById('profile_avatar_input');
+const profile_banner_input = document.getElementById('profile_banner_input');
+const profile_interests_input = document.getElementById('profile_interests_input');
+
 let social_session_token = '';
 let social_http_base_url = '';
+let local_user_id = '';
+let viewed_user_id = '';
+let latest_profile_view = null;
 
 const set_social_status = (text) => {
   if (social_status) {
@@ -21,13 +45,22 @@ const set_social_status = (text) => {
   }
 };
 
-const format_ts_ms = (value) => {
-  const ts_ms = Number(value);
-  if (!Number.isFinite(ts_ms) || ts_ms <= 0) {
-    return 'n/a';
+const get_social_api_base = () => {
+  if (!social_http_base_url) {
+    return '';
   }
-  const iso = new Date(ts_ms).toISOString();
-  return `${ts_ms} (${iso})`;
+  return social_http_base_url.endsWith('/') ? social_http_base_url.slice(0, -1) : social_http_base_url;
+};
+
+const read_social_limit = () => {
+  const parsed = Number.parseInt(social_limit_input ? social_limit_input.value : '20', 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+};
+
+const clear_children = (node) => {
+  if (node) {
+    node.textContent = '';
+  }
 };
 
 const payload_preview = (payload) => {
@@ -35,72 +68,18 @@ const payload_preview = (payload) => {
     return 'null';
   }
   if (typeof payload === 'string') {
-    return payload.length > 160 ? `${payload.slice(0, 160)}…` : payload;
+    return payload;
   }
-  const json_text = JSON.stringify(payload);
-  if (!json_text) {
-    return String(payload);
-  }
-  return json_text.length > 160 ? `${json_text.slice(0, 160)}…` : json_text;
+  return JSON.stringify(payload);
 };
 
-const clear_social_event_list = () => {
+const append_event_row = (user_id, social_event) => {
   if (!social_event_list) {
     return;
   }
-  social_event_list.textContent = '';
-};
-
-const add_social_event_row = (user_id, social_event) => {
-  if (!social_event_list) {
-    return;
-  }
-  const row = document.createElement('div');
-  row.className = 'social_event_row';
-
-  const content = document.createElement('pre');
-  const ts_value = format_ts_ms(social_event && social_event.ts_ms);
-  const kind_value = social_event && social_event.kind ? String(social_event.kind) : '';
-  const hash_value = social_event && social_event.event_hash ? String(social_event.event_hash) : '';
-  const prev_hash_value = social_event && social_event.prev_hash ? String(social_event.prev_hash) : '';
-  content.textContent = [
-    `user_id: ${user_id}`,
-    `ts_ms: ${ts_value}`,
-    `kind: ${kind_value || 'n/a'}`,
-    `payload: ${payload_preview(social_event && social_event.payload)}`,
-    `event_hash: ${hash_value || 'n/a'}`,
-    `prev_hash: ${prev_hash_value || 'n/a'}`,
-  ].join('\n');
-  row.appendChild(content);
-
-  const use_peer_btn = document.createElement('button');
-  use_peer_btn.type = 'button';
-  use_peer_btn.textContent = 'Use as DM peer';
-  use_peer_btn.addEventListener('click', () => {
-    window.dispatchEvent(new CustomEvent('social.peer.selected', { detail: { user_id } }));
-    set_social_status(`peer selected: ${user_id}`);
-  });
-  row.appendChild(use_peer_btn);
-
+  const row = document.createElement('pre');
+  row.textContent = `user_id: ${user_id}\nkind: ${social_event.kind}\nts_ms: ${social_event.ts_ms}\npayload: ${payload_preview(social_event.payload)}`;
   social_event_list.appendChild(row);
-};
-
-const get_social_api_base = () => {
-  if (!social_http_base_url) {
-    return '';
-  }
-  return social_http_base_url.endsWith('/')
-    ? social_http_base_url.slice(0, social_http_base_url.length - 1)
-    : social_http_base_url;
-};
-
-const read_social_limit = () => {
-  const raw = social_limit_input ? social_limit_input.value : '20';
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    return 20;
-  }
-  return parsed;
 };
 
 const fetch_social_events = async () => {
@@ -109,117 +88,230 @@ const fetch_social_events = async () => {
     set_social_status('enter social_user_id');
     return;
   }
-  const limit = read_social_limit();
-  const query = new URLSearchParams({ user_id, limit: String(limit) });
-  const request_url = `${get_social_api_base()}/v1/social/events?${query.toString()}`;
-  set_social_status('fetching…');
-  clear_social_event_list();
+  viewed_user_id = user_id;
+  const params = new URLSearchParams({ user_id, limit: String(read_social_limit()) });
+  const response = await fetch(`${get_social_api_base()}/v1/social/events?${params.toString()}`);
   if (social_etag_input) {
-    social_etag_input.value = '';
+    social_etag_input.value = response.headers.get('etag') || '';
   }
-  try {
-    const response = await fetch(request_url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+  clear_children(social_event_list);
+  if (!response.ok) {
+    set_social_status(`fetch failed (${response.status})`);
+    return;
+  }
+  const body = await response.json();
+  const social_events = Array.isArray(body.events) ? body.events : [];
+  social_events.forEach((social_event) => append_event_row(user_id, social_event));
+  set_social_status(`rendered ${social_events.length} event(s)`);
+};
+
+const publish_social_event = async (kind, payload, prev_hash = '') => {
+  if (!social_session_token) {
+    set_social_status('publish requires gateway session token');
+    return null;
+  }
+  const sig_b64 = social_sig_b64_input ? social_sig_b64_input.value.trim() : '';
+  if (!sig_b64) {
+    set_social_status('sig_b64 is required by gateway signature checks');
+    return null;
+  }
+  const body = { kind, payload, ts_ms: Date.now(), sig_b64 };
+  if (prev_hash) {
+    body.prev_hash = prev_hash;
+  }
+  const response = await fetch(`${get_social_api_base()}/v1/social/events`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${social_session_token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    set_social_status(`publish failed (${response.status})`);
+    return null;
+  }
+  const result = await response.json();
+  if (social_prev_hash_input) {
+    social_prev_hash_input.value = result.event_hash || '';
+  }
+  return result;
+};
+
+const render_profile = (profile_body) => {
+  latest_profile_view = profile_body;
+  if (profile_username) {
+    profile_username.textContent = profile_body.username || profile_body.user_id || 'unknown';
+  }
+  if (profile_about_text) {
+    profile_about_text.textContent = profile_body.description || '—';
+  }
+  if (profile_interests_text) {
+    profile_interests_text.textContent = profile_body.interests || '—';
+  }
+  if (profile_avatar) {
+    const avatar = profile_body.avatar || '';
+    profile_avatar.src = avatar || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+  }
+  if (profile_banner) {
+    const banner = profile_body.banner || '';
+    profile_banner.style.backgroundImage = banner ? `url(${banner})` : '';
+  }
+
+  clear_children(profile_friends_list);
+  const friends = Array.isArray(profile_body.friends) ? profile_body.friends : [];
+  friends.forEach((friend_user_id) => {
+    const item = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = friend_user_id;
+    btn.addEventListener('click', () => {
+      if (social_user_id_input) {
+        social_user_id_input.value = friend_user_id;
+      }
+      viewed_user_id = friend_user_id;
+      window.dispatchEvent(new CustomEvent('social.peer.selected', { detail: { user_id: friend_user_id } }));
+      void fetch_profile_view();
     });
-    const response_etag = response.headers.get('etag') || '';
-    if (social_etag_input) {
-      social_etag_input.value = response_etag;
-    }
-    if (!response.ok) {
-      set_social_status(`fetch failed (${response.status})`);
-      return;
-    }
-    const body = await response.json();
-    const social_events = Array.isArray(body && body.events) ? body.events : [];
-    if (social_events.length === 0) {
-      set_social_status('no events');
-      return;
-    }
-    social_events.forEach((social_event) => {
-      add_social_event_row(user_id, social_event);
-    });
-    set_social_status(`rendered ${social_events.length} event(s)`);
-  } catch (error) {
-    set_social_status(`fetch error (${String(error)})`);
+    item.appendChild(btn);
+    profile_friends_list.appendChild(item);
+  });
+
+  clear_children(profile_bulletins_list);
+  const posts = Array.isArray(profile_body.latest_posts) ? profile_body.latest_posts : [];
+  posts.forEach((post) => {
+    const item = document.createElement('li');
+    const payload = post && post.payload ? post.payload : {};
+    item.textContent = payload.value || payload.text || JSON.stringify(payload);
+    profile_bulletins_list.appendChild(item);
+  });
+
+  if (follow_toggle_btn) {
+    follow_toggle_btn.textContent = 'Add Friend';
   }
 };
 
-const publish_social_event = async () => {
-  if (!social_session_token) {
-    set_social_status('publish requires gateway session token');
+const fetch_profile_view = async () => {
+  const user_id = viewed_user_id || (social_user_id_input ? social_user_id_input.value.trim() : '');
+  if (!user_id) {
     return;
   }
-  const kind = social_kind_input ? social_kind_input.value.trim() : '';
-  if (!kind) {
-    set_social_status('publish requires kind');
+  const params = new URLSearchParams({ user_id, limit: String(read_social_limit()) });
+  const response = await fetch(`${get_social_api_base()}/v1/social/profile?${params.toString()}`);
+  if (!response.ok) {
+    set_social_status(`profile fetch failed (${response.status})`);
     return;
   }
-  const ts_ms_raw = social_ts_ms_input ? social_ts_ms_input.value.trim() : '';
-  const ts_ms = ts_ms_raw ? Number.parseInt(ts_ms_raw, 10) : Date.now();
-  if (!Number.isInteger(ts_ms) || ts_ms < 0) {
-    set_social_status('invalid ts_ms');
-    return;
-  }
+  const body = await response.json();
+  render_profile(body);
+};
 
-  let payload = {};
+const render_home_feed = (feed_body) => {
+  clear_children(home_feed);
+  const items = Array.isArray(feed_body.items) ? feed_body.items : [];
+  items.forEach((item) => {
+    const row = document.createElement('pre');
+    const text = item && item.payload ? item.payload.value || item.payload.text || JSON.stringify(item.payload) : '';
+    row.textContent = `${item.user_id} • ${item.ts_ms}\n${text}`;
+    home_feed.appendChild(row);
+  });
+};
+
+const fetch_home_feed = async () => {
+  if (!local_user_id) {
+    return;
+  }
+  const params = new URLSearchParams({ user_id: local_user_id, limit: String(read_social_limit()) });
+  const response = await fetch(`${get_social_api_base()}/v1/social/feed?${params.toString()}`);
+  if (!response.ok) {
+    set_social_status(`feed fetch failed (${response.status})`);
+    return;
+  }
+  render_home_feed(await response.json());
+};
+
+const submit_profile_updates = async () => {
+  const updates = [
+    ['username', profile_username_input ? profile_username_input.value.trim() : ''],
+    ['description', profile_description_input ? profile_description_input.value.trim() : ''],
+    ['avatar', profile_avatar_input ? profile_avatar_input.value.trim() : ''],
+    ['banner', profile_banner_input ? profile_banner_input.value.trim() : ''],
+    ['interests', profile_interests_input ? profile_interests_input.value.trim() : ''],
+  ];
+  for (const [kind, value] of updates) {
+    if (!value) {
+      continue;
+    }
+    await publish_social_event(kind, { value });
+  }
+  set_social_status('profile update attempted');
+  void fetch_profile_view();
+};
+
+const post_bulletin = async () => {
+  const value = bulletin_text_input ? bulletin_text_input.value.trim() : '';
+  if (!value) {
+    set_social_status('enter bulletin text');
+    return;
+  }
+  await publish_social_event('post', { value });
+  set_social_status('bulletin publish attempted');
+  void fetch_profile_view();
+  void fetch_home_feed();
+};
+
+const toggle_follow = async () => {
+  if (!viewed_user_id || viewed_user_id === local_user_id) {
+    set_social_status('select another profile to follow/unfollow');
+    return;
+  }
+  let currently_following = false;
+  const local_params = new URLSearchParams({ user_id: local_user_id, limit: '100' });
+  const local_profile_resp = await fetch(`${get_social_api_base()}/v1/social/profile?${local_params.toString()}`);
+  if (local_profile_resp.ok) {
+    const local_profile = await local_profile_resp.json();
+    currently_following = Array.isArray(local_profile.friends) && local_profile.friends.includes(viewed_user_id);
+  }
+  const following = !currently_following;
+  await publish_social_event('follow', { target_user_id: viewed_user_id, following });
+  set_social_status(following ? 'follow requested' : 'unfollow requested');
+  if (follow_toggle_btn) {
+    follow_toggle_btn.textContent = following ? 'Remove Friend' : 'Add Friend';
+  }
+  void fetch_profile_view();
+  void fetch_home_feed();
+};
+
+const publish_from_debug_form = async () => {
+  const kind = social_kind_input ? social_kind_input.value.trim() : '';
+  const prev_hash = social_prev_hash_input ? social_prev_hash_input.value.trim() : '';
   const payload_text = social_payload_json_input ? social_payload_json_input.value.trim() : '{}';
+  let payload;
   try {
     payload = payload_text ? JSON.parse(payload_text) : {};
   } catch (_error) {
     set_social_status('invalid payload_json');
     return;
   }
-
-  const prev_hash = social_prev_hash_input ? social_prev_hash_input.value.trim() : '';
-  const sig_b64 = social_sig_b64_input ? social_sig_b64_input.value.trim() : '';
-
-  const body = { kind, payload, ts_ms, sig_b64 };
-  if (prev_hash) {
-    body.prev_hash = prev_hash;
-  }
-
-  set_social_status('publishing…');
-  try {
-    const response = await fetch(`${get_social_api_base()}/v1/social/events`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${social_session_token}`,
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      set_social_status(`publish failed (${response.status})`);
-      return;
-    }
-    set_social_status('publish ok');
-  } catch (error) {
-    set_social_status(`publish error (${String(error)})`);
-  }
+  await publish_social_event(kind, payload, prev_hash);
 };
 
 window.addEventListener('gateway.session.ready', (event) => {
-  const detail = event && event.detail ? event.detail : null;
-  social_session_token = detail && typeof detail.session_token === 'string' ? detail.session_token : '';
-  social_http_base_url = detail && typeof detail.http_base_url === 'string' ? detail.http_base_url : '';
-  if (social_ts_ms_input) {
-    social_ts_ms_input.value = String(Date.now());
-  }
-  if (social_user_id_input && !social_user_id_input.value && detail && typeof detail.user_id === 'string') {
-    social_user_id_input.value = detail.user_id;
+  const detail = event && event.detail ? event.detail : {};
+  social_session_token = typeof detail.session_token === 'string' ? detail.session_token : '';
+  social_http_base_url = typeof detail.http_base_url === 'string' ? detail.http_base_url : '';
+  local_user_id = typeof detail.user_id === 'string' ? detail.user_id : '';
+  viewed_user_id = local_user_id;
+  if (social_user_id_input && !social_user_id_input.value) {
+    social_user_id_input.value = local_user_id;
   }
 });
 
-if (social_fetch_btn) {
-  social_fetch_btn.addEventListener('click', () => {
-    void fetch_social_events();
-  });
-}
-
-if (social_publish_btn) {
-  social_publish_btn.addEventListener('click', () => {
-    void publish_social_event();
-  });
-}
+if (social_fetch_btn) social_fetch_btn.addEventListener('click', () => void fetch_social_events());
+if (profile_refresh_btn) profile_refresh_btn.addEventListener('click', () => void fetch_profile_view());
+if (feed_refresh_btn) feed_refresh_btn.addEventListener('click', () => void fetch_home_feed());
+if (social_publish_btn) social_publish_btn.addEventListener('click', () => void publish_from_debug_form());
+if (profile_update_btn) profile_update_btn.addEventListener('click', () => void submit_profile_updates());
+if (bulletin_post_btn) bulletin_post_btn.addEventListener('click', () => void post_bulletin());
+if (follow_toggle_btn) follow_toggle_btn.addEventListener('click', () => void toggle_follow());

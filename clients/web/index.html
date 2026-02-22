@@ -76,7 +76,7 @@
 
   <fieldset>
     <legend>Social (Polycentric)</legend>
-    <p>Fetch signed social events via gateway HTTP and optionally use an author as a DM bootstrap peer.</p>
+    <p id="myspace_profile_marker">MySpace-style profile</p>
     <label>
       social_user_id
       <input type="text" id="social_user_id" size="48" placeholder="u_..." />
@@ -87,6 +87,8 @@
     </label>
     <div class="button-row">
       <button id="social_fetch_btn">Fetch events</button>
+      <button id="profile_refresh_btn">Refresh profile</button>
+      <button id="feed_refresh_btn">Refresh home feed</button>
       <span id="social_status">idle</span>
     </div>
     <label>
@@ -95,9 +97,45 @@
     </label>
     <div id="social_event_list"></div>
 
+    <section class="profile_shell">
+      <div id="profile_banner" class="profile_banner"></div>
+      <div class="profile_headline">
+        <img id="profile_avatar" class="profile_avatar" alt="profile avatar" />
+        <h3 id="profile_username">username</h3>
+      </div>
+      <div id="profile_about" class="profile_card"><h4>About Me</h4><p id="profile_about_text">—</p></div>
+      <div id="profile_interests" class="profile_card"><h4>Interests</h4><p id="profile_interests_text">—</p></div>
+      <div id="profile_friends" class="profile_card"><h4>Friends</h4><ul id="profile_friends_list"></ul></div>
+      <div id="profile_bulletins" class="profile_card"><h4>Latest Bulletins</h4><ul id="profile_bulletins_list"></ul></div>
+      <div class="button-row">
+        <button id="follow_toggle_btn">Add Friend</button>
+      </div>
+    </section>
+
+    <section class="profile_card">
+      <h4>Home feed</h4>
+      <div id="home_feed" class="home_feed"></div>
+    </section>
+
+    <section class="profile_card">
+      <h4>Post bulletin</h4>
+      <label>Bulletin text <input type="text" id="bulletin_text" size="64" /></label>
+      <button id="bulletin_post_btn">Post bulletin</button>
+    </section>
+
+    <section class="profile_card">
+      <h4>Update profile</h4>
+      <label>Username <input type="text" id="profile_username_input" size="48" /></label>
+      <label>Description <input type="text" id="profile_description_input" size="64" /></label>
+      <label>Avatar URL/data <input type="text" id="profile_avatar_input" size="64" /></label>
+      <label>Banner URL/data <input type="text" id="profile_banner_input" size="64" /></label>
+      <label>Interests <input type="text" id="profile_interests_input" size="64" /></label>
+      <label>Signature (sig_b64, required) <input type="text" id="social_sig_b64" size="64" /></label>
+      <button id="profile_update_btn">Update profile</button>
+    </section>
+
     <details>
       <summary>Publish (advanced/debug)</summary>
-      <p>Advanced path: paste a precomputed signature; browser-side signing is intentionally out of scope.</p>
       <label>
         prev_hash (optional)
         <input type="text" id="social_prev_hash" size="64" />
@@ -113,10 +151,6 @@
       <label>
         payload_json
         <textarea id="social_payload_json" rows="4" cols="64">{"text":"hello"}</textarea>
-      </label>
-      <label>
-        sig_b64
-        <input type="text" id="social_sig_b64" size="64" />
       </label>
       <div class="button-row">
         <button id="social_publish_btn">Publish event</button>
