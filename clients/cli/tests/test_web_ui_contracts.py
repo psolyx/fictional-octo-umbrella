@@ -204,6 +204,23 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("Option B", self.readme)
         self.assertIn("404 for `/clients/web/...`", self.readme)
 
+
+    def test_account_section_contracts(self):
+        self.assertIn('legend>Account<', self.index_html)
+        for marker in (
+            'Generate identity',
+            'Import identity JSON',
+            'Export identity JSON',
+            'Logout',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.index_html)
+
+    def test_social_publish_uses_identity_signing_contract(self):
+        self.assertNotIn('sig_b64 is required', self.social_ui)
+        self.assertIn("import { read_identity } from './identity.js';", self.social_ui)
+        self.assertIn("import { sign_social_event } from './social_sign.js';", self.social_ui)
+
     def test_web_assets_have_no_absolute_serve_paths(self):
         clients_web_refs = []
         html_absolute_assets = []

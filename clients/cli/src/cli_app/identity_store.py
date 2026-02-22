@@ -67,25 +67,46 @@ def _atomic_write_json(path: Path, record: IdentityRecord) -> None:
 
 
 def _load_identity(path: Path) -> IdentityRecord:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return parse_identity_json(path.read_text(encoding="utf-8"))
+
+
+
+def parse_identity_json(identity_json: str) -> IdentityRecord:
+    try:
+        data = json.loads(identity_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("identity payload must be valid JSON") from exc
     if not isinstance(data, dict):
         raise ValueError("identity payload must be a JSON object")
-
-    auth_token = str(data["auth_token"])
-    user_id = str(data.get("user_id") or _derive_user_id(auth_token))
-    device_id = str(data["device_id"])
-    device_credential = str(data["device_credential"])
-    social_private_key_b64 = str(data["social_private_key_b64"])
-    social_public_key_b64 = str(data["social_public_key_b64"])
+    required = (
+        "auth_token",
+        "device_id",
+        "device_credential",
+        "social_private_key_b64",
+        "social_public_key_b64",
+    )
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError(f"identity missing required fields: {', '.join(missing)}")
     return IdentityRecord(
-        auth_token=auth_token,
-        user_id=user_id,
-        device_id=device_id,
-        device_credential=device_credential,
-        social_private_key_b64=social_private_key_b64,
-        social_public_key_b64=social_public_key_b64,
+        auth_token=str(data["auth_token"]),
+        user_id=str(data.get("user_id") or _derive_user_id(str(data["auth_token"]))),
+        device_id=str(data["device_id"]),
+        device_credential=str(data["device_credential"]),
+        social_private_key_b64=str(data["social_private_key_b64"]),
+        social_public_key_b64=str(data["social_public_key_b64"]),
     )
 
+
+def export_identity_json(path: Path | str = DEFAULT_IDENTITY_PATH) -> str:
+    identity = load_or_create_identity(path)
+    return json.dumps(identity.__dict__, indent=2, sort_keys=True)
+
+
+def import_identity_json(identity_json: str, path: Path | str = DEFAULT_IDENTITY_PATH) -> IdentityRecord:
+    identity = parse_identity_json(identity_json)
+    _atomic_write_json(Path(path).expanduser(), identity)
+    return identity
 
 def load_or_create_identity(path: Path | str = DEFAULT_IDENTITY_PATH) -> IdentityRecord:
     target_path = Path(path).expanduser()
@@ -99,6 +120,12 @@ def load_or_create_identity(path: Path | str = DEFAULT_IDENTITY_PATH) -> Identit
         record = _generate_identity()
         _atomic_write_json(target_path, record)
         return record
+
+
+def create_new_identity(path: Path | str = DEFAULT_IDENTITY_PATH) -> IdentityRecord:
+    record = _generate_identity()
+    _atomic_write_json(Path(path).expanduser(), record)
+    return record
 
 
 def rotate_device(path: Path | str = DEFAULT_IDENTITY_PATH) -> IdentityRecord:

@@ -1445,8 +1445,9 @@
         const session_token = typeof body.session_token === 'string' ? body.session_token : '';
         const user_id = typeof body.user_id === 'string' ? body.user_id : '';
         const http_base_url = derive_http_base_url(this.gateway_url);
+        const resume_token = typeof body.resume_token === 'string' ? body.resume_token : '';
         window.dispatchEvent(
-          new CustomEvent('gateway.session.ready', { detail: { session_token, user_id, http_base_url } })
+          new CustomEvent('gateway.session.ready', { detail: { session_token, user_id, http_base_url, resume_token, gateway_url: this.gateway_url } })
         );
         if (body.resume_token) {
           resume_token_input.value = body.resume_token;

@@ -5,6 +5,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 ROADMAP_PATH = REPO_ROOT / "ROADMAP.md"
 PRODUCTION_SPEC_PATH = REPO_ROOT / "clients" / "docs" / "production_clients_exit_criteria.md"
+ASPECTS_PHASE6_PATH = REPO_ROOT / "clients" / "docs" / "aspects_phase6.md"
 
 
 class TestRoadmapSpecContracts(unittest.TestCase):
@@ -12,6 +13,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def setUpClass(cls):
         cls.roadmap = ROADMAP_PATH.read_text(encoding="utf-8")
         cls.production_spec = PRODUCTION_SPEC_PATH.read_text(encoding="utf-8")
+        cls.aspects_phase6 = ASPECTS_PHASE6_PATH.read_text(encoding="utf-8") if ASPECTS_PHASE6_PATH.exists() else ""
 
     def test_phase_5_2_section_exists_with_required_capabilities(self):
         self.assertIn("### Phase 5.2 — Production clients (Web UI + TUI)", self.roadmap)
@@ -38,6 +40,30 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("#### Phase 5a — Web protocol/interop harness", self.roadmap)
         self.assertIn("Phase 5a remains a harness milestone", self.roadmap)
         self.assertIn("production readiness is gated only when Phase 5.2 criteria are satisfied", self.roadmap)
+
+    def test_phase_6_is_aspects_and_phase_7_is_federation(self):
+        self.assertIn("### Phase 6 — Aspects (E2EE audience groups) planning gate", self.roadmap)
+        self.assertIn("planning only", self.roadmap)
+        self.assertIn("### Phase 7 — Gateway federation v2 (relay-to-home)", self.roadmap)
+
+    def test_aspects_phase6_doc_exists_and_has_required_markers(self):
+        self.assertTrue(ASPECTS_PHASE6_PATH.exists(), msg="aspects phase 6 planning doc must exist")
+        for marker in (
+            "planning-only",
+            "Encrypted payload envelope contract",
+            "aspect_id",
+            "key_id",
+            "alg",
+            "nonce_b64",
+            "aad_b64",
+            "ciphertext_b64",
+            "Key distribution posture (MLS-backed)",
+            "Rotation rules",
+            "Non-member UX",
+            "RFC 9420",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.aspects_phase6)
 
     def test_production_clients_spec_exists_and_has_required_sections(self):
         self.assertTrue(PRODUCTION_SPEC_PATH.exists(), msg="production clients spec doc must exist")

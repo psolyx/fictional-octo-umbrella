@@ -1,3 +1,6 @@
+import { read_identity } from './identity.js';
+import { sign_social_event } from './social_sign.js';
+
 const social_user_id_input = document.getElementById('social_user_id');
 const social_limit_input = document.getElementById('social_limit');
 const social_fetch_btn = document.getElementById('social_fetch_btn');
@@ -110,12 +113,33 @@ const publish_social_event = async (kind, payload, prev_hash = '') => {
     set_social_status('publish requires gateway session token');
     return null;
   }
-  const sig_b64 = social_sig_b64_input ? social_sig_b64_input.value.trim() : '';
+  const ts_ms = Date.now();
+  let sig_b64 = social_sig_b64_input ? social_sig_b64_input.value.trim() : '';
   if (!sig_b64) {
-    set_social_status('sig_b64 is required by gateway signature checks');
-    return null;
+    const identity = read_identity();
+    if (!identity) {
+      set_social_status('missing identity; generate or import in Account section');
+      return null;
+    }
+    try {
+      const signed = await sign_social_event({
+        social_private_key_b64: identity.social_private_key_b64,
+        user_id: identity.social_public_key_b64,
+        prev_hash,
+        ts_ms,
+        kind,
+        payload,
+      });
+      sig_b64 = signed.sig_b64;
+      if (social_sig_b64_input) {
+        social_sig_b64_input.value = sig_b64;
+      }
+    } catch (error) {
+      set_social_status(`WebCrypto Ed25519 unavailable (${error.message}); use advanced sig_b64 field`);
+      return null;
+    }
   }
-  const body = { kind, payload, ts_ms: Date.now(), sig_b64 };
+  const body = { kind, payload, ts_ms, sig_b64 };
   if (prev_hash) {
     body.prev_hash = prev_hash;
   }

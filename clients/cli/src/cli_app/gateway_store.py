@@ -92,3 +92,17 @@ def update_next_seq(conv_id: str, acked_seq: int, path: Path = CURSORS_PATH) -> 
     cursors[conv_id] = next_seq
     save_cursors(cursors, path)
     return next_seq
+
+
+def clear_session(path: Path = SESSION_PATH) -> None:
+    try:
+        path.expanduser().unlink()
+    except FileNotFoundError:
+        return
+
+
+def clear_cursors(path: Path = CURSORS_PATH) -> None:
+    try:
+        path.expanduser().unlink()
+    except FileNotFoundError:
+        return
