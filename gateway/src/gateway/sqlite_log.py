@@ -131,25 +131,41 @@ class SQLiteConversationLog:
             for row in rows
         ]
 
-    def earliest_seq(self, conv_id: str) -> int | None:
+    def bounds(self, conv_id: str) -> tuple[int | None, int | None, int | None]:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT MIN(seq) FROM conv_events WHERE conv_id=?",
-                (conv_id,),
+                """
+                SELECT
+                    MIN(seq) AS earliest_seq,
+                    MAX(seq) AS latest_seq,
+                    (
+                        SELECT ts_ms
+                        FROM conv_events
+                        WHERE conv_id=?
+                        ORDER BY seq DESC
+                        LIMIT 1
+                    ) AS latest_ts_ms
+                FROM conv_events
+                WHERE conv_id=?
+                """,
+                (conv_id, conv_id),
             ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return int(row[0])
+        if row is None or row[0] is None or row[1] is None:
+            return None, None, None
+        latest_ts_ms = int(row[2]) if row[2] is not None else None
+        return int(row[0]), int(row[1]), latest_ts_ms
+
+    def earliest_seq(self, conv_id: str) -> int | None:
+        earliest_seq, _, _ = self.bounds(conv_id)
+        return earliest_seq
 
     def latest_seq(self, conv_id: str) -> int | None:
-        with self._backend.lock:
-            row = self._backend.connection.execute(
-                "SELECT MAX(seq) FROM conv_events WHERE conv_id=?",
-                (conv_id,),
-            ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return int(row[0])
+        _, latest_seq, _ = self.bounds(conv_id)
+        return latest_seq
+
+    def latest_ts_ms(self, conv_id: str) -> int | None:
+        _, _, latest_ts_ms = self.bounds(conv_id)
+        return latest_ts_ms
 
     def list_conversations(self) -> list[str]:
         with self._backend.lock:

@@ -197,6 +197,9 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn('legend>Conversations<', self.index_html)
         self.assertIn('/v1/conversations', self.gateway_ws_client)
         self.assertIn("conv_id_input.value = item.conv_id", self.gateway_ws_client)
+        self.assertIn("unread=", self.gateway_ws_client)
+        self.assertIn("pruned", self.gateway_ws_client)
+        self.assertIn("from_seq_input.value = String(desired_from_seq)", self.gateway_ws_client)
         self.assertIn("subscribe_btn.click()", self.gateway_ws_client)
 
     def test_replay_window_ui_marker(self):

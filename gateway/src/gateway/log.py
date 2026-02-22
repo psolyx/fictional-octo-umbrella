@@ -95,6 +95,26 @@ class ConversationLog:
         slice_end = None if limit is None else start_index + max(limit, 0)
         return list(events[start_index:slice_end])
 
+    def bounds(self, conv_id: str) -> tuple[int | None, int | None, int | None]:
+        events = self._events.get(conv_id, [])
+        if not events:
+            return None, None, None
+        earliest = events[0]
+        latest = events[-1]
+        return earliest.seq, latest.seq, latest.ts_ms
+
+    def earliest_seq(self, conv_id: str) -> int | None:
+        earliest_seq, _, _ = self.bounds(conv_id)
+        return earliest_seq
+
+    def latest_seq(self, conv_id: str) -> int | None:
+        _, latest_seq, _ = self.bounds(conv_id)
+        return latest_seq
+
+    def latest_ts_ms(self, conv_id: str) -> int | None:
+        _, _, latest_ts_ms = self.bounds(conv_id)
+        return latest_ts_ms
+
     @staticmethod
     def _to_b64(envelope_bytes_or_b64: bytes | str) -> str:
         if isinstance(envelope_bytes_or_b64, bytes):

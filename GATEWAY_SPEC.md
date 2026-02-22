@@ -479,7 +479,10 @@ Semantics match WS frames.
         "created_at_ms": 1766793600123,
         "home_gateway": "gw_local",
         "member_count": 2,
-        "members": ["u_01F...", "u_02F..."]
+        "members": ["u_01F...", "u_02F..."],
+        "earliest_seq": 4,
+        "latest_seq": 27,
+        "latest_ts_ms": 1766793920456
       }
     ]
   }
@@ -489,6 +492,11 @@ Semantics match WS frames.
   - Ordering MUST be deterministic: `created_at_ms` ascending, then `conv_id` ascending.
   - `member_count` MUST always be present.
   - `members` SHOULD be included only when `member_count <= 20`; for larger rooms it MAY be omitted to keep responses bounded.
+  - `earliest_seq`, `latest_seq`, and `latest_ts_ms` describe the currently retained conversation log bounds.
+  - If a conversation has no retained log events, `earliest_seq`, `latest_seq`, and `latest_ts_ms` MUST be `null`.
+  - `earliest_seq` MUST be the minimum retained `seq` (after retention pruning).
+  - `latest_seq` MUST be the maximum retained `seq`.
+  - `latest_ts_ms` MUST equal the `ts_ms` of the event at `latest_seq`.
 
 ### 8.2 Invite
 - Endpoint: `POST /v1/rooms/invite` (HTTP, authenticated as above).
