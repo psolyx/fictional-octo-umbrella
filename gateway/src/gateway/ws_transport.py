@@ -23,6 +23,7 @@ from .log import ConversationEvent, ConversationLog
 from .presence import FixedWindowRateLimiter, LimitExceeded, Presence, RateLimitExceeded
 from .retention import ReplayWindowExceeded, RetentionPolicy, load_retention_policy_from_env
 from .social import (
+    CursorNotFound,
     InMemorySocialStore,
     InvalidChain,
     InvalidSignature,
@@ -1144,7 +1145,10 @@ async def handle_social_feed(request: web.Request) -> web.Response:
         if state[2]:
             sources.add(friend)
 
-    posts = runtime.social.list_posts_for_users(sorted(sources), limit=limit, cursor=cursor)
+    try:
+        posts = runtime.social.list_posts_for_users(sorted(sources), limit=limit, cursor=cursor)
+    except CursorNotFound:
+        return _invalid_request("cursor not found")
     items = [
         {
             "user_id": item.user_id,
