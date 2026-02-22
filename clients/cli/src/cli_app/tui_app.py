@@ -264,16 +264,32 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     transcript_top = header_offset
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
     if render.social_active:
-        header = (
-            f"SOCIAL ({render.social_target}) — r refresh, p post, 1/2 target, Ctrl-P to switch"
+        help_line = (
+            f"SOCIAL {render.social_view_mode} ({render.social_target}) — v profile, f feed, r refresh, p post, e edit, a/u friend, 1/2 target, n more, s section"
         )
-        _render_text(stdscr, transcript_top - 1, right_start + 2, header)
-        visible_social = _visible_social(render.social_items, transcript_height, render.social_scroll)
-        highlight_idx = max(0, len(visible_social) - 1 - render.social_scroll)
-        for idx, entry in enumerate(visible_social):
-            line = _format_social_event(entry)
-            attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
-            _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+        _render_text(stdscr, transcript_top - 1, right_start + 2, help_line)
+        if render.social_view_mode == "profile":
+            profile_lines = _build_profile_lines(render)
+            visible_social = _visible_social(profile_lines, transcript_height, render.social_scroll)
+            highlight_idx = max(0, len(visible_social) - 1 - render.social_scroll)
+            for idx, line in enumerate(visible_social):
+                attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
+                _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+        elif render.social_view_mode == "feed":
+            feed_lines = [_format_feed_item(item) for item in render.feed_items]
+            visible_social = _visible_social(feed_lines, transcript_height, render.social_scroll)
+            highlight_idx = max(0, len(visible_social) - 1 - render.social_scroll)
+            for idx, line in enumerate(visible_social):
+                attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
+                _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
+        else:
+            visible_social = _visible_social(
+                [_format_social_event(item) for item in render.social_items], transcript_height, render.social_scroll
+            )
+            highlight_idx = max(0, len(visible_social) - 1 - render.social_scroll)
+            for idx, line in enumerate(visible_social):
+                attr = curses.A_REVERSE if render.focus_area == "social" and idx == highlight_idx else 0
+                _render_text(stdscr, transcript_top + idx, right_start + 1, line, attr)
     elif render.presence_active:
         header = (
             "PRESENCE — a watch, r unwatch, b block, B unblock, i invisible, e enable, Ctrl-P to switch"
@@ -297,12 +313,21 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     compose_top = transcript_top + transcript_height + 1
     stdscr.hline(compose_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
     if render.social_active:
-        header = "Post (p to compose, Enter to publish, Esc to cancel)"
-        if render.social_compose_active:
-            header = "Post (Enter to publish, Esc to cancel)"
+        if render.social_edit_active:
+            header = "Edit profile (username/description/avatar/banner/interests; Enter submit, Esc cancel)"
+        else:
+            header = "Post bulletin (p to compose, Enter to publish, Esc to cancel)"
+            if render.social_compose_active:
+                header = "Post bulletin (Enter to publish, Esc to cancel)"
         _render_text(stdscr, compose_top - 1, right_start + 2, header)
         compose_attr = curses.A_REVERSE if render.focus_area == "social" else 0
-        _render_text(stdscr, compose_top, right_start + 1, render.social_compose_text, compose_attr)
+        if render.social_edit_active:
+            fields = ["username", "description", "avatar", "banner", "interests"]
+            active = render.social_edit_field
+            value = render.social_edit_fields.get(fields[active], "")
+            _render_text(stdscr, compose_top, right_start + 1, f"{fields[active]}: {value}", compose_attr)
+        else:
+            _render_text(stdscr, compose_top, right_start + 1, render.social_compose_text, compose_attr)
         _render_text(stdscr, compose_top + 1, right_start + 1, render.social_status_line)
     elif render.presence_active:
         invisible_label = "on" if render.presence_invisible else "off"
@@ -408,7 +433,7 @@ def _visible_transcript(entries: Iterable[Dict[str, str]], height: int, scroll: 
     return collected[start:end]
 
 
-def _visible_social(entries: Iterable[Dict[str, object]], height: int, scroll: int) -> list[Dict[str, object]]:
+def _visible_social(entries: Iterable[str], height: int, scroll: int) -> list[str]:
     collected = list(entries)
     if height <= 0:
         return []
@@ -474,6 +499,54 @@ def _format_social_event(entry: Dict[str, object]) -> str:
     hash_prefix = str(entry.get("event_hash", ""))[:8]
     suffix = f" #{hash_prefix}" if hash_prefix else ""
     return f"{kind}: {text}{suffix}".strip()
+
+
+def _profile_value(profile: Dict[str, object], key: str) -> str:
+    value = profile.get(key, "")
+    return str(value) if value is not None else ""
+
+
+def _build_profile_lines(render: object) -> list[str]:
+    profile = render.profile_data if isinstance(render.profile_data, dict) else {}
+    friends = profile.get("friends", []) if isinstance(profile.get("friends"), list) else []
+    bulletins = profile.get("bulletins", []) if isinstance(profile.get("bulletins"), list) else []
+    lines = [
+        "MySpace-style profile",
+        f"User: {_profile_value(profile, 'user_id') or render.profile_user_id}",
+        f"Banner: {_profile_value(profile, 'banner')[:72]}",
+        f"Avatar: {_profile_value(profile, 'avatar')[:72]}",
+        f"Username: {_profile_value(profile, 'username')}",
+        f"About Me: {_profile_value(profile, 'description')}",
+        f"Interests: {_profile_value(profile, 'interests')}",
+        f"Friends ({len(friends)}) [{'selected' if render.profile_selected_section == 'friends' else 'tab to select'}]",
+    ]
+    for friend in friends:
+        lines.append(f"  - {friend}")
+    lines.append(
+        f"Latest Bulletins ({len(bulletins)}) [{'selected' if render.profile_selected_section == 'bulletins' else 'tab to select'}]"
+    )
+    for item in bulletins:
+        if isinstance(item, dict):
+            lines.append(_format_bulletin_item(item))
+    return lines
+
+
+def _format_bulletin_item(item: Dict[str, object]) -> str:
+    ts = str(item.get("ts_ms") or item.get("ts") or "")
+    text = str(item.get("text", "")).replace("\n", " ").strip()
+    if len(text) > 56:
+        text = f"{text[:56]}…"
+    return f"  - {ts}: {text}"
+
+
+def _format_feed_item(item: Dict[str, object]) -> str:
+    author = str(item.get("author") or item.get("user_id") or "")
+    ts = str(item.get("ts_ms") or item.get("ts") or "")
+    text = str(item.get("text") or item.get("payload", ""))
+    text = text.replace("\n", " ").strip()
+    if len(text) > 72:
+        text = f"{text[:72]}…"
+    return f"{author} @ {ts}: {text}"
 
 
 def _format_presence_entry(entry: Dict[str, object]) -> str:
@@ -1375,6 +1448,58 @@ def main() -> int:
                 model.social_scroll = 0
             _set_social_status(model, f"Last refresh {time.strftime('%H:%M:%S')}")
 
+        def _refresh_social_profile() -> None:
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            user_id = _resolve_social_target(model)
+            if user_id is None:
+                return
+            model.profile_user_id = user_id
+            _set_social_status(model, "Refreshing profile...")
+            try:
+                model.profile_data = social.fetch_social_profile(base_url, user_id=user_id, limit=20)
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            _set_social_status(model, f"Profile refreshed {time.strftime('%H:%M:%S')}")
+
+        def _refresh_social_feed(load_more: bool = False) -> None:
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            user_id = _resolve_social_target(model)
+            if user_id is None:
+                return
+            if not load_more:
+                model.feed_cursor = None
+            _set_social_status(model, "Refreshing feed...")
+            try:
+                response = social.fetch_social_feed(
+                    base_url,
+                    user_id=user_id,
+                    limit=20,
+                    cursor=model.feed_cursor if load_more else None,
+                )
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            items = response.get("items", [])
+            if not isinstance(items, list):
+                items = []
+            if load_more:
+                model.feed_items.extend([it for it in items if isinstance(it, dict)])
+            else:
+                model.feed_items = [it for it in items if isinstance(it, dict)]
+            next_cursor = response.get("next_cursor")
+            model.feed_cursor = str(next_cursor) if next_cursor else None
+            sources = response.get("sources", [])
+            model.feed_sources = [str(it) for it in sources] if isinstance(sources, list) else []
+            _set_social_status(
+                model,
+                f"Feed sources={len(model.feed_sources)} next_cursor={'yes' if model.feed_cursor else 'none'}",
+            )
+
         def _publish_social() -> None:
             if model.social_target != "self":
                 _set_social_status(model, "Posting is only available for the self timeline.")
@@ -1402,6 +1527,70 @@ def main() -> int:
             model.social_compose_text = ""
             model.social_compose_active = False
             _refresh_social()
+
+        def _publish_post() -> None:
+            text = model.social_compose_text.strip()
+            if not text:
+                _set_social_status(model, "Compose text is empty.")
+                return
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            _set_social_status(model, "Publishing bulletin...")
+            try:
+                social.publish_post(base_url, identity=model.identity, text=text)
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            model.social_compose_text = ""
+            model.social_compose_active = False
+            _refresh_social_profile()
+
+        def _submit_profile_edit() -> None:
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            profile = model.profile_data if isinstance(model.profile_data, dict) else {}
+            changed = []
+            for kind in ["username", "description", "avatar", "banner", "interests"]:
+                new_value = model.social_edit_fields.get(kind, "")
+                current_value = str(profile.get(kind, ""))
+                if new_value != current_value:
+                    changed.append((kind, new_value))
+            if not changed:
+                model.social_edit_active = False
+                _set_social_status(model, "No profile changes.")
+                return
+            for kind, value in changed:
+                try:
+                    social.publish_profile_field(base_url, identity=model.identity, kind=kind, value=value)
+                except Exception as exc:
+                    _set_social_status(model, f"Error updating {kind}: {exc}")
+                    return
+            model.social_edit_active = False
+            _set_social_status(model, f"Updated profile fields: {', '.join(kind for kind, _ in changed)}")
+            _refresh_social_profile()
+
+        def _follow_toggle(following: bool) -> None:
+            base_url = _load_social_base_url(model)
+            if base_url is None:
+                return
+            target_user_id = model.profile_user_id
+            if not target_user_id or target_user_id == model.identity.social_public_key_b64:
+                _set_social_status(model, "Select a peer profile to follow/unfollow.")
+                return
+            try:
+                social.publish_follow(
+                    base_url,
+                    identity=model.identity,
+                    target_user_id=target_user_id,
+                    following=following,
+                )
+            except Exception as exc:
+                _set_social_status(model, f"Error: {exc}")
+                return
+            _set_social_status(model, f"{'Followed' if following else 'Unfollowed'} {target_user_id}.")
+            _refresh_social_profile()
 
         def _set_presence_status(text: str) -> None:
             model.set_presence_status(text)
@@ -1609,14 +1798,38 @@ def main() -> int:
                         continue
                 model.social_items = []
                 model.social_prev_hash = None
+                model.feed_items = []
+                model.feed_cursor = None
                 model.social_scroll = 0
                 model.social_selected_idx = 0
+                resolved = _resolve_social_target(model)
+                model.profile_user_id = resolved or model.identity.social_public_key_b64
                 target_label = "self" if model.social_target == "self" else "peer"
                 _set_social_status(model, f"Target set to {target_label}. Press r to refresh.")
             if action == "social_refresh":
                 _refresh_social()
+            if action == "social_profile_refresh":
+                _refresh_social_profile()
+            if action == "social_feed_refresh":
+                _refresh_social_feed(load_more=False)
+            if action == "social_feed_load_more":
+                _refresh_social_feed(load_more=True)
             if action == "social_publish":
-                _publish_social()
+                if model.social_view_mode == "events":
+                    _publish_social()
+                else:
+                    _publish_post()
+            if action == "social_profile_edit_start":
+                source = model.profile_data if isinstance(model.profile_data, dict) else {}
+                for field in ["username", "description", "avatar", "banner", "interests"]:
+                    model.social_edit_fields[field] = str(source.get(field, ""))
+                _set_social_status(model, "Editing profile fields.")
+            if action == "social_profile_edit_submit":
+                _submit_profile_edit()
+            if action == "social_follow_add":
+                _follow_toggle(True)
+            if action == "social_follow_remove":
+                _follow_toggle(False)
             if action == "create_dm":
                 new_dm = model.render().new_dm_fields
                 _create_new_dm(
