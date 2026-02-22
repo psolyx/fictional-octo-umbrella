@@ -23,8 +23,7 @@ from typing import Callable, Dict, Iterable, Optional
 import aiohttp
 
 from cli_app import dm_envelope, gateway_client, gateway_store, social
-
-from cli_app import mls_poc
+from cli_app import identity_store, mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
 
 
@@ -172,6 +171,8 @@ def _build_default_settings() -> Dict[str, str]:
         "dm_commit": "",
         "dm_plaintext": "",
         "dm_ciphertext": "",
+        "gateway_base_url": "http://localhost:8787",
+        "identity_import_json": "",
     }
 
 
@@ -833,6 +834,53 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 if plaintext is not None:
                     model.set_field_value("dm_plaintext", plaintext)
                     model.append_transcript("in", plaintext)
+        elif action == "gw_start":
+            base_url = fields.get("gateway_base_url", "").strip()
+            if not base_url:
+                log_writer(["gateway_base_url is required for gw_start"])
+                return
+            response = gateway_client.session_start(
+                base_url,
+                model.identity.auth_token,
+                model.identity.device_id,
+                model.identity.device_credential,
+            )
+            gateway_store.save_session(base_url, response["session_token"], response["resume_token"])
+            _write_heading([f"base_url={base_url}", "Gateway session started."])
+            exit_code, output = 0, []
+        elif action == "gw_resume":
+            stored = gateway_store.load_session()
+            if stored is None:
+                log_writer(["No stored gateway session. Run gw_start first."])
+                return
+            base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+            response = gateway_client.session_resume(base_url, stored["resume_token"])
+            gateway_store.save_session(base_url, response["session_token"], response["resume_token"])
+            _write_heading([f"base_url={base_url}", "Gateway session resumed."])
+            exit_code, output = 0, []
+        elif action == "identity_export":
+            identity_json = identity_store.export_identity_json(model.identity_path)
+            _write_heading([f"identity_path={model.identity_path}", identity_json])
+            exit_code, output = 0, []
+        elif action == "identity_import":
+            raw_json = fields.get("identity_import_json", "").strip()
+            if not raw_json:
+                log_writer(["identity_import_json is required for identity_import"])
+                return
+            record = identity_store.import_identity_json(raw_json, model.identity_path)
+            model.refresh_identity(record)
+            _write_heading([f"identity_path={model.identity_path}", "identity imported"])
+            exit_code, output = 0, []
+        elif action == "identity_new":
+            record = identity_store.create_new_identity(model.identity_path)
+            model.refresh_identity(record)
+            _write_heading([f"identity_path={model.identity_path}", f"new_user_id={record.user_id}"])
+            exit_code, output = 0, []
+        elif action == "logout":
+            gateway_store.clear_session()
+            gateway_store.clear_cursors()
+            _write_heading(["gateway_session.json cleared", "gateway_cursors.json cleared"])
+            exit_code, output = 0, []
         elif action == "rotate_device":
             record = model.rotate_device()
             _write_heading(

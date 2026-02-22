@@ -11,6 +11,23 @@
   <h1>Gateway v1 WebSocket demo</h1>
   <p>This static page exercises gateway session lifecycle, conversation subscription with optional replay, ack, and ciphertext send flows.</p>
 
+
+  <fieldset>
+    <legend>Account</legend>
+    <div class="button-row">
+      <button id="account_generate_btn">Generate identity</button>
+      <button id="account_export_btn">Export identity JSON</button>
+      <button id="account_rotate_device_btn">Rotate device</button>
+      <button id="account_logout_btn">Logout</button>
+      <span id="account_status_line">ready: no identity loaded</span>
+    </div>
+    <label>
+      Import identity JSON
+      <textarea id="account_import_json" rows="4" cols="64"></textarea>
+    </label>
+    <button id="account_import_btn">Import identity JSON</button>
+  </fieldset>
+
   <fieldset>
     <legend>Connection</legend>
     <label>
@@ -130,7 +147,7 @@
       <label>Avatar URL/data <input type="text" id="profile_avatar_input" size="64" /></label>
       <label>Banner URL/data <input type="text" id="profile_banner_input" size="64" /></label>
       <label>Interests <input type="text" id="profile_interests_input" size="64" /></label>
-      <label>Signature (sig_b64, required) <input type="text" id="social_sig_b64" size="64" /></label>
+      <label>Signature (sig_b64, advanced/debug) <input type="text" id="social_sig_b64" size="64" /></label>
       <button id="profile_update_btn">Update profile</button>
     </section>
 
@@ -225,6 +242,7 @@
   <script src="vendor/wasm_exec.js"></script>
   <script type="module" src="vectors_ui.js"></script>
   <script type="module" src="dm_ui.js"></script>
+  <script type="module" src="identity.js"></script>
   <script type="module" src="social_ui.js"></script>
   <script src="gateway_ws_client.js"></script>
 </body>

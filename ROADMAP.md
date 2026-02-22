@@ -247,7 +247,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 - Product-grade browser UX beyond protocol harness scope (navigation, social views, and chat/social cohesion).
 
 **Exit criteria**
-- Deferred to a later iteration (Phase 6+ planning gate) and not required for current Phase 5a completion.
+- Deferred to a later iteration (Phase 6 planning gate) and not required for current Phase 5a completion.
 
 ### Phase 5.1 — Web UI posture hardening (retire: dependency/supply-chain creep)
 **Deliverables**
@@ -305,7 +305,24 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
 
 ---
 
-### Phase 6 — Gateway federation v2 (relay-to-home) (retire: multi-gateway ops / routing risk)
+### Phase 6 — Aspects (E2EE audience groups) planning gate (retire: encrypted audience-scope ambiguity)
+**Deliverables (planning only in this phase)**
+- Contract doc for encrypted payload envelope shape used inside signed Polycentric social events.
+- Key distribution posture for Aspects captured as MLS-backed planning (RFC 9420), including provisioning and membership updates.
+- Rotation posture and non-member UX behavior documented before implementation starts.
+- Explicit scope marker that this phase is planning-only and does not implement Aspects runtime behavior.
+
+**Exit criteria**
+- `clients/docs/aspects_phase6.md` defines envelope format, key distribution plan, rotation rules, and non-member UX.
+- Roadmap + contract tests assert this remains a planning gate and does not claim runtime Aspects implementation.
+- Social event posture remains signed event-log entries that may carry opaque/encrypted payload bodies.
+
+**Risk retired**
+- Scope drift around E2EE audience-group semantics is bounded before implementation.
+
+---
+
+### Phase 7 — Gateway federation v2 (relay-to-home) (retire: multi-gateway ops / routing risk)
 **Deliverables**
 - Inter-gateway transport and authentication to forward MLS traffic to `conv_home`.
 - Routing to `conv_home` for sends/replay with proxying of KeyPackage operations to the home gateway.

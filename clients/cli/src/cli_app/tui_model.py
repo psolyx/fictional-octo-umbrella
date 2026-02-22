@@ -131,6 +131,12 @@ class TuiModel:
             "dm_commit_apply",
             "dm_encrypt",
             "dm_decrypt",
+            "gw_start",
+            "gw_resume",
+            "identity_export",
+            "identity_import",
+            "identity_new",
+            "logout",
             "rotate_device",
             "quit",
         ]
@@ -149,6 +155,8 @@ class TuiModel:
             "dm_commit",
             "dm_plaintext",
             "dm_ciphertext",
+            "gateway_base_url",
+            "identity_import_json",
         ]
         self.settings_path = Path(settings_path)
         self.max_log_lines = max_log_lines
@@ -171,6 +179,8 @@ class TuiModel:
             "dm_commit": initial_settings.get("dm_commit", ""),
             "dm_plaintext": initial_settings.get("dm_plaintext", ""),
             "dm_ciphertext": initial_settings.get("dm_ciphertext", ""),
+            "gateway_base_url": initial_settings.get("gateway_base_url", "http://localhost:8787"),
+            "identity_import_json": initial_settings.get("identity_import_json", ""),
         }
 
         self.fields: Dict[str, str] = defaults
