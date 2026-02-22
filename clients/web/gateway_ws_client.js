@@ -31,6 +31,12 @@
   let rooms_status_line = null;
   let rooms_session_token = '';
   let rooms_http_base_url = '';
+  let conversations_refresh_btn = null;
+  let conversations_list = null;
+  let conversations_status = null;
+  let conversations_session_token = '';
+  let conversations_http_base_url = '';
+  let conversations_user_id = '';
   let dm_bridge_last_env_text = null;
   let dm_bridge_copy_btn = null;
   let dm_bridge_cli_block_input = null;
@@ -55,6 +61,12 @@
   const ack_btn = document.getElementById('ack_btn');
   const send_btn = document.getElementById('send_btn');
   const clear_log_btn = document.getElementById('clear_log');
+  conversations_refresh_btn = document.getElementById('conversations_refresh_btn');
+  conversations_list = document.getElementById('conversations_list');
+  conversations_status = document.getElementById('conversations_status');
+  if (conversations_status) {
+    conversations_status.textContent = 'status: idle';
+  }
 
   const db_name = 'gateway_web_demo';
   const db_version = 2;
@@ -373,6 +385,85 @@
     write_setting('social_after_hash', after_hash).catch((err) =>
       append_log(`failed to persist social_after_hash: ${err.message}`)
     );
+  };
+
+  const set_conversations_status = (value) => {
+    if (conversations_status) {
+      conversations_status.textContent = value;
+    }
+  };
+
+  const short_id = (value, prefix = 8, suffix = 4) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const trimmed = value.trim();
+    if (trimmed.length <= prefix + suffix + 1) {
+      return trimmed;
+    }
+    return `${trimmed.slice(0, prefix)}…${trimmed.slice(-suffix)}`;
+  };
+
+  const render_conversations = (items) => {
+    if (!conversations_list) {
+      return;
+    }
+    conversations_list.innerHTML = '';
+    if (!Array.isArray(items) || items.length === 0) {
+      const empty_item = document.createElement('li');
+      empty_item.textContent = 'no conversations';
+      conversations_list.appendChild(empty_item);
+      return;
+    }
+    items.forEach((item) => {
+      if (!item || typeof item !== 'object' || typeof item.conv_id !== 'string') {
+        return;
+      }
+      const list_item = document.createElement('li');
+      const member_count = Number.isInteger(item.member_count) ? item.member_count : 0;
+      const role = typeof item.role === 'string' ? item.role : 'member';
+      const members = Array.isArray(item.members) ? item.members.filter((member) => typeof member === 'string') : [];
+      let peer_label = '';
+      if (member_count === 2 && members.length > 0) {
+        const other_member = members.find((member) => member !== conversations_user_id) || members[0];
+        if (other_member) {
+          peer_label = ` peer ${short_id(other_member, 10, 4)}`;
+        }
+      }
+      list_item.textContent = `${short_id(item.conv_id, 10, 4)} role=${role} members=${member_count}${peer_label}`;
+      list_item.dataset.conv_id = item.conv_id;
+      list_item.addEventListener('click', () => {
+        conv_id_input.value = item.conv_id;
+        maybe_dispatch_conv_selected(item.conv_id);
+        subscribe_btn.click();
+      });
+      conversations_list.appendChild(list_item);
+    });
+  };
+
+  const refresh_conversations = async () => {
+    if (!conversations_http_base_url || !conversations_session_token) {
+      set_conversations_status('status: session required');
+      return;
+    }
+    set_conversations_status('status: loading');
+    try {
+      const response = await fetch(`${conversations_http_base_url}/v1/conversations`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${conversations_session_token}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`http ${response.status}`);
+      }
+      const payload = await response.json();
+      const items = payload && Array.isArray(payload.items) ? payload.items : [];
+      render_conversations(items);
+      set_conversations_status(`status: loaded ${items.length}`);
+    } catch (err) {
+      set_conversations_status(`status: error (${err.message || 'fetch failed'})`);
+    }
   };
 
   const parse_members_input = (value) => {
@@ -1989,6 +2080,14 @@
       .catch((err) => append_log(`gateway.subscribe cursor read failed: ${err.message}`));
   };
 
+  if (conversations_refresh_btn) {
+    conversations_refresh_btn.addEventListener('click', () => {
+      refresh_conversations().catch((err) =>
+        set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
+      );
+    });
+  }
+
   subscribe_btn.addEventListener('click', async () => {
     const conv_id = conv_id_input.value.trim();
     maybe_dispatch_conv_selected(conv_id);
@@ -2081,6 +2180,13 @@
     } else {
       set_rooms_status('status: ready');
     }
+
+    conversations_session_token = rooms_session_token;
+    conversations_http_base_url = rooms_http_base_url;
+    conversations_user_id = typeof detail.user_id === 'string' ? detail.user_id : '';
+    refresh_conversations().catch((err) =>
+      set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
+    );
   });
 
   build_dm_bridge_panel();

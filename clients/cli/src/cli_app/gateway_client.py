@@ -162,6 +162,17 @@ def keypackages_rotate(
     )
 
 
+
+
+def conversations_list(base_url: str, session_token: str) -> Dict[str, object]:
+    request = urllib.request.Request(
+        _build_url(base_url, "/v1/conversations"),
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
 def room_create(
     base_url: str,
     session_token: str,
