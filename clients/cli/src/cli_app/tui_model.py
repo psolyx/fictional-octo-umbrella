@@ -78,6 +78,7 @@ class RenderState:
     new_dm_active_field: int
     social_active: bool
     social_target: str
+    social_view_mode: str
     social_items: List[Dict[str, Any]]
     social_selected_idx: int
     social_scroll: int
@@ -85,6 +86,15 @@ class RenderState:
     social_compose_active: bool
     social_compose_text: str
     social_prev_hash: Optional[str]
+    profile_user_id: str
+    profile_data: Dict[str, Any]
+    profile_selected_section: str
+    feed_items: List[Dict[str, Any]]
+    feed_cursor: Optional[str]
+    feed_sources: List[str]
+    social_edit_active: bool
+    social_edit_field: int
+    social_edit_fields: Dict[str, str]
     presence_active: bool
     presence_enabled: bool
     presence_invisible: bool
@@ -186,6 +196,7 @@ class TuiModel:
 
         self.social_active = False
         self.social_target = "self"
+        self.social_view_mode = "events"
         self.social_items: List[Dict[str, Any]] = []
         self.social_selected_idx = 0
         self.social_scroll = 0
@@ -193,6 +204,21 @@ class TuiModel:
         self.social_compose_active = False
         self.social_compose_text = ""
         self.social_prev_hash: Optional[str] = None
+        self.profile_user_id = self.identity.social_public_key_b64
+        self.profile_data: Dict[str, Any] = {}
+        self.profile_selected_section = "friends"
+        self.feed_items: List[Dict[str, Any]] = []
+        self.feed_cursor: Optional[str] = None
+        self.feed_sources: List[str] = []
+        self.social_edit_active = False
+        self.social_edit_field = 0
+        self.social_edit_fields = {
+            "username": "",
+            "description": "",
+            "avatar": "",
+            "banner": "",
+            "interests": "",
+        }
 
         self.presence_active = False
         self.presence_enabled = False
@@ -322,9 +348,20 @@ class TuiModel:
         self.transcript_scroll = max(0, min(max_scroll, self.transcript_scroll + delta))
 
     def scroll_social(self, delta: int) -> None:
-        max_scroll = max(0, len(self.social_items) - 1)
+        if self.social_view_mode == "feed":
+            visible = self.feed_items
+        elif self.social_view_mode == "profile":
+            section = self.profile_selected_section
+            visible = []
+            if section == "friends":
+                visible = list(self.profile_data.get("friends", []))
+            elif section == "bulletins":
+                visible = list(self.profile_data.get("bulletins", []))
+        else:
+            visible = self.social_items
+        max_scroll = max(0, len(visible) - 1)
         self.social_scroll = max(0, min(max_scroll, self.social_scroll + delta))
-        self.social_selected_idx = max(0, len(self.social_items) - 1 - self.social_scroll)
+        self.social_selected_idx = max(0, len(visible) - 1 - self.social_scroll)
 
     def scroll_presence(self, delta: int) -> None:
         max_scroll = max(0, len(self.presence_entries) - 1)
@@ -488,6 +525,10 @@ class TuiModel:
             return "toggle_mode"
         if key == "r":
             if self.mode == MODE_DM_CLIENT and self.focus_area == "social" and self.social_active:
+                if self.social_view_mode == "profile":
+                    return "social_profile_refresh"
+                if self.social_view_mode == "feed":
+                    return "social_feed_refresh"
                 return "social_refresh"
             return "resume"
         if key == "CTRL_P" and self.mode == MODE_DM_CLIENT and not self.new_dm_active:
@@ -598,6 +639,29 @@ class TuiModel:
                     return "presence_toggle_enabled"
                 return None
             if self.focus_area == "social" and self.social_active:
+                if self.social_edit_active:
+                    order = ["username", "description", "avatar", "banner", "interests"]
+                    if key == "ESC":
+                        self.social_edit_active = False
+                        return None
+                    if key == "UP":
+                        self.social_edit_field = max(0, self.social_edit_field - 1)
+                        return None
+                    if key == "DOWN":
+                        self.social_edit_field = min(len(order) - 1, self.social_edit_field + 1)
+                        return None
+                    field = order[self.social_edit_field]
+                    if key == "BACKSPACE":
+                        self.social_edit_fields[field] = self.social_edit_fields[field][:-1]
+                        return None
+                    if key == "DELETE":
+                        self.social_edit_fields[field] = ""
+                        return None
+                    if key == "ENTER":
+                        return "social_profile_edit_submit"
+                    if char:
+                        self.social_edit_fields[field] += char
+                    return None
                 if self.social_compose_active:
                     if key == "ESC":
                         self.social_compose_active = False
@@ -622,6 +686,10 @@ class TuiModel:
                     self.scroll_social(-1)
                     return None
                 if key == "r":
+                    if self.social_view_mode == "feed":
+                        return "social_feed_refresh"
+                    if self.social_view_mode == "profile":
+                        return "social_profile_refresh"
                     return "social_refresh"
                 if key == "CHAR" and char in {"1"}:
                     self.social_target = "self"
@@ -629,9 +697,36 @@ class TuiModel:
                 if key == "CHAR" and char in {"2"}:
                     self.social_target = "peer"
                     return "social_target_peer"
+                if key == "CHAR" and char in {"v", "V"}:
+                    self.social_view_mode = "profile"
+                    self.social_scroll = 0
+                    self.social_selected_idx = 0
+                    return "social_profile_refresh"
+                if key == "CHAR" and char in {"f", "F"}:
+                    self.social_view_mode = "feed"
+                    self.social_scroll = 0
+                    self.social_selected_idx = 0
+                    return "social_feed_refresh"
+                if key == "CHAR" and char in {"n", "N"} and self.social_view_mode == "feed":
+                    return "social_feed_load_more"
+                if key == "CHAR" and char in {"a", "A"}:
+                    return "social_follow_add"
+                if key == "CHAR" and char in {"u", "U"}:
+                    return "social_follow_remove"
                 if key == "CHAR" and char in {"p", "P"}:
                     self.social_compose_active = True
                     self.social_compose_text = ""
+                    return None
+                if key == "CHAR" and char in {"e", "E"}:
+                    self.social_edit_active = True
+                    self.social_edit_field = 0
+                    return "social_profile_edit_start"
+                if key == "CHAR" and char in {"s", "S"} and self.social_view_mode == "profile":
+                    self.profile_selected_section = (
+                        "bulletins" if self.profile_selected_section == "friends" else "friends"
+                    )
+                    self.social_scroll = 0
+                    self.social_selected_idx = 0
                     return None
                 return None
             if key == "CTRL_N":
@@ -758,6 +853,7 @@ class TuiModel:
             new_dm_active_field=self.new_dm_active_field,
             social_active=self.social_active,
             social_target=self.social_target,
+            social_view_mode=self.social_view_mode,
             social_items=list(self.social_items),
             social_selected_idx=self.social_selected_idx,
             social_scroll=self.social_scroll,
@@ -765,6 +861,15 @@ class TuiModel:
             social_compose_active=self.social_compose_active,
             social_compose_text=self.social_compose_text,
             social_prev_hash=self.social_prev_hash,
+            profile_user_id=self.profile_user_id,
+            profile_data=dict(self.profile_data),
+            profile_selected_section=self.profile_selected_section,
+            feed_items=list(self.feed_items),
+            feed_cursor=self.feed_cursor,
+            feed_sources=list(self.feed_sources),
+            social_edit_active=self.social_edit_active,
+            social_edit_field=self.social_edit_field,
+            social_edit_fields=dict(self.social_edit_fields),
             presence_active=self.presence_active,
             presence_enabled=self.presence_enabled,
             presence_invisible=self.presence_invisible,

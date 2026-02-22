@@ -123,6 +123,38 @@ def fetch_social_events(base_url: str, *, user_id: str, limit: int = 50, after_h
     return events
 
 
+def fetch_social_profile(base_url: str, *, user_id: str, limit: int = 20) -> dict:
+    query = urllib.parse.urlencode({"user_id": user_id, "limit": str(limit)})
+    url = f"{_normalize_base_url(base_url)}/v1/social/profile?{query}"
+    result = _get_json(url)
+    if result["status"] != 200:
+        raise RuntimeError(f"failed to fetch profile: {result['body']}")
+    body = result.get("body", {})
+    if not isinstance(body, dict):
+        raise RuntimeError("profile response was not an object")
+    return body
+
+
+def fetch_social_feed(
+    base_url: str,
+    *,
+    user_id: str,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> dict:
+    query: dict[str, str] = {"user_id": user_id, "limit": str(limit)}
+    if cursor:
+        query["cursor"] = cursor
+    url = f"{_normalize_base_url(base_url)}/v1/social/feed?{urllib.parse.urlencode(query)}"
+    result = _get_json(url)
+    if result["status"] != 200:
+        raise RuntimeError(f"failed to fetch feed: {result['body']}")
+    body = result.get("body", {})
+    if not isinstance(body, dict):
+        raise RuntimeError("feed response was not an object")
+    return body
+
+
 def publish_social_event(
     base_url: str,
     *,
@@ -162,3 +194,22 @@ def publish_social_event(
     if event.get("event_hash") != expected_hash:
         raise RuntimeError("gateway returned unexpected event hash")
     return event
+
+
+def publish_profile_field(base_url: str, *, identity: IdentityRecord, kind: str, value: Any) -> dict:
+    return publish_social_event(base_url, identity=identity, kind=kind, payload={"value": value})
+
+
+def publish_post(base_url: str, *, identity: IdentityRecord, text: str) -> dict:
+    return publish_social_event(base_url, identity=identity, kind="post", payload={"text": text})
+
+
+def publish_follow(
+    base_url: str,
+    *,
+    identity: IdentityRecord,
+    target_user_id: str,
+    following: bool,
+) -> dict:
+    payload = {"target_user_id": target_user_id, "following": bool(following)}
+    return publish_social_event(base_url, identity=identity, kind="follow", payload=payload)

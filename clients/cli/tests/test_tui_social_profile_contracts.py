@@ -1,0 +1,36 @@
+import pathlib
+import unittest
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+class TestTuiSocialProfileContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tui_app = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "tui_app.py").read_text(encoding="utf-8")
+        cls.tui_model = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "tui_model.py").read_text(encoding="utf-8")
+        cls.social_helpers = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "social.py").read_text(encoding="utf-8")
+        cls.tui_main = (REPO_ROOT / "clients" / "tui" / "src" / "tui_app" / "__main__.py").read_text(encoding="utf-8")
+
+    def test_profile_marker_and_social_endpoints_contract(self):
+        self.assertIn("MySpace-style profile", self.tui_app)
+        if "/v1/social/profile" not in self.tui_app or "/v1/social/feed" not in self.tui_app:
+            self.assertIn("def fetch_social_profile", self.social_helpers)
+            self.assertIn("def fetch_social_feed", self.social_helpers)
+            self.assertIn("/v1/social/profile", self.social_helpers)
+            self.assertIn("/v1/social/feed", self.social_helpers)
+
+    def test_social_view_mode_and_key_contracts(self):
+        self.assertIn("social_view_mode", self.tui_model)
+        self.assertIn('char in {"v", "V"}', self.tui_model)
+        self.assertIn('char in {"f", "F"}', self.tui_model)
+        self.assertIn('if self.focus_area == "social" and self.social_active', self.tui_model)
+
+    def test_clients_tui_wrapper_dispatches_to_cli_app(self):
+        self.assertIn("from cli_app.tui_app import main as cli_tui_main", self.tui_main)
+        self.assertIn("return cli_tui_main()", self.tui_main)
+
+
+if __name__ == "__main__":
+    unittest.main()

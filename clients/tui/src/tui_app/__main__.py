@@ -1,9 +1,10 @@
-"""Minimal TUI placeholder entrypoint for roadmap scaffolding."""
+"""Thin runnable wrapper for the production TUI deliverable."""
+
+from cli_app.tui_app import main as cli_tui_main
 
 
 def main() -> int:
-    print("tui_app placeholder: Phase 5.2 production client not implemented yet")
-    return 0
+    return cli_tui_main()
 
 
 if __name__ == "__main__":
