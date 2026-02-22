@@ -13,6 +13,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ def _normalize_key(key: int) -> tuple[str, str | None]:
         return "CTRL_N", None
     if key == 16:  # ctrl-p
         return "CTRL_P", None
+    if key == 18:  # ctrl-r
+        return "CTRL_R", None
     if key == 19:  # ctrl-s
         return "CTRL_S", None
     if key == 27:
@@ -233,7 +236,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | L: refresh convs | U: next unread | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -262,6 +265,18 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
                 break
             value = render.new_dm_fields.get(field, "")
             attr = curses.A_REVERSE if idx == render.new_dm_active_field else 0
+            _render_text(stdscr, y, 2, f"{field}: {value}", attr)
+            y += 1
+
+    if render.room_modal_active and form_start < max_y - 2:
+        title = render.room_modal_action.replace("_", " ")
+        _render_text(stdscr, form_start, 1, f"{title} (Enter to advance/submit, Esc to cancel)")
+        y = form_start + 1
+        for idx, field in enumerate(render.room_modal_field_order):
+            if y >= max_y - 1:
+                break
+            value = render.room_modal_fields.get(field, "")
+            attr = curses.A_REVERSE if idx == render.room_modal_active_field else 0
             _render_text(stdscr, y, 2, f"{field}: {value}", attr)
             y += 1
 
@@ -1467,6 +1482,90 @@ def _create_new_dm(
     model.append_message(conv_id, "sys", "DM created; waiting for echo.")
 
 
+
+def _parse_member_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _run_room_action(
+    model: TuiModel,
+    session: SessionState | None,
+    action_name: str,
+    members: list[str],
+    *,
+    conv_id: str,
+) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    if not conv_id:
+        _append_system_message(model, "Selected conversation has no conv_id.")
+        return
+    if not members:
+        _append_system_message(model, "Room action requires at least one member.")
+        return
+    action_map = {
+        "room_invite": gateway_client.rooms_invite,
+        "room_remove": gateway_client.rooms_remove,
+        "room_promote": gateway_client.rooms_promote,
+        "room_demote": gateway_client.rooms_demote,
+    }
+    runner = action_map.get(action_name)
+    if runner is None:
+        _append_system_message(model, f"Unsupported room action: {action_name}")
+        return
+    try:
+        runner(session.base_url, session.session_token, conv_id, members)
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="ignore")
+        if exc.code == 403:
+            _append_system_message(model, f"room {action_name} forbidden conv_id={conv_id}")
+        else:
+            _append_system_message(model, f"room {action_name} failed http {exc.code}: {payload}")
+        return
+    _append_system_message(model, f"room {action_name} ok conv_id={conv_id}")
+
+
+def _submit_room_modal(
+    model: TuiModel,
+    session: SessionState | None,
+) -> str | None:
+    action_name = model.room_modal_action
+    fields = dict(model.room_modal_fields)
+    model.room_modal_active = False
+    model.room_modal_action = ""
+    model.room_modal_field_order = []
+    model.room_modal_active_field = 0
+    model.focus_area = "conversations"
+    if action_name == "room_create":
+        members = _parse_member_csv(fields.get("members", ""))
+        conv_id = fields.get("conv_id", "").strip() or f"conv_{secrets.token_hex(16)}"
+        state_dir = fields.get("state_dir", "").strip() or _default_state_dir_for_conv(conv_id)
+        name = fields.get("name", "").strip() or f"room {conv_id[:8]}"
+        if session is None:
+            _append_system_message(model, "No active session. Press r to resume.")
+            return None
+        if not members:
+            _append_system_message(model, "New room requires members.")
+            return None
+        try:
+            gateway_client.rooms_create(session.base_url, session.session_token, conv_id, members)
+        except urllib.error.HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 403:
+                _append_system_message(model, f"room create forbidden conv_id={conv_id}")
+            else:
+                _append_system_message(model, f"room create failed http {exc.code}: {payload}")
+            return None
+        model.ensure_conversation(conv_id=conv_id, name=name, state_dir=state_dir, peer_user_id="", next_seq=1)
+        _append_system_message(model, f"room create ok conv_id={conv_id}")
+        return "conv_refresh"
+
+    conv_id = model.get_selected_conv_id().strip()
+    members = _parse_member_csv(fields.get("members", ""))
+    _run_room_action(model, session, action_name, members, conv_id=conv_id)
+    return "conv_refresh"
+
 # Manual smoke (gateway-backed DM):
 # 1) Start gateway and run `gw-start` to store a session.
 # 2) Launch this TUI, press r to resume/start, Ctrl-N to create a DM, then send a message.
@@ -1854,7 +1953,7 @@ def main() -> int:
             social_paste = focus == "social" and state.social_compose_active
             presence_paste = focus == "presence" and state.presence_prompt_active
             if (
-                focus in {"fields", "compose", "new_dm"}
+                focus in {"fields", "compose", "new_dm", "room_modal"}
                 or social_paste
                 or presence_paste
             ) and (key == 27 or 0 <= key < 256) and key != 9:
@@ -1899,6 +1998,14 @@ def main() -> int:
                         if cleaned:
                             field_key = state.new_dm_field_order[state.new_dm_active_field]
                             model.new_dm_fields[field_key] += cleaned
+                        continue
+
+                    if focus == "room_modal":
+                        cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
+                        cleaned = cleaned.replace("\n", "").replace("\r", "")
+                        if cleaned and state.room_modal_field_order:
+                            field_key = state.room_modal_field_order[state.room_modal_active_field]
+                            model.room_modal_fields[field_key] = model.room_modal_fields.get(field_key, "") + cleaned
                         continue
                     if social_paste:
                         cleaned = _sanitize_paste(raw_text, strip_all_whitespace=False)
@@ -2016,6 +2123,18 @@ def main() -> int:
                 model.new_dm_active = False
                 model.focus_area = "conversations"
                 _ensure_tail_threads()
+            if action in {
+                "room_create_submit",
+                "room_invite_submit",
+                "room_remove_submit",
+                "room_promote_submit",
+                "room_demote_submit",
+            }:
+                follow_up = _submit_room_modal(model, session_state)
+                if follow_up == "conv_refresh":
+                    _refresh_conversations(model, session_state)
+                    _stop_tail_threads()
+                    _ensure_tail_threads()
             if action == "send":
                 compose_text = model.compose_text.strip("\n")
                 if not compose_text:

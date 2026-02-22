@@ -28,6 +28,9 @@
   let rooms_create_btn = null;
   let rooms_invite_btn = null;
   let rooms_remove_btn = null;
+  let rooms_promote_btn = null;
+  let rooms_demote_btn = null;
+  let rooms_generate_room_id_btn = null;
   let rooms_status_line = null;
   let rooms_session_token = '';
   let rooms_http_base_url = '';
@@ -482,6 +485,14 @@
         const desired_from_seq = Math.max(item.cursor_next_seq, item.earliest_seq || 1);
         from_seq_input.value = String(desired_from_seq);
         maybe_dispatch_conv_selected(item.conv_id);
+        window.dispatchEvent(
+          new CustomEvent('conv.selected', {
+            detail: {
+              conv_id: item.conv_id,
+              members,
+            },
+          })
+        );
         subscribe_btn.click();
       });
       list_item.appendChild(conversation_btn);
@@ -524,6 +535,21 @@
       .filter((entry) => entry);
   };
 
+  const generate_room_id = () => {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return `conv_${window.crypto.randomUUID().replace(/-/g, '')}`;
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes)
+        .map((value) => value.toString(16).padStart(2, '0'))
+        .join('');
+      return `conv_${hex}`;
+    }
+    return `conv_${Date.now().toString(16)}${Math.floor(Math.random() * 1e9).toString(16)}`;
+  };
+
   const set_rooms_status = (message) => {
     if (rooms_status_line) {
       rooms_status_line.textContent = message;
@@ -531,7 +557,8 @@
   };
 
   const set_rooms_response_status = (response, payload_text) => {
-    const status_label = response ? `${response.status} ${response.statusText}`.trim() : 'unknown';
+    const forbidden_text = response && response.status === 403 ? ' forbidden' : '';
+    const status_label = response ? `${response.status} ${response.statusText}${forbidden_text}`.trim() : 'unknown';
     const compact_payload = payload_text ? payload_text : '{}';
     set_rooms_status(`status: ${status_label} ${compact_payload}`);
   };
@@ -540,7 +567,11 @@
     if (!rooms_conv_id_input || !rooms_members_input) {
       return;
     }
-    const conv_id = rooms_conv_id_input.value.trim();
+    let conv_id = rooms_conv_id_input.value.trim();
+    if (!conv_id && endpoint === '/v1/rooms/create') {
+      conv_id = generate_room_id();
+      rooms_conv_id_input.value = conv_id;
+    }
     if (!conv_id) {
       set_rooms_status(`status: error (${action_label}: conv_id required)`);
       return;
@@ -1942,6 +1973,8 @@
     legend.textContent = 'Rooms v1';
     fieldset.appendChild(legend);
 
+    const conv_row = document.createElement('div');
+    conv_row.className = 'button-row';
     const conv_label = document.createElement('label');
     conv_label.textContent = 'conv_id';
     const conv_input = document.createElement('input');
@@ -1949,7 +1982,12 @@
     conv_input.id = 'rooms_conv_id';
     conv_input.size = 32;
     conv_label.appendChild(conv_input);
-    fieldset.appendChild(conv_label);
+    conv_row.appendChild(conv_label);
+    const generate_room_id_btn = document.createElement('button');
+    generate_room_id_btn.type = 'button';
+    generate_room_id_btn.textContent = 'Generate room id';
+    conv_row.appendChild(generate_room_id_btn);
+    fieldset.appendChild(conv_row);
 
     const members_label = document.createElement('label');
     members_label.textContent = 'members (comma-separated user_ids)';
@@ -1971,9 +2009,17 @@
     const remove_btn = document.createElement('button');
     remove_btn.type = 'button';
     remove_btn.textContent = 'Remove members';
+    const promote_btn = document.createElement('button');
+    promote_btn.type = 'button';
+    promote_btn.textContent = 'Promote admins';
+    const demote_btn = document.createElement('button');
+    demote_btn.type = 'button';
+    demote_btn.textContent = 'Demote admins';
     button_row.appendChild(create_btn);
     button_row.appendChild(invite_btn);
     button_row.appendChild(remove_btn);
+    button_row.appendChild(promote_btn);
+    button_row.appendChild(demote_btn);
     fieldset.appendChild(button_row);
 
     const status_line = document.createElement('p');
@@ -1992,6 +2038,9 @@
     rooms_create_btn = create_btn;
     rooms_invite_btn = invite_btn;
     rooms_remove_btn = remove_btn;
+    rooms_promote_btn = promote_btn;
+    rooms_demote_btn = demote_btn;
+    rooms_generate_room_id_btn = generate_room_id_btn;
     rooms_status_line = status_line;
   };
 
@@ -2104,6 +2153,27 @@
       })
     );
   };
+
+  window.addEventListener('conv.selected', (event) => {
+    const detail = event && event.detail ? event.detail : null;
+    if (!detail || typeof detail !== 'object') {
+      return;
+    }
+    if (rooms_conv_id_input && typeof detail.conv_id === 'string') {
+      rooms_conv_id_input.value = detail.conv_id;
+    }
+    const selected_members = Array.isArray(detail.members)
+      ? detail.members.filter((member) => typeof member === 'string')
+      : [];
+    if (rooms_members_input && selected_members.length > 0 && selected_members.length <= 20) {
+      const prefill_members = selected_members
+        .filter((member) => member !== conversations_user_id)
+        .join(',');
+      if (prefill_members) {
+        rooms_members_input.value = prefill_members;
+      }
+    }
+  });
 
   const handle_gateway_subscribe = (event) => {
     const detail = event && event.detail ? event.detail : null;
@@ -2573,6 +2643,27 @@
       request_rooms_action('/v1/rooms/remove', 'remove').catch((err) =>
         set_rooms_status(`status: error (remove: ${err.message || 'request failed'})`)
       );
+    });
+  }
+  if (rooms_promote_btn) {
+    rooms_promote_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/promote', 'promote').catch((err) =>
+        set_rooms_status(`status: error (promote: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_demote_btn) {
+    rooms_demote_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/demote', 'demote').catch((err) =>
+        set_rooms_status(`status: error (demote: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_generate_room_id_btn) {
+    rooms_generate_room_id_btn.addEventListener('click', () => {
+      if (rooms_conv_id_input) {
+        rooms_conv_id_input.value = generate_room_id();
+      }
     });
   }
 

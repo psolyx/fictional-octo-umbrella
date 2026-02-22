@@ -243,6 +243,51 @@ def room_demote(
     )
 
 
+def rooms_create(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_create(base_url, session_token, conv_id, members)
+
+
+def rooms_invite(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_invite(base_url, session_token, conv_id, members)
+
+
+def rooms_remove(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_remove(base_url, session_token, conv_id, members)
+
+
+def rooms_promote(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_promote(base_url, session_token, conv_id, members)
+
+
+def rooms_demote(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_demote(base_url, session_token, conv_id, members)
+
+
 def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict[str, object]:
     payload = {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": seq}}
     _post_json(

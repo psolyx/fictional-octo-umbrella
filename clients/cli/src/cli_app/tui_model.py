@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import uuid
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ DEFAULT_SETTINGS_FILE = Path.home() / ".mls_tui_state.json"
 MODE_DM_CLIENT = "DM_CLIENT"
 MODE_HARNESS = "HARNESS"
 NEW_DM_FIELD_ORDER = ["peer_user_id", "name", "state_dir", "conv_id"]
+ROOM_CREATE_FIELD_ORDER = ["name", "members", "conv_id", "state_dir"]
+ROOM_MEMBERS_FIELD_ORDER = ["members"]
 
 
 def _atomic_write(path: Path | str, content: str) -> None:
@@ -76,6 +79,11 @@ class RenderState:
     new_dm_fields: Dict[str, str]
     new_dm_field_order: List[str]
     new_dm_active_field: int
+    room_modal_active: bool
+    room_modal_action: str
+    room_modal_fields: Dict[str, str]
+    room_modal_field_order: List[str]
+    room_modal_active_field: int
     social_active: bool
     social_target: str
     social_view_mode: str
@@ -203,6 +211,11 @@ class TuiModel:
         self.new_dm_active = False
         self.new_dm_fields = {"peer_user_id": "", "name": "", "state_dir": "", "conv_id": ""}
         self.new_dm_active_field = 0
+        self.room_modal_active = False
+        self.room_modal_action = ""
+        self.room_modal_fields = {}
+        self.room_modal_field_order = []
+        self.room_modal_active_field = 0
 
         self.social_active = False
         self.social_target = "self"
@@ -574,6 +587,20 @@ class TuiModel:
         self.identity = rotate_device(self.identity_path)
         return self.identity
 
+
+    def _open_room_modal(self, action: str) -> None:
+        self.room_modal_active = True
+        self.room_modal_action = action
+        self.room_modal_active_field = 0
+        if action == "room_create":
+            conv_id = f"conv_{uuid.uuid4().hex}"
+            self.room_modal_field_order = list(ROOM_CREATE_FIELD_ORDER)
+            self.room_modal_fields = {"name": "", "members": "", "conv_id": conv_id, "state_dir": ""}
+        else:
+            self.room_modal_field_order = list(ROOM_MEMBERS_FIELD_ORDER)
+            self.room_modal_fields = {"members": ""}
+        self.focus_area = "room_modal"
+
     def handle_key(self, key: str, char: Optional[str] = None) -> Optional[str]:
         """Handle a normalized key and return an action string when needed."""
 
@@ -583,6 +610,7 @@ class TuiModel:
             self.mode = MODE_HARNESS if self.mode == MODE_DM_CLIENT else MODE_DM_CLIENT
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
             self.new_dm_active = False
+            self.room_modal_active = False
             self.social_active = False
             self.presence_active = False
             self.social_compose_active = False
@@ -615,13 +643,47 @@ class TuiModel:
             self.presence_prompt_active = False
             self.presence_prompt_text = ""
             return "panel_toggle"
-        if self.new_dm_active and key in {"TAB", "SHIFT_TAB"}:
+        if (self.new_dm_active or self.room_modal_active) and key in {"TAB", "SHIFT_TAB"}:
             return None
         if key == "TAB":
             self.focus_next()
             return None
         if key == "SHIFT_TAB":
             self.focus_prev()
+            return None
+
+
+        if self.mode == MODE_DM_CLIENT and self.room_modal_active:
+            if key == "ESC":
+                self.room_modal_active = False
+                self.room_modal_action = ""
+                self.room_modal_fields = {}
+                self.room_modal_field_order = []
+                self.focus_area = "conversations"
+                return None
+            if key == "UP":
+                self.room_modal_active_field = max(0, self.room_modal_active_field - 1)
+                return None
+            if key == "DOWN":
+                self.room_modal_active_field = min(len(self.room_modal_field_order) - 1, self.room_modal_active_field + 1)
+                return None
+            if key == "BACKSPACE":
+                field_key = self.room_modal_field_order[self.room_modal_active_field]
+                self.room_modal_fields[field_key] = self.room_modal_fields.get(field_key, "")[:-1]
+                return None
+            if key == "DELETE":
+                field_key = self.room_modal_field_order[self.room_modal_active_field]
+                self.room_modal_fields[field_key] = ""
+                return None
+            if key == "ENTER":
+                if self.room_modal_active_field == len(self.room_modal_field_order) - 1:
+                    return f"{self.room_modal_action}_submit"
+                self.room_modal_active_field += 1
+                return None
+            if char:
+                field_key = self.room_modal_field_order[self.room_modal_active_field]
+                self.room_modal_fields[field_key] = self.room_modal_fields.get(field_key, "") + char
+                return None
             return None
 
         if self.mode == MODE_DM_CLIENT and self.new_dm_active:
@@ -803,6 +865,21 @@ class TuiModel:
                 self.new_dm_active_field = 0
                 self.focus_area = "new_dm"
                 return None
+            if key == "CTRL_R":
+                self._open_room_modal("room_create")
+                return None
+            if key == "CHAR" and char in {"I"}:
+                self._open_room_modal("room_invite")
+                return None
+            if key == "CHAR" and char in {"K"}:
+                self._open_room_modal("room_remove")
+                return None
+            if key == "CHAR" and char in {"+"}:
+                self._open_room_modal("room_promote")
+                return None
+            if key == "CHAR" and char in {"-"}:
+                self._open_room_modal("room_demote")
+                return None
             if key == "CHAR" and char in {"l", "L"}:
                 return "conv_refresh"
             if key == "CHAR" and char in {"U"}:
@@ -924,6 +1001,11 @@ class TuiModel:
             new_dm_fields=dict(self.new_dm_fields),
             new_dm_field_order=list(NEW_DM_FIELD_ORDER),
             new_dm_active_field=self.new_dm_active_field,
+            room_modal_active=self.room_modal_active,
+            room_modal_action=self.room_modal_action,
+            room_modal_fields=dict(self.room_modal_fields),
+            room_modal_field_order=list(self.room_modal_field_order),
+            room_modal_active_field=self.room_modal_active_field,
             social_active=self.social_active,
             social_target=self.social_target,
             social_view_mode=self.social_view_mode,
