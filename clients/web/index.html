@@ -66,9 +66,10 @@
   <fieldset>
     <legend>Conversations</legend>
     <div class="button-row">
-      <button id="conversations_refresh_btn">Refresh conversations</button>
+      <button id="conversations_refresh_btn" type="button">Refresh conversations</button>
       <span id="conversations_status">idle</span>
     </div>
+    <p>Legend: unread=N means messages newer than your local cursor. pruned means your cursor is behind retained history.</p>
     <ul id="conversations_list"></ul>
   </fieldset>
 

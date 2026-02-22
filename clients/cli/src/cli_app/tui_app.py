@@ -233,7 +233,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | L: refresh convs | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | Ctrl-N: new DM | L: refresh convs | U: next unread | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -245,6 +245,9 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
         label = conv.get("name", "")
+        unread_count = int(conv.get("unread_count", "0") or "0")
+        if unread_count > 0:
+            label = f"{label} [unread {unread_count}]"
         subtitle = conv.get("peer_user_id", "")
         _render_text(stdscr, header_offset + 1 + idx * 2, 2, label, attr)
         if subtitle and header_offset + 2 + idx * 2 < max_y:
@@ -1341,14 +1344,37 @@ def _refresh_conversations(
             name = f"dm {_short_user_label(peer_user_id)}"
         else:
             name = f"room {conv_id[:8]} ({member_count})"
+        local_next_seq = 1
+        existing_conv = model.find_conversation(conv_id)
+        if existing_conv is not None:
+            local_next_seq = max(int(existing_conv.get("next_seq") or 1), 1)
+        else:
+            local_next_seq = max(gateway_store.get_next_seq(conv_id), 1)
+        earliest_seq = item.get("earliest_seq") if isinstance(item.get("earliest_seq"), int) else None
+        latest_seq = item.get("latest_seq") if isinstance(item.get("latest_seq"), int) else None
+        latest_ts_ms = item.get("latest_ts_ms") if isinstance(item.get("latest_ts_ms"), int) else None
+        pruned_cursor = earliest_seq is not None and local_next_seq < earliest_seq
+        if pruned_cursor:
+            local_next_seq = max(earliest_seq, 1)
+            gateway_store.update_next_seq(conv_id, local_next_seq - 1)
+            _append_system_message(
+                model,
+                f"History pruned for {conv_id}; cursor moved to earliest_seq={local_next_seq}.",
+            )
+        acked_seq = local_next_seq - 1
+        unread_count = max(0, latest_seq - acked_seq) if latest_seq is not None else 0
         existed = model.find_conversation(conv_id) is not None
-        model.ensure_conversation(
+        conversation = model.ensure_conversation(
             conv_id=conv_id,
             name=name,
             state_dir=_default_state_dir_for_conv(conv_id),
             peer_user_id=peer_user_id,
-            next_seq=1,
+            next_seq=local_next_seq,
         )
+        conversation["server_earliest_seq"] = str(earliest_seq) if earliest_seq is not None else ""
+        conversation["server_latest_seq"] = str(latest_seq) if latest_seq is not None else ""
+        conversation["server_latest_ts_ms"] = str(latest_ts_ms) if latest_ts_ms is not None else ""
+        conversation["unread_count"] = str(unread_count)
         if not existed:
             added += 1
     _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
@@ -1925,6 +1951,9 @@ def main() -> int:
                 _refresh_conversations(model, session_state)
                 _stop_tail_threads()
                 _ensure_tail_threads()
+            if action == "conv_next_unread":
+                if not model.select_next_unread_conv():
+                    _append_system_message(model, "No unread conversations.")
             if action == "social_toggle":
                 if model.social_active:
                     _set_social_status(model, "Social panel active.")

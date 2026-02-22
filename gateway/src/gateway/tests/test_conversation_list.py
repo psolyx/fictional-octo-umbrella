@@ -35,6 +35,31 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 200)
 
+    async def _send_inbox(
+        self,
+        token: str,
+        *,
+        conv_id: str,
+        msg_id: str,
+        env: str,
+        ts_ms: int,
+    ) -> None:
+        response = await self.client.post(
+            "/v1/inbox",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "v": 1,
+                "t": "conv.send",
+                "body": {
+                    "conv_id": conv_id,
+                    "msg_id": msg_id,
+                    "env": env,
+                    "ts": ts_ms,
+                },
+            },
+        )
+        self.assertEqual(response.status, 200)
+
     async def test_list_requires_auth(self):
         response = await self.client.get("/v1/conversations")
         self.assertEqual(response.status, 401)
@@ -80,6 +105,43 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
         big_item = alice_items[2]
         self.assertEqual(big_item["member_count"], 22)
         self.assertNotIn("members", big_item)
+
+    async def test_conversation_list_includes_log_bounds_and_latest_ts(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        await self._create_room(alice_token, "conv_with_events", [])
+        await self._create_room(alice_token, "conv_empty", [])
+
+        await self._send_inbox(
+            alice_token,
+            conv_id="conv_with_events",
+            msg_id="m1",
+            env="ZW52MQ==",
+            ts_ms=1000,
+        )
+        await self._send_inbox(
+            alice_token,
+            conv_id="conv_with_events",
+            msg_id="m2",
+            env="ZW52Mg==",
+            ts_ms=2000,
+        )
+
+        response = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(response.status, 200)
+        by_conv_id = {item["conv_id"]: item for item in (await response.json())["items"]}
+
+        with_events = by_conv_id["conv_with_events"]
+        self.assertEqual(with_events["earliest_seq"], 1)
+        self.assertEqual(with_events["latest_seq"], 2)
+        self.assertEqual(with_events["latest_ts_ms"], 2000)
+
+        empty = by_conv_id["conv_empty"]
+        self.assertIsNone(empty["earliest_seq"])
+        self.assertIsNone(empty["latest_seq"])
+        self.assertIsNone(empty["latest_ts_ms"])
 
 
 if __name__ == "__main__":

@@ -404,7 +404,14 @@
     return `${trimmed.slice(0, prefix)}…${trimmed.slice(-suffix)}`;
   };
 
-  const render_conversations = (items) => {
+  const to_optional_int = (value) => {
+    if (!Number.isInteger(value)) {
+      return null;
+    }
+    return value;
+  };
+
+  const render_conversations = async (items) => {
     if (!conversations_list) {
       return;
     }
@@ -415,11 +422,41 @@
       conversations_list.appendChild(empty_item);
       return;
     }
-    items.forEach((item) => {
+    const computed_items = [];
+    for (const item of items) {
       if (!item || typeof item !== 'object' || typeof item.conv_id !== 'string') {
-        return;
+        continue;
       }
+      const cursor_next_seq = (await read_cursor(item.conv_id)) ?? 1;
+      const acked_seq = cursor_next_seq - 1;
+      const latest_seq = to_optional_int(item.latest_seq);
+      const earliest_seq = to_optional_int(item.earliest_seq);
+      const latest_ts_ms = to_optional_int(item.latest_ts_ms);
+      const unread_count = latest_seq === null ? 0 : Math.max(0, latest_seq - acked_seq);
+      const pruned = earliest_seq !== null && cursor_next_seq < earliest_seq;
+      computed_items.push({ ...item, unread_count, pruned, cursor_next_seq, earliest_seq, latest_ts_ms });
+    }
+
+    computed_items.sort((left, right) => {
+      if (left.latest_ts_ms === null && right.latest_ts_ms !== null) {
+        return 1;
+      }
+      if (left.latest_ts_ms !== null && right.latest_ts_ms === null) {
+        return -1;
+      }
+      if (left.latest_ts_ms !== right.latest_ts_ms) {
+        return (right.latest_ts_ms || 0) - (left.latest_ts_ms || 0);
+      }
+      if (left.unread_count !== right.unread_count) {
+        return right.unread_count - left.unread_count;
+      }
+      return String(left.conv_id).localeCompare(String(right.conv_id));
+    });
+
+    computed_items.forEach((item) => {
       const list_item = document.createElement('li');
+      const conversation_btn = document.createElement('button');
+      conversation_btn.type = 'button';
       const member_count = Number.isInteger(item.member_count) ? item.member_count : 0;
       const role = typeof item.role === 'string' ? item.role : 'member';
       const members = Array.isArray(item.members) ? item.members.filter((member) => typeof member === 'string') : [];
@@ -430,13 +467,24 @@
           peer_label = ` peer ${short_id(other_member, 10, 4)}`;
         }
       }
-      list_item.textContent = `${short_id(item.conv_id, 10, 4)} role=${role} members=${member_count}${peer_label}`;
+      const status_markers = [];
+      if (item.unread_count > 0) {
+        status_markers.push(`unread=${item.unread_count}`);
+      }
+      if (item.pruned) {
+        status_markers.push('pruned');
+      }
+      const status_suffix = status_markers.length ? ` ${status_markers.join(' ')}` : '';
+      conversation_btn.textContent = `${short_id(item.conv_id, 10, 4)} role=${role} members=${member_count}${peer_label}${status_suffix}`;
       list_item.dataset.conv_id = item.conv_id;
-      list_item.addEventListener('click', () => {
+      conversation_btn.addEventListener('click', () => {
         conv_id_input.value = item.conv_id;
+        const desired_from_seq = Math.max(item.cursor_next_seq, item.earliest_seq || 1);
+        from_seq_input.value = String(desired_from_seq);
         maybe_dispatch_conv_selected(item.conv_id);
         subscribe_btn.click();
       });
+      list_item.appendChild(conversation_btn);
       conversations_list.appendChild(list_item);
     });
   };
@@ -459,7 +507,7 @@
       }
       const payload = await response.json();
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
-      render_conversations(items);
+      await render_conversations(items);
       set_conversations_status(`status: loaded ${items.length}`);
     } catch (err) {
       set_conversations_status(`status: error (${err.message || 'fetch failed'})`);
@@ -541,6 +589,9 @@
         conv_id_input.value = conv_id;
         maybe_dispatch_conv_selected(conv_id);
         prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+      }
+      if (response.ok) {
+        await refresh_conversations();
       }
     } catch (err) {
       set_rooms_status(`status: error (${action_label}: ${err.message || 'request failed'})`);

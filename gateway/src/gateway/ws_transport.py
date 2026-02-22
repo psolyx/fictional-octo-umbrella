@@ -851,7 +851,17 @@ async def handle_conversations_list(request: web.Request) -> web.Response:
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
-    return web.json_response({"items": runtime.conversations.list_for_user(session.user_id)})
+    items = runtime.conversations.list_for_user(session.user_id)
+    enriched_items: list[dict[str, Any]] = []
+    for item in items:
+        conv_id = str(item.get("conv_id", ""))
+        earliest_seq, latest_seq, latest_ts_ms = runtime.log.bounds(conv_id)
+        enriched = dict(item)
+        enriched["earliest_seq"] = earliest_seq
+        enriched["latest_seq"] = latest_seq
+        enriched["latest_ts_ms"] = latest_ts_ms
+        enriched_items.append(enriched)
+    return web.json_response({"items": enriched_items})
 
 
 async def handle_room_invite(request: web.Request) -> web.Response:

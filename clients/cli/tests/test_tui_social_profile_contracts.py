@@ -31,6 +31,9 @@ class TestTuiSocialProfileContracts(unittest.TestCase):
     def test_conversation_refresh_contract(self):
         self.assertIn('return "conv_refresh"', self.tui_model)
         self.assertIn('gateway_client.conversations_list', self.tui_app)
+        self.assertIn('return "conv_next_unread"', self.tui_model)
+        self.assertIn('U: next unread', self.tui_app)
+        self.assertIn('[unread', self.tui_app)
 
     def test_clients_tui_wrapper_dispatches_to_cli_app(self):
         self.assertIn("from cli_app.tui_app import main as cli_tui_main", self.tui_main)

@@ -444,6 +444,22 @@ class TuiModel:
         self._sync_fields_from_selected()
         self._persist()
 
+    def select_next_unread_conv(self) -> bool:
+        if not self.dm_conversations:
+            return False
+        total = len(self.dm_conversations)
+        start = self.selected_conversation
+        for offset in range(1, total + 1):
+            idx = (start + offset) % total
+            unread_count = int(self.dm_conversations[idx].get("unread_count") or 0)
+            if unread_count > 0:
+                self.selected_conversation = idx
+                self.transcript_scroll = 0
+                self._sync_fields_from_selected()
+                self._persist()
+                return True
+        return False
+
     def add_conv(self, name: str, state_dir: str) -> None:
         label = name.strip() if name.strip() else f"dm{len(self.dm_conversations) + 1}"
         conversation = self._normalize_conversation(
@@ -789,6 +805,8 @@ class TuiModel:
                 return None
             if key == "CHAR" and char in {"l", "L"}:
                 return "conv_refresh"
+            if key == "CHAR" and char in {"U"}:
+                return "conv_next_unread"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()
@@ -891,6 +909,7 @@ class TuiModel:
                     "state_dir": str(conv.get("state_dir", "")),
                     "conv_id": str(conv.get("conv_id", "")),
                     "peer_user_id": str(conv.get("peer_user_id", "")),
+                    "unread_count": str(conv.get("unread_count", "0")),
                 }
                 for conv in self.dm_conversations
             ],
