@@ -117,6 +117,13 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("/v1/rooms/create", self.gateway_ws_client)
         self.assertIn("/v1/rooms/invite", self.gateway_ws_client)
         self.assertIn("/v1/rooms/remove", self.gateway_ws_client)
+        self.assertIn("/v1/rooms/promote", self.gateway_ws_client)
+        self.assertIn("/v1/rooms/demote", self.gateway_ws_client)
+        self.assertIn("Generate room id", self.gateway_ws_client)
+        self.assertRegex(
+            self.gateway_ws_client,
+            r"addEventListener\('conv\.selected'[\s\S]{0,400}rooms_conv_id_input\.value",
+        )
         self.assertRegex(
             self.gateway_ws_client,
             r"Authorization[\s\S]{0,160}Bearer[\s\S]{0,160}session_token",
