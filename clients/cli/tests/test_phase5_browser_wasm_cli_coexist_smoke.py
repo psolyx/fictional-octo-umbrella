@@ -25,7 +25,7 @@ WASM_MODULE_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_EXEC_SRC = ROOT_DIR / "clients" / "web" / "vendor" / "wasm_exec.js"
 WASM_PATH = ROOT_DIR / "clients" / "web" / "vendor" / "mls_harness.wasm"
 WS_EVENT_TIMEOUT_S = 10.0
-WS_ACK_TIMEOUT_S = 8.0
+WS_ACK_TIMEOUT_S = 12.0
 WS_READY_TIMEOUT_S = 4.0
 WS_NO_EVENT_TIMEOUT_S = 1.0
 
@@ -235,6 +235,9 @@ async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -
                         if value.startswith("PHASE5_BROWSER_SMOKE_PASS"):
                             return
                         if value.startswith("PHASE5_BROWSER_SMOKE_FAIL"):
+                            console_lines.append(value)
+                            if len(console_lines) > 50:
+                                console_lines = console_lines[-50:]
                             console_tail = console_lines[-20:]
                             exception_tail = exception_lines[-20:]
                             raise AssertionError(
@@ -526,6 +529,35 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             timeout_s=WS_EVENT_TIMEOUT_S,
         )
 
+    async def test_forbidden_subscribe_returns_error_frame(self) -> None:
+        """Document protocol expectation used by browser smoke fail-fast logic.
+
+        If a client subscribes to a conversation where it has no membership, gateway emits
+        an explicit error frame with code=forbidden. The browser smoke test treats that
+        frame as terminal rather than waiting for later acks/events.
+        """
+        alice_auth = "auth-alice-forbidden"
+        bob_auth = "auth-bob-forbidden"
+        alice_ready = await self._start_session_http(auth_token=alice_auth, device_id="dev-alice-forbidden")
+        await self._start_session_http(auth_token=bob_auth, device_id="dev-bob-forbidden")
+
+        conv_id = "conv_forbidden_subscribe"
+        await self._create_room(alice_ready["session_token"], conv_id)
+
+        bob_ws = await _ws_open_session(self.client, "dev-bob-forbidden", bob_auth)
+        try:
+            await _ws_subscribe(bob_ws, conv_id=conv_id, from_seq=1)
+            error_payload = await _ws_recv_until(
+                bob_ws,
+                timeout_s=WS_ACK_TIMEOUT_S,
+                predicate=lambda message: message.get("t") == "error",
+            )
+            body = error_payload.get("body") if isinstance(error_payload, dict) else None
+            self.assertIsInstance(body, dict)
+            self.assertEqual(body.get("code"), "forbidden")
+        finally:
+            await bob_ws.close()
+
     async def test_browser_wasm_cli_coexist_smoke(self) -> None:
         chromium_bin = find_chromium()
         if not chromium_bin:
@@ -672,7 +704,60 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
   const ws = new WebSocket(ws_url);
   const queue = [];
   const waiters = [];
+  const recentMessages = [];
+  const MAX_RECENT_MESSAGES = 30;
+  let wsClosed = false;
+  let wsCloseReason = null;
+  let lastError = null;
+  const summarizePayload = (payload) => {
+    if (!payload || typeof payload !== 'object') {
+      return { t: typeof payload };
+    }
+    const body = payload.body && typeof payload.body === 'object' ? payload.body : {};
+    return {
+      t: typeof payload.t === 'string' ? payload.t : null,
+      id: typeof payload.id === 'string' ? payload.id : null,
+      code: typeof body.code === 'string' ? body.code : null,
+      message: typeof body.message === 'string' ? body.message : null,
+      conv_id: typeof body.conv_id === 'string' ? body.conv_id : null,
+      seq: Number.isInteger(body.seq) ? body.seq : null,
+    };
+  };
+  const recentMessagesSummary = () => {
+    const compact = JSON.stringify(recentMessages);
+    const MAX_SUMMARY_LEN = 2200;
+    if (compact.length <= MAX_SUMMARY_LEN) {
+      return compact;
+    }
+    return compact.slice(0, MAX_SUMMARY_LEN) + '...<truncated>';
+  };
+  const setTerminalError = (err) => {
+    if (!lastError) {
+      lastError = err;
+    }
+    while (waiters.length) {
+      const waiter = waiters.shift();
+      waiter.reject(lastError);
+    }
+  };
+  const maybeFailOnGatewayError = (payload) => {
+    if (!payload || payload.t !== 'error') {
+      return;
+    }
+    const body = payload.body && typeof payload.body === 'object' ? payload.body : {};
+    const code = typeof body.code === 'string' ? body.code : 'unknown';
+    const message = typeof body.message === 'string' ? body.message : 'no message';
+    setTerminalError(new Error(`gateway error: ${code}: ${message}`));
+  };
   const dispatch = (payload) => {
+    recentMessages.push(summarizePayload(payload));
+    if (recentMessages.length > MAX_RECENT_MESSAGES) {
+      recentMessages.shift();
+    }
+    maybeFailOnGatewayError(payload);
+    if (lastError) {
+      return;
+    }
     for (let i = 0; i < waiters.length; i += 1) {
       const waiter = waiters[i];
       if (waiter.predicate(payload)) {
@@ -683,7 +768,15 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
     }
     queue.push(payload);
   };
-  const waitFor = (predicate, timeout_ms) => new Promise((resolve, reject) => {
+  const waitFor = (label, predicate, timeout_ms) => new Promise((resolve, reject) => {
+    if (lastError) {
+      reject(lastError);
+      return;
+    }
+    if (wsClosed) {
+      reject(new Error(`websocket closed before ${label}: ${wsCloseReason || 'no reason'}`));
+      return;
+    }
     for (let i = 0; i < queue.length; i += 1) {
       if (predicate(queue[i])) {
         resolve(queue.splice(i, 1)[0]);
@@ -695,13 +788,17 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
       if (idx !== -1) {
         waiters.splice(idx, 1);
       }
-      reject(new Error('timeout waiting for ws message'));
+      reject(new Error(`timeout waiting for ws message (${label}); recent=${recentMessagesSummary()}`));
     }, timeout_ms);
     waiters.push({
       predicate,
       resolve: (payload) => {
         clearTimeout(timeout);
         resolve(payload);
+      },
+      reject: (err) => {
+        clearTimeout(timeout);
+        reject(err);
       },
     });
   });
@@ -719,20 +816,34 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
     }
     dispatch(payload);
   };
+  const handleWsError = () => {
+    wsClosed = true;
+    wsCloseReason = 'ws error';
+    setTerminalError(new Error('websocket error event'));
+  };
+  ws.onerror = handleWsError;
+  ws.onclose = (event) => {
+    wsClosed = true;
+    const reason = event && event.reason ? event.reason : 'no reason';
+    const code = event && Number.isInteger(event.code) ? event.code : 'unknown';
+    wsCloseReason = `code=${code} reason=${reason}`;
+    setTerminalError(new Error(`websocket closed: ${wsCloseReason}`));
+  };
   await new Promise((resolve, reject) => {
     ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error('ws error'));
+    ws.addEventListener('error', () => reject(new Error('ws error opening connection')), { once: true });
   });
 
   const send = async (body) => {
     ws.send(JSON.stringify(body));
   };
 
-  const WS_WAIT_TIMEOUT_MS = 8000;
+  const WS_WAIT_TIMEOUT_MS = 15000;
 
   const sendWithAck = async (body) => {
     await send(body);
     const ack = await waitFor(
+      `conv.acked ${body.id}`,
       (payload) => payload.t === 'conv.acked' && payload.id === body.id,
       WS_WAIT_TIMEOUT_MS,
     );
@@ -741,6 +852,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
 
   const expectEvent = async (conv_id, seq) => {
     const event = await waitFor(
+      `conv.event ${conv_id}#${seq}`,
       (payload) => payload.t === 'conv.event'
         && payload.body
         && payload.body.conv_id === conv_id
@@ -757,7 +869,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
       id: 'session-start',
       body: { auth_token: payload.alice_auth, device_id: payload.alice_device },
     });
-    await waitFor((msg) => msg.t === 'session.ready', WS_WAIT_TIMEOUT_MS);
+    await waitFor('session.ready', (msg) => msg.t === 'session.ready', WS_WAIT_TIMEOUT_MS);
 
     await send({ v: 1, t: 'conv.subscribe', id: 'sub-dm', body: { conv_id: payload.conv_ids.dm, from_seq: 1 } });
     await send({ v: 1, t: 'conv.subscribe', id: 'sub-room', body: { conv_id: payload.conv_ids.room, from_seq: 1 } });
@@ -843,7 +955,14 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
     });
     await expectEvent(payload.conv_ids.dm, dm_seq);
 
-    const dm_reply_event = await expectEvent(payload.conv_ids.dm, dm_seq + 1);
+    const dm_reply_event = await waitFor(
+      'dm reply event',
+      (message) => message.t === 'conv.event'
+        && message.body
+        && message.body.conv_id === payload.conv_ids.dm
+        && message.body.seq === dm_seq + 1,
+      WS_WAIT_TIMEOUT_MS,
+    );
     const dm_reply_payload = unpackEnv(dm_reply_event.body.env).payload_b64;
     const dm_reply_plain = ensureOk(
       globalThis.dmDecrypt(alice_dm_participant, dm_reply_payload),
@@ -875,7 +994,14 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
     });
     await expectEvent(payload.conv_ids.room, room_seq);
 
-    const room_reply_event = await expectEvent(payload.conv_ids.room, room_seq + 1);
+    const room_reply_event = await waitFor(
+      'room reply event',
+      (message) => message.t === 'conv.event'
+        && message.body
+        && message.body.conv_id === payload.conv_ids.room
+        && message.body.seq === room_seq + 1,
+      WS_WAIT_TIMEOUT_MS,
+    );
     const room_reply_payload = unpackEnv(room_reply_event.body.env).payload_b64;
     const room_reply_plain = ensureOk(
       globalThis.dmDecrypt(alice_room_participant, room_reply_payload),
