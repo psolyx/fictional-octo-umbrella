@@ -76,6 +76,8 @@
   const store_name = 'settings';
   const transcripts_store_name = 'transcripts';
   const transcript_max_records = 200;
+  const conv_meta_key = 'conv_meta_v1';
+  const conv_outbox_key = 'conv_outbox_v1';
   const next_id = () => `msg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const dm_kind_labels = {
     1: 'welcome',
@@ -106,6 +108,9 @@
   let transcript_load_app_btn = null;
   let transcript_last_import = null;
   const last_from_seq_by_conv_id = {};
+  const conv_meta_by_id = {};
+  const conv_outbox_by_id = {};
+  const pending_entry_by_msg_id = {};
   let last_selected_conv_id = null;
   let replay_window_conv_id = null;
   let replay_window_earliest_seq = null;
@@ -464,11 +469,17 @@
       const role = typeof item.role === 'string' ? item.role : 'member';
       const members = Array.isArray(item.members) ? item.members.filter((member) => typeof member === 'string') : [];
       let peer_label = '';
+      let default_label = `room ${short_id(item.conv_id, 10, 4)}`;
       if (member_count === 2 && members.length > 0) {
         const other_member = members.find((member) => member !== conversations_user_id) || members[0];
         if (other_member) {
           peer_label = ` peer ${short_id(other_member, 10, 4)}`;
+          default_label = `dm ${short_id(other_member, 10, 4)}`;
         }
+      }
+      const meta = ensure_conv_meta(item.conv_id);
+      if (meta && !meta.label) {
+        meta.label = default_label;
       }
       const status_markers = [];
       if (item.unread_count > 0) {
@@ -478,7 +489,12 @@
         status_markers.push('pruned');
       }
       const status_suffix = status_markers.length ? ` ${status_markers.join(' ')}` : '';
-      conversation_btn.textContent = `${short_id(item.conv_id, 10, 4)} role=${role} members=${member_count}${peer_label}${status_suffix}`;
+      conversation_btn.textContent = `${(meta && meta.label) || default_label} role=${role} members=${member_count}${peer_label}${status_suffix}`;
+      const preview_line = document.createElement('div');
+      preview_line.dataset.test = 'conv-preview';
+      const preview_value = meta && meta.last_preview ? meta.last_preview : '(no messages yet)';
+      const ts_value = to_timestamp_label(meta && Number.isInteger(meta.last_ts_ms) ? meta.last_ts_ms : item.latest_ts_ms);
+      preview_line.textContent = `${preview_value}${ts_value ? ` • ${ts_value}` : ''}`;
       list_item.dataset.conv_id = item.conv_id;
       conversation_btn.addEventListener('click', () => {
         conv_id_input.value = item.conv_id;
@@ -496,8 +512,10 @@
         subscribe_btn.click();
       });
       list_item.appendChild(conversation_btn);
+      list_item.appendChild(preview_line);
       conversations_list.appendChild(list_item);
     });
+    persist_conv_meta().catch((err) => append_log(`failed to persist conv metadata: ${err.message}`));
   };
 
   const refresh_conversations = async () => {
@@ -1415,7 +1433,7 @@
     );
   };
 
-  const send_ciphertext_with_deterministic_id = async (conv_id, ciphertext) => {
+  const send_ciphertext_with_deterministic_id = async (conv_id, ciphertext, existing_msg_id = '') => {
     if (!conv_id) {
       append_log('missing conv_id');
       return;
@@ -1424,7 +1442,7 @@
       append_log('missing ciphertext');
       return;
     }
-    let msg_id = msg_id_input.value.trim();
+    let msg_id = existing_msg_id || msg_id_input.value.trim();
     if (!msg_id) {
       const env_bytes = base64_to_bytes(ciphertext);
       if (!env_bytes) {
@@ -1434,7 +1452,25 @@
       msg_id = await sha256_hex(env_bytes);
       msg_id_input.value = msg_id;
     }
-    client.send_ciphertext(conv_id, msg_id, ciphertext);
+    const preview = normalize_preview(ciphertext);
+    const pending_item = set_outbox_item(conv_id, msg_id, {
+      env: ciphertext,
+      status: 'pending',
+      ts_ms: now_ms(),
+      preview,
+      failed_reason: '',
+    });
+    if (pending_item) {
+      render_local_outbound_event(pending_item);
+    }
+    update_conv_preview(conv_id, preview);
+    const send_status = client.send_ciphertext(conv_id, msg_id, ciphertext);
+    if (send_status === 'failed') {
+      const failed_item = set_outbox_item(conv_id, msg_id, { status: 'failed', failed_reason: 'websocket not connected' });
+      if (failed_item) {
+        render_local_outbound_event(failed_item);
+      }
+    }
   };
 
   const handle_gateway_send_env = async (event) => {
@@ -1492,6 +1528,8 @@
       this.ws.addEventListener('close', (evt) => {
         connection_status.textContent = 'disconnected';
         append_log(`websocket closed (code=${evt.code})`);
+        mark_all_pending_failed();
+        hydrate_local_outbox_rows();
       });
       this.ws.addEventListener('error', (evt) => {
         append_log(`websocket error: ${evt.message || 'unknown'}`);
@@ -1517,14 +1555,15 @@
       if (this.ensure_connected()) {
         this.ws.send(JSON.stringify(envelope));
         append_log(`sent ${type}`);
-        return;
+        return 'sent';
       }
       if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
         this.pending_frames.push(envelope);
         append_log(`queued ${type} until open`);
-        return;
+        return 'queued';
       }
       append_log('websocket not connected');
+      return 'failed';
     }
 
     flush_pending() {
@@ -1599,7 +1638,7 @@
         append_log('missing ciphertext');
         return;
       }
-      this.send_frame('conv.send', { conv_id, msg_id, env: ciphertext });
+      return this.send_frame('conv.send', { conv_id, msg_id, env: ciphertext });
     }
 
     handle_message(message) {
@@ -1638,6 +1677,10 @@
         }
         maybe_dispatch_dm_commit_echo(body);
         maybe_dispatch_conv_event_received(body);
+        maybe_mark_delivered_from_echo(body);
+        if (typeof body.env === 'string') {
+          update_conv_preview(body.conv_id, normalize_preview(body.env), typeof body.ts === 'number' ? body.ts : now_ms());
+        }
         render_event(body);
         record_transcript_event(body.conv_id, body.seq, body.msg_id, body.env).catch((err) =>
           append_log(`failed to persist transcript: ${err.message}`)
@@ -2091,10 +2134,34 @@
       set_dm_autofill_controls_enabled(
         dm_bridge_autofill_enabled_input ? dm_bridge_autofill_enabled_input.checked : false
       );
+      const saved_conv_meta = await read_setting(conv_meta_key);
+      if (saved_conv_meta && typeof saved_conv_meta === 'object') {
+        Object.assign(conv_meta_by_id, saved_conv_meta);
+      }
+      const saved_outbox = await read_setting(conv_outbox_key);
+      if (saved_outbox && typeof saved_outbox === 'object') {
+        Object.assign(conv_outbox_by_id, saved_outbox);
+        hydrate_local_outbox_rows();
+      }
     } catch (err) {
       append_log(`failed to hydrate inputs: ${err.message}`);
     }
   };
+
+  window.addEventListener('conv.preview.updated', (event) => {
+    const detail = event && event.detail ? event.detail : null;
+    if (!detail || typeof detail !== 'object') {
+      return;
+    }
+    const conv_id = normalize_conv_id(detail.conv_id);
+    const preview = typeof detail.preview === 'string' ? detail.preview : '';
+    const ts_ms = Number.isInteger(detail.ts_ms) ? detail.ts_ms : now_ms();
+    if (!conv_id || !preview) {
+      return;
+    }
+    update_conv_preview(conv_id, preview, ts_ms);
+    refresh_conversations().catch(() => {});
+  });
 
   connect_start_btn.addEventListener('click', () => {
     const url = gateway_url_input.value.trim();
@@ -2674,4 +2741,150 @@
     });
   }
   hydrate_inputs();
+  const now_ms = () => Date.now();
+
+  const to_timestamp_label = (ts_ms) => {
+    if (!Number.isInteger(ts_ms) || ts_ms <= 0) {
+      return '';
+    }
+    return new Date(ts_ms).toLocaleTimeString();
+  };
+
+  const normalize_preview = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const single_line = value.replace(/\s+/g, ' ').trim();
+    if (!single_line) {
+      return '';
+    }
+    return single_line.length > 80 ? `${single_line.slice(0, 80)}…` : single_line;
+  };
+
+  const ensure_conv_meta = (conv_id) => {
+    if (!conv_id) {
+      return null;
+    }
+    if (!conv_meta_by_id[conv_id]) {
+      conv_meta_by_id[conv_id] = { label: '', last_preview: '', last_ts_ms: 0 };
+    }
+    return conv_meta_by_id[conv_id];
+  };
+
+  const persist_conv_meta = async () => {
+    await write_setting(conv_meta_key, conv_meta_by_id);
+  };
+
+  const persist_conv_outbox = async () => {
+    await write_setting(conv_outbox_key, conv_outbox_by_id);
+  };
+
+  const update_conv_preview = (conv_id, preview, ts_ms = now_ms()) => {
+    const normalized_conv_id = normalize_conv_id(conv_id);
+    if (!normalized_conv_id) {
+      return;
+    }
+    const meta = ensure_conv_meta(normalized_conv_id);
+    if (!meta) {
+      return;
+    }
+    const normalized_preview = normalize_preview(preview);
+    if (normalized_preview) {
+      meta.last_preview = normalized_preview;
+    }
+    meta.last_ts_ms = Number.isInteger(ts_ms) ? ts_ms : now_ms();
+    persist_conv_meta().catch((err) => append_log(`failed to persist conv metadata: ${err.message}`));
+  };
+
+  const set_outbox_item = (conv_id, msg_id, patch) => {
+    const normalized_conv_id = normalize_conv_id(conv_id);
+    if (!normalized_conv_id || !msg_id) {
+      return null;
+    }
+    if (!conv_outbox_by_id[normalized_conv_id]) {
+      conv_outbox_by_id[normalized_conv_id] = {};
+    }
+    const existing = conv_outbox_by_id[normalized_conv_id][msg_id] || { msg_id, conv_id: normalized_conv_id };
+    const next = { ...existing, ...patch, msg_id, conv_id: normalized_conv_id };
+    conv_outbox_by_id[normalized_conv_id][msg_id] = next;
+    persist_conv_outbox().catch((err) => append_log(`failed to persist outbox state: ${err.message}`));
+    return next;
+  };
+
+  const mark_all_pending_failed = () => {
+    Object.keys(conv_outbox_by_id).forEach((conv_id) => {
+      const entries = conv_outbox_by_id[conv_id] || {};
+      Object.keys(entries).forEach((msg_id) => {
+        if (entries[msg_id] && entries[msg_id].status === 'pending') {
+          set_outbox_item(conv_id, msg_id, { status: 'failed', failed_reason: 'connection closed' });
+        }
+      });
+    });
+  };
+
+  const render_local_outbound_event = (item) => {
+    if (!item || !item.msg_id || !item.conv_id) {
+      return;
+    }
+    let entry = pending_entry_by_msg_id[item.msg_id] || null;
+    if (!entry) {
+      entry = document.createElement('div');
+      entry.dataset.msg_id = item.msg_id;
+      entry.dataset.conv_id = item.conv_id;
+      event_log.prepend(entry);
+      pending_entry_by_msg_id[item.msg_id] = entry;
+    }
+    const status = item.status || 'pending';
+    const status_label = status === 'delivered' ? 'delivered' : status === 'failed' ? 'failed' : 'pending';
+    entry.dataset.test = status === 'pending' ? 'msg-pending' : status === 'failed' ? 'msg-failed' : 'msg-delivered';
+    const parts = [`conv_id=${item.conv_id}`, `msg_id=${item.msg_id}`, `status=${status_label}`];
+    if (Number.isInteger(item.seq)) {
+      parts.push(`seq=${item.seq}`);
+    }
+    const preview = item.preview || '';
+    entry.textContent = `${parts.join(' ')} preview=${preview}`;
+    if (status === 'failed') {
+      const retry_btn = document.createElement('button');
+      retry_btn.type = 'button';
+      retry_btn.dataset.test = 'msg-retry';
+      retry_btn.textContent = 'Retry send';
+      retry_btn.addEventListener('click', async () => {
+        msg_id_input.value = item.msg_id;
+        ciphertext_input.value = item.env || '';
+        conv_id_input.value = item.conv_id;
+        await send_ciphertext_with_deterministic_id(item.conv_id, item.env || '', item.msg_id);
+      });
+      entry.append(' ');
+      entry.appendChild(retry_btn);
+    }
+  };
+
+  const hydrate_local_outbox_rows = () => {
+    Object.keys(conv_outbox_by_id).forEach((conv_id) => {
+      const entries = conv_outbox_by_id[conv_id] || {};
+      Object.keys(entries)
+        .sort()
+        .forEach((msg_id) => render_local_outbound_event(entries[msg_id]));
+    });
+  };
+
+  const maybe_mark_delivered_from_echo = (body) => {
+    if (!body || typeof body !== 'object') {
+      return;
+    }
+    const conv_id = normalize_conv_id(body.conv_id);
+    const msg_id = typeof body.msg_id === 'string' ? body.msg_id : '';
+    if (!conv_id || !msg_id) {
+      return;
+    }
+    const existing = conv_outbox_by_id[conv_id] && conv_outbox_by_id[conv_id][msg_id];
+    if (!existing) {
+      return;
+    }
+    const seq = Number.isInteger(body.seq) ? body.seq : null;
+    const delivered = set_outbox_item(conv_id, msg_id, { status: 'delivered', seq: seq || undefined });
+    if (delivered) {
+      render_local_outbound_event(delivered);
+    }
+  };
 })();

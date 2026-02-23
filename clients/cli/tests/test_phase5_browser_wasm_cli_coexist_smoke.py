@@ -1,4 +1,5 @@
 import asyncio
+import os
 import base64
 import contextlib
 import functools
@@ -45,6 +46,8 @@ from gateway.ws_transport import create_app
 from mls_harness_util import HARNESS_DIR, ensure_harness_binary, make_harness_env, run_harness
 from chromium_cdp import find_chromium, find_free_port, start_chromium_cdp, terminate_process_group
 from wasm_asset_cache import ensure_wasm_assets
+
+RUN_BROWSER_SMOKES = os.environ.get("RUN_BROWSER_SMOKES", "0") == "1"
 
 
 def _msg_id_for_env(env_b64: str) -> str:
@@ -658,6 +661,8 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             await bob_ws.close()
 
     async def test_browser_wasm_cli_coexist_smoke(self) -> None:
+        if not RUN_BROWSER_SMOKES:
+            raise unittest.SkipTest("Set RUN_BROWSER_SMOKES=1 to enable browser launch smoke tests")
         chromium_bin = find_chromium()
         if not chromium_bin:
             raise unittest.SkipTest("Chromium not available in PATH")

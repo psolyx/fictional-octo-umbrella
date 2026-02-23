@@ -51,6 +51,17 @@ class TestTuiRoomsContracts(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
 
+    def test_tui_message_lifecycle_and_preview_contracts(self):
+        for marker in (
+            'retry_failed_send',
+            '[pending msg_id=',
+            '[delivered',
+            'last_preview',
+            'R: retry failed',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.tui_app if marker in self.tui_app else self.tui_model)
+
 
 if __name__ == "__main__":
     unittest.main()

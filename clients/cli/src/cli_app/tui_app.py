@@ -236,7 +236,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -247,11 +247,11 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     _render_text(stdscr, header_offset, 1, "Conversations")
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
-        label = conv.get("name", "")
+        label = conv.get("label", conv.get("name", ""))
         unread_count = int(conv.get("unread_count", "0") or "0")
         if unread_count > 0:
             label = f"{label} [unread {unread_count}]"
-        subtitle = conv.get("peer_user_id", "")
+        subtitle = conv.get("last_preview", "") or conv.get("peer_user_id", "")
         _render_text(stdscr, header_offset + 1 + idx * 2, 2, label, attr)
         if subtitle and header_offset + 2 + idx * 2 < max_y:
             _render_text(stdscr, header_offset + 2 + idx * 2, 4, subtitle[: left_width - 6], attr)
@@ -385,7 +385,7 @@ def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
     _render_text(stdscr, header_offset, 1, "Conversations")
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
-        label = conv.get("name", "")
+        label = conv.get("label", conv.get("name", ""))
         _render_text(stdscr, header_offset + 1 + idx, 2, label, attr)
 
     action_start = header_offset + 2 + len(render.dm_conversations)
@@ -650,6 +650,7 @@ class DmRuntime:
     pending_path: Path
     dedupe_order: deque[str]
     dedupe_set: set[str]
+    pending_sends: dict[str, dict[str, str]]
 
 
 def _generate_group_id_b64() -> str:
@@ -978,10 +979,22 @@ def _ensure_runtime_state(runtime: dict[str, DmRuntime], conv_id: str, state_dir
         pending_path=pending_path,
         dedupe_order=deque(),
         dedupe_set=set(),
+        pending_sends={},
     )
     runtime[conv_id] = state
     return state
 
+
+
+
+def _match_echo_to_pending_entry(transcript: list[dict[str, str]], msg_id: str) -> int | None:
+    marker_pending = f"[pending msg_id={msg_id}]"
+    marker_failed = f"[failed msg_id={msg_id}]"
+    for index in range(len(transcript) - 1, -1, -1):
+        text = str(transcript[index].get("text", ""))
+        if marker_pending in text or marker_failed in text:
+            return index
+    return None
 
 def _record_msg_id(runtime: DmRuntime, msg_id: str, max_size: int = 512) -> bool:
     if msg_id in runtime.dedupe_set:
@@ -1095,6 +1108,9 @@ def _handle_tail_event(
         model.append_message(conv_id, "sys", f"Gap detected at seq {seq}; resubscribing.")
         return True
     runtime_state = _ensure_runtime_state(runtime, conv_id, state_dir)
+    if isinstance(msg_id, str):
+        model.mark_outbound_delivered(conv_id, msg_id, seq)
+        runtime_state.pending_sends.pop(msg_id, None)
     if isinstance(msg_id, str) and _record_msg_id(runtime_state, msg_id):
         gateway_client.inbox_ack(session.base_url, session.session_token, conv_id, seq)
         model.bump_cursor(conv_id, seq)
@@ -1155,6 +1171,7 @@ def _handle_tail_event(
             )
             plaintext = mls_poc._first_nonempty_line(output)
             model.append_message(conv_id, "in", plaintext)
+            model.update_conversation_preview(conv_id, f"peer: {plaintext}")
         else:
             model.append_message(conv_id, "sys", f"Unknown DM envelope kind {kind}.")
     except Exception as exc:  # pragma: no cover - defensive
@@ -1386,6 +1403,7 @@ def _refresh_conversations(
             peer_user_id=peer_user_id,
             next_seq=local_next_seq,
         )
+        conversation["label"] = name
         conversation["server_earliest_seq"] = str(earliest_seq) if earliest_seq is not None else ""
         conversation["server_latest_seq"] = str(latest_seq) if latest_seq is not None else ""
         conversation["server_latest_ts_ms"] = str(latest_ts_ms) if latest_ts_ms is not None else ""
@@ -1400,6 +1418,8 @@ def _send_dm_message(
     session: SessionState | None,
     runtime: dict[str, DmRuntime],
     plaintext: str,
+    msg_id_override: str = "",
+    env_b64_override: str = "",
 ) -> None:
     if session is None:
         _append_system_message(model, "No active session. Press r to resume.")
@@ -1413,22 +1433,31 @@ def _send_dm_message(
     if not state_dir:
         _append_system_message(model, "Selected conversation has no state_dir.")
         return
-    output = mls_poc._run_harness_capture(
-        "dm-encrypt",
-        [
-            "--state-dir",
-            state_dir,
-            "--plaintext",
-            plaintext,
-        ],
-    )
-    ciphertext = mls_poc._first_nonempty_line(output)
-    env_b64 = dm_envelope.pack(0x03, ciphertext)
-    msg_id = mls_poc._msg_id_for_env(env_b64)
-    gateway_client.inbox_send(session.base_url, session.session_token, conv_id, msg_id, env_b64)
+    env_b64 = env_b64_override
+    if not env_b64:
+        output = mls_poc._run_harness_capture(
+            "dm-encrypt",
+            [
+                "--state-dir",
+                state_dir,
+                "--plaintext",
+                plaintext,
+            ],
+        )
+        ciphertext = mls_poc._first_nonempty_line(output)
+        env_b64 = dm_envelope.pack(0x03, ciphertext)
+    msg_id = msg_id_override or mls_poc._msg_id_for_env(env_b64)
     runtime_state = _ensure_runtime_state(runtime, conv_id, state_dir)
+    runtime_state.pending_sends[msg_id] = {"plaintext": plaintext, "env_b64": env_b64, "conv_id": conv_id}
+    try:
+        gateway_client.inbox_send(session.base_url, session.session_token, conv_id, msg_id, env_b64)
+        model.append_pending_outbound(conv_id, msg_id, plaintext)
+    except Exception as exc:
+        model.append_pending_outbound(conv_id, msg_id, plaintext)
+        model.mark_outbound_failed(conv_id, msg_id, str(exc))
+        _append_system_message(model, f"Send failed; retry with R (msg_id={msg_id}).")
+        return
     _record_msg_id(runtime_state, msg_id)
-    model.append_message(conv_id, "out", plaintext)
 
 
 def _create_new_dm(

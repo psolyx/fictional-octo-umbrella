@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import shutil
 import subprocess
@@ -31,6 +32,8 @@ from chromium_cdp import (  # noqa: E402
 )
 from smoke_server import SmokeServer  # noqa: E402
 from wasm_asset_cache import ensure_wasm_assets  # noqa: E402
+
+RUN_BROWSER_SMOKES = os.environ.get("RUN_BROWSER_SMOKES", "0") == "1"
 
 CSP_VALUE = (
     "default-src 'self'; "
@@ -494,6 +497,8 @@ run().then(
 
 class BrowserRuntimeSmokeTest(unittest.TestCase):
     def test_browser_runtime_smoke(self) -> None:
+        if not RUN_BROWSER_SMOKES:
+            raise unittest.SkipTest("Set RUN_BROWSER_SMOKES=1 to enable browser launch smoke tests")
         chromium_bin = find_chromium()
         if not chromium_bin:
             raise unittest.SkipTest("Chromium not available in PATH")

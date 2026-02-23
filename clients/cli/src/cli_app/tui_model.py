@@ -312,6 +312,9 @@ class TuiModel:
             "state_dir": str(entry.get("state_dir", "")),
             "peer_user_id": str(entry.get("peer_user_id", "")),
             "next_seq": max(int(next_seq), 1),
+            "label": str(entry.get("label") or entry.get("name") or fallback_name),
+            "last_preview": str(entry.get("last_preview", "")),
+            "last_ts_ms": int(entry.get("last_ts_ms", 0) or 0),
             "transcript": [
                 {
                     "ts": float(item.get("ts", 0.0)),
@@ -570,6 +573,47 @@ class TuiModel:
 
     def append_transcript(self, direction: str, text: str) -> None:
         self.append_message(self.get_selected_conv_id(), direction, text)
+
+    def update_conversation_preview(self, conv_id: str, preview: str, ts_ms: int | None = None) -> None:
+        conv = self.find_conversation(conv_id)
+        if conv is None:
+            return
+        if preview:
+            conv["last_preview"] = preview
+        conv["last_ts_ms"] = int(ts_ms if isinstance(ts_ms, int) else time.time() * 1000)
+        self._persist()
+
+    def append_pending_outbound(self, conv_id: str, msg_id: str, text: str) -> None:
+        self.append_message(conv_id, "out", f"[pending msg_id={msg_id}] {text}")
+        self.update_conversation_preview(conv_id, f"me: {text}")
+
+    def mark_outbound_delivered(self, conv_id: str, msg_id: str, seq: int | None = None) -> bool:
+        conv = self.find_conversation(conv_id)
+        if conv is None:
+            return False
+        transcript = conv.get("transcript", [])
+        for entry in reversed(transcript):
+            text = str(entry.get("text", ""))
+            if f"[pending msg_id={msg_id}]" in text or f"[failed msg_id={msg_id}]" in text:
+                delivered_suffix = f" seq={seq}" if isinstance(seq, int) else ""
+                entry["text"] = text.replace("[pending", "[delivered", 1).replace("[failed", "[delivered", 1) + delivered_suffix
+                self._persist()
+                return True
+        return False
+
+    def mark_outbound_failed(self, conv_id: str, msg_id: str, reason: str = "send failed") -> bool:
+        conv = self.find_conversation(conv_id)
+        if conv is None:
+            return False
+        transcript = conv.get("transcript", [])
+        for entry in reversed(transcript):
+            text = str(entry.get("text", ""))
+            if f"[pending msg_id={msg_id}]" in text:
+                entry["text"] = text.replace("[pending", "[failed", 1) + f" (Retry send: r msg_id={msg_id}; {reason})"
+                self._persist()
+                return True
+        return False
+
 
     def bump_cursor(self, conv_id: str, acked_seq: int) -> int:
         next_seq = gateway_store.update_next_seq(conv_id, acked_seq)
@@ -884,6 +928,8 @@ class TuiModel:
                 return "conv_refresh"
             if key == "CHAR" and char in {"U"}:
                 return "conv_next_unread"
+            if key == "CHAR" and char in {"R"}:
+                return "retry_failed_send"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()
@@ -987,6 +1033,9 @@ class TuiModel:
                     "conv_id": str(conv.get("conv_id", "")),
                     "peer_user_id": str(conv.get("peer_user_id", "")),
                     "unread_count": str(conv.get("unread_count", "0")),
+                    "label": str(conv.get("label", conv.get("name", ""))),
+                    "last_preview": str(conv.get("last_preview", "")),
+                    "last_ts_ms": str(conv.get("last_ts_ms", "0")),
                 }
                 for conv in self.dm_conversations
             ],
