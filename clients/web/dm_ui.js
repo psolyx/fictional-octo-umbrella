@@ -953,6 +953,21 @@ env_b64,
 );
 };
 
+const dispatch_conv_preview_updated = (conv_id, preview) => {
+if (!conv_id || typeof preview !== 'string' || !preview.trim()) {
+return;
+}
+window.dispatchEvent(
+new CustomEvent('conv.preview.updated', {
+detail: {
+conv_id,
+preview,
+ts_ms: Date.now(),
+},
+})
+);
+};
+
 const dispatch_gateway_subscribe = (conv_id, from_seq) => {
 const detail = {
 conv_id,
@@ -2043,6 +2058,7 @@ bob_participant_b64 = enc_result.participant_b64;
 const app_env_b64 = pack_dm_env(3, enc_result.ciphertext_b64);
 set_outbox_envs({ app_env_b64 });
 dispatch_gateway_send_env(conv_id, app_env_b64);
+dispatch_conv_preview_updated(conv_id, `me: ${plaintext}`);
 set_room_status(`room: app sent as ${participant.label}`);
 log_output(`room app env sent for conv_id ${conv_id}`);
 };
@@ -2101,6 +2117,7 @@ alice_participant_b64 = dec_result.participant_b64;
 bob_participant_b64 = dec_result.participant_b64;
 }
 set_room_decrypt_output(latest.msg_id, dec_result.plaintext);
+dispatch_conv_preview_updated(conv_id, `peer: ${dec_result.plaintext}`);
 set_room_status(`room: app decrypted (seq=${latest.seq})`);
 log_output(`room app decrypted (seq=${latest.seq})`);
 };
