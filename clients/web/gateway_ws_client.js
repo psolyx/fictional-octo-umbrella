@@ -37,6 +37,9 @@
   let rooms_status_line = null;
   let rooms_conv_id_error = null;
   let rooms_members_error = null;
+  let rooms_refresh_roster_btn = null;
+  let rooms_copy_selected_btn = null;
+  let rooms_roster_list = null;
   let rooms_session_token = '';
   let rooms_http_base_url = '';
   let conversations_refresh_btn = null;
@@ -668,6 +671,108 @@
     set_rooms_status(`status: ${status_label} ${compact_payload}`);
   };
 
+  const selected_roster_member_ids = () => {
+    if (!rooms_roster_list) {
+      return [];
+    }
+    const selected = [];
+    const checkboxes = rooms_roster_list.querySelectorAll('input[type="checkbox"][data-user_id]');
+    checkboxes.forEach((checkbox) => {
+      if (checkbox.checked) {
+        const user_id = checkbox.getAttribute('data-user_id');
+        if (user_id) {
+          selected.push(user_id);
+        }
+      }
+    });
+    selected.sort();
+    return selected;
+  };
+
+  const copy_selected_roster_members = () => {
+    if (!rooms_members_input) {
+      return;
+    }
+    const selected = selected_roster_member_ids();
+    if (!selected.length) {
+      set_rooms_status('status: no roster members selected');
+      return;
+    }
+    rooms_members_input.value = selected.join(', ');
+    set_inline_error(rooms_members_input, rooms_members_error, '');
+    set_rooms_status(`status: selected ${selected.length} member(s)`);
+  };
+
+  const render_rooms_roster = (members) => {
+    if (!rooms_roster_list) {
+      return;
+    }
+    rooms_roster_list.textContent = '';
+    members.forEach((member) => {
+      const row = document.createElement('li');
+      row.className = 'rooms-roster-row';
+      row.setAttribute('data-test', 'rooms-roster-row');
+      // rooms-roster-row marker
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.setAttribute('data-user_id', member.user_id);
+      const label = document.createElement('label');
+      label.appendChild(checkbox);
+      label.append(` ${member.role} ${member.user_id}`);
+      row.appendChild(label);
+      rooms_roster_list.appendChild(row);
+    });
+  };
+
+  const refresh_rooms_roster = async () => {
+    if (!rooms_conv_id_input) {
+      return;
+    }
+    const conv_id = rooms_conv_id_input.value.trim();
+    if (!conv_id) {
+      set_rooms_status('status: error (roster: conv_id required)');
+      set_inline_error(rooms_conv_id_input, rooms_conv_id_error, 'conv_id is required');
+      rooms_conv_id_input.focus();
+      return;
+    }
+    set_inline_error(rooms_conv_id_input, rooms_conv_id_error, '');
+    if (!rooms_session_token) {
+      set_rooms_status('status: error (roster: session_token required)');
+      return;
+    }
+    const fallback_base_url = derive_http_base_url(gateway_url_input.value.trim());
+    const base_url = rooms_http_base_url || fallback_base_url;
+    if (!base_url) {
+      set_rooms_status('status: error (roster: gateway_url must be ws:// or wss://)');
+      return;
+    }
+    try {
+      const request_url = new URL('/v1/rooms/members', base_url);
+      request_url.searchParams.set('conv_id', conv_id);
+      const response = await fetch(request_url.toString(), {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${rooms_session_token}`,
+        },
+      });
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = {};
+      }
+      if (!response.ok) {
+        set_rooms_response_status(response, JSON.stringify(payload || {}));
+        return;
+      }
+      const members = payload && Array.isArray(payload.members) ? payload.members : [];
+      render_rooms_roster(members);
+      set_rooms_status(`status: roster loaded ${members.length}`);
+    } catch (err) {
+      set_rooms_status(`status: error (roster: ${err.message || 'request failed'})`);
+    }
+  };
+
   const request_rooms_action = async (endpoint, action_label) => {
     if (!rooms_conv_id_input || !rooms_members_input) {
       return;
@@ -684,7 +789,8 @@
       return;
     }
     set_inline_error(rooms_conv_id_input, rooms_conv_id_error, '');
-    const members = parse_members_input(rooms_members_input.value);
+    const selected_members = selected_roster_member_ids();
+    const members = selected_members.length ? selected_members : parse_members_input(rooms_members_input.value);
     if (!members.length) {
       set_rooms_status(`status: error (${action_label}: members required)`);
       set_inline_error(rooms_members_input, rooms_members_error, 'at least one member user_id is required');
@@ -2172,6 +2278,23 @@
     button_row.appendChild(demote_btn);
     fieldset.appendChild(button_row);
 
+    const roster_actions = document.createElement('div');
+    roster_actions.className = 'button-row';
+    const refresh_roster_btn = document.createElement('button');
+    refresh_roster_btn.type = 'button';
+    refresh_roster_btn.textContent = 'Refresh roster';
+    const copy_selected_btn = document.createElement('button');
+    copy_selected_btn.type = 'button';
+    copy_selected_btn.textContent = 'Copy selected to members input';
+    roster_actions.appendChild(refresh_roster_btn);
+    roster_actions.appendChild(copy_selected_btn);
+    fieldset.appendChild(roster_actions);
+
+    const roster_list = document.createElement('ul');
+    roster_list.id = 'rooms_roster_list';
+    roster_list.setAttribute('data-test', 'rooms-roster-list');
+    fieldset.appendChild(roster_list);
+
     const status_line = document.createElement('p');
     status_line.id = 'rooms_status_line';
     status_line.setAttribute('aria-live', 'polite');
@@ -2196,6 +2319,9 @@
     rooms_status_line = status_line;
     rooms_conv_id_error = conv_error;
     rooms_members_error = members_error;
+    rooms_refresh_roster_btn = refresh_roster_btn;
+    rooms_copy_selected_btn = copy_selected_btn;
+    rooms_roster_list = roster_list;
   };
 
   const hydrate_inputs = async () => {
@@ -2911,6 +3037,18 @@
       if (rooms_conv_id_input) {
         rooms_conv_id_input.value = generate_room_id();
       }
+    });
+  }
+  if (rooms_refresh_roster_btn) {
+    rooms_refresh_roster_btn.addEventListener('click', () => {
+      refresh_rooms_roster().catch((err) =>
+        set_rooms_status(`status: error (roster: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_copy_selected_btn) {
+    rooms_copy_selected_btn.addEventListener('click', () => {
+      copy_selected_roster_members();
     });
   }
   if (rooms_conv_id_input) {

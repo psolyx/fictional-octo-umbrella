@@ -21,6 +21,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"K"}',
             'char in {"+"}',
             'char in {"-"}',
+            'char in {"m", "M"}',
             'return f"{self.room_modal_action}_submit"',
             'self._open_room_modal("room_create")',
             'self._open_room_modal("room_invite")',
@@ -38,6 +39,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_remove(',
             'def rooms_promote(',
             'def rooms_demote(',
+            'def rooms_members(',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_client)
@@ -47,6 +49,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_remove',
             'gateway_client.rooms_promote',
             'gateway_client.rooms_demote',
+            'gateway_client.rooms_members',
+            'Room roster',
+            'Add selected to modal members',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)

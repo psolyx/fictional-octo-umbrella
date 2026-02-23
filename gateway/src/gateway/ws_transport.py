@@ -972,6 +972,20 @@ async def handle_room_demote(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_room_members(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    conv_id = request.query.get("conv_id", "")
+    if not conv_id:
+        return _invalid_request("conv_id required")
+    if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
+        return _forbidden("not a member")
+    members = runtime.conversations.list_members(conv_id)
+    return _with_no_store(web.json_response({"conv_id": conv_id, "members": members}))
+
+
 async def handle_social_publish(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1293,6 +1307,7 @@ def create_app(
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
+    app.router.add_get("/v1/rooms/members", handle_room_members)
     app.router.add_post("/v1/social/events", handle_social_publish)
     app.router.add_get("/v1/social/events", handle_social_events)
     app.router.add_get("/v1/social/profile", handle_social_profile)

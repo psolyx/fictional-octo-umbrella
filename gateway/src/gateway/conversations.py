@@ -12,6 +12,7 @@ MAX_MEMBERS_PER_CONV = 1024
 INVITES_PER_MIN = 60
 REMOVES_PER_MIN = 60
 MAX_INLINE_MEMBERS = 20
+ROLE_RANK = {"owner": 0, "admin": 1, "member": 2}
 
 
 @dataclass
@@ -134,6 +135,16 @@ class InMemoryConversationStore:
             items.append(item)
         items.sort(key=lambda row: (int(row["created_at_ms"]), str(row["conv_id"])))
         return items
+
+    def list_members(self, conv_id: str) -> list[dict[str, str]]:
+        conversation = self._require_conversation(conv_id)
+        roster = self._members.get(conversation.conv_id, {})
+        members = [
+            {"user_id": user_id, "role": role}
+            for user_id, role in roster.items()
+        ]
+        members.sort(key=lambda item: (ROLE_RANK.get(item["role"], 999), item["user_id"]))
+        return members
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         conversation = self._conversations.get(conv_id)
@@ -392,6 +403,25 @@ class SQLiteConversationStore:
                 item["members"] = members
             items.append(item)
         return items
+
+    def list_members(self, conv_id: str) -> list[dict[str, str]]:
+        with self._backend.lock:
+            known = self._backend.connection.execute(
+                "SELECT 1 FROM conversations WHERE conv_id=?",
+                (conv_id,),
+            ).fetchone()
+            if known is None:
+                raise ValueError("unknown conversation")
+            rows = self._backend.connection.execute(
+                "SELECT user_id, role FROM conversation_members WHERE conv_id=?",
+                (conv_id,),
+            ).fetchall()
+        members = [
+            {"user_id": str(row["user_id"]), "role": str(row["role"])}
+            for row in rows
+        ]
+        members.sort(key=lambda item: (ROLE_RANK.get(item["role"], 999), item["user_id"]))
+        return members
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         with self._backend.lock:
