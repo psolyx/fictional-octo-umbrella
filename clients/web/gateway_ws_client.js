@@ -6,6 +6,7 @@
   const replay_window_banner = document.getElementById('replay_window_banner');
   const replay_window_text = document.getElementById('replay_window_text');
   const replay_window_resubscribe_btn = document.getElementById('replay_window_resubscribe_btn');
+  const live_status = document.getElementById('live_status');
 
   const gateway_url_input = document.getElementById('gateway_url');
   const bootstrap_token_input = document.getElementById('bootstrap_token');
@@ -17,6 +18,8 @@
   const seq_input = document.getElementById('seq');
   const msg_id_input = document.getElementById('msg_id');
   const ciphertext_input = document.getElementById('ciphertext_input');
+  const conv_id_error = document.getElementById('conv_id_error');
+  const compose_error = document.getElementById('compose_error');
   let social_user_id_input = null;
   let social_limit_input = null;
   let social_after_hash_input = null;
@@ -32,6 +35,8 @@
   let rooms_demote_btn = null;
   let rooms_generate_room_id_btn = null;
   let rooms_status_line = null;
+  let rooms_conv_id_error = null;
+  let rooms_members_error = null;
   let rooms_session_token = '';
   let rooms_http_base_url = '';
   let conversations_refresh_btn = null;
@@ -112,8 +117,35 @@
   const conv_outbox_by_id = {};
   const pending_entry_by_msg_id = {};
   let last_selected_conv_id = null;
+  let last_selected_conv_index = 0;
+  let last_selected_message_entry = null;
   let replay_window_conv_id = null;
   let replay_window_earliest_seq = null;
+
+  const announce_status = (message) => {
+    if (!live_status) {
+      return;
+    }
+    live_status.textContent = '';
+    window.setTimeout(() => {
+      live_status.textContent = message;
+    }, 0);
+  };
+
+  const set_inline_error = (field, error_node, message) => {
+    if (!field || !error_node) {
+      return;
+    }
+    if (!message) {
+      field.removeAttribute('aria-invalid');
+      error_node.hidden = true;
+      error_node.textContent = '';
+      return;
+    }
+    field.setAttribute('aria-invalid', 'true');
+    error_node.hidden = false;
+    error_node.textContent = message;
+  };
 
   const parse_replay_window_details = (body) => {
     if (!body || typeof body !== 'object') {
@@ -158,6 +190,7 @@
       : '';
     replay_window_text.textContent = `History pruned. Earliest available seq: ${details.earliest_seq}.${requested_text}`;
     replay_window_banner.hidden = false;
+    announce_status(replay_window_text.textContent);
   };
 
   const hide_replay_window_banner = () => {
@@ -399,6 +432,7 @@
     if (conversations_status) {
       conversations_status.textContent = value;
     }
+    announce_status(`conversations ${value}`);
   };
 
   const short_id = (value, prefix = 8, suffix = 4) => {
@@ -461,10 +495,28 @@
       return String(left.conv_id).localeCompare(String(right.conv_id));
     });
 
-    computed_items.forEach((item) => {
+    const activate_conversation = (item, members) => {
+      conv_id_input.value = item.conv_id;
+      const desired_from_seq = Math.max(item.cursor_next_seq, item.earliest_seq || 1);
+      from_seq_input.value = String(desired_from_seq);
+      maybe_dispatch_conv_selected(item.conv_id);
+      window.dispatchEvent(
+        new CustomEvent('conv.selected', {
+          detail: {
+            conv_id: item.conv_id,
+            members,
+          },
+        })
+      );
+      subscribe_btn.click();
+    };
+
+    computed_items.forEach((item, index) => {
       const list_item = document.createElement('li');
       const conversation_btn = document.createElement('button');
       conversation_btn.type = 'button';
+      conversation_btn.setAttribute('role', 'option');
+      conversation_btn.dataset.roving_tabindex = 'true';
       const member_count = Number.isInteger(item.member_count) ? item.member_count : 0;
       const role = typeof item.role === 'string' ? item.role : 'member';
       const members = Array.isArray(item.members) ? item.members.filter((member) => typeof member === 'string') : [];
@@ -496,20 +548,54 @@
       const ts_value = to_timestamp_label(meta && Number.isInteger(meta.last_ts_ms) ? meta.last_ts_ms : item.latest_ts_ms);
       preview_line.textContent = `${preview_value}${ts_value ? ` • ${ts_value}` : ''}`;
       list_item.dataset.conv_id = item.conv_id;
+      const is_selected = item.conv_id === last_selected_conv_id || (!last_selected_conv_id && index === 0);
+      conversation_btn.setAttribute('aria-selected', is_selected ? 'true' : 'false');
+      conversation_btn.setAttribute('aria-current', is_selected ? 'true' : 'false');
+      conversation_btn.setAttribute('tabindex', is_selected ? '0' : '-1');
+      if (is_selected) {
+        last_selected_conv_id = item.conv_id;
+        last_selected_conv_index = index;
+      }
       conversation_btn.addEventListener('click', () => {
-        conv_id_input.value = item.conv_id;
-        const desired_from_seq = Math.max(item.cursor_next_seq, item.earliest_seq || 1);
-        from_seq_input.value = String(desired_from_seq);
-        maybe_dispatch_conv_selected(item.conv_id);
-        window.dispatchEvent(
-          new CustomEvent('conv.selected', {
-            detail: {
-              conv_id: item.conv_id,
-              members,
-            },
-          })
-        );
-        subscribe_btn.click();
+        activate_conversation(item, members);
+      });
+      conversation_btn.addEventListener('keydown', (event) => {
+        if (!conversations_list) {
+          return;
+        }
+        const options = Array.from(conversations_list.querySelectorAll('button[data-roving-tabindex="true"]'));
+        if (!options.length) {
+          return;
+        }
+        const current_index = options.indexOf(conversation_btn);
+        const move_to = (next_index) => {
+          const safe_index = Math.max(0, Math.min(next_index, options.length - 1));
+          options.forEach((option, option_index) => {
+            const selected = option_index === safe_index;
+            option.setAttribute('tabindex', selected ? '0' : '-1');
+            option.setAttribute('aria-selected', selected ? 'true' : 'false');
+            option.setAttribute('aria-current', selected ? 'true' : 'false');
+          });
+          const next_btn = options[safe_index];
+          next_btn.focus();
+          last_selected_conv_index = safe_index;
+          const parent = next_btn.closest('li');
+          last_selected_conv_id = parent ? parent.dataset.conv_id || null : null;
+        };
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          move_to(current_index + 1);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          move_to(current_index - 1);
+          return;
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          activate_conversation(item, members);
+        }
       });
       list_item.appendChild(conversation_btn);
       list_item.appendChild(preview_line);
@@ -572,6 +658,7 @@
     if (rooms_status_line) {
       rooms_status_line.textContent = message;
     }
+    announce_status(`rooms ${message}`);
   };
 
   const set_rooms_response_status = (response, payload_text) => {
@@ -592,13 +679,19 @@
     }
     if (!conv_id) {
       set_rooms_status(`status: error (${action_label}: conv_id required)`);
+      set_inline_error(rooms_conv_id_input, rooms_conv_id_error, 'conv_id is required');
+      rooms_conv_id_input.focus();
       return;
     }
+    set_inline_error(rooms_conv_id_input, rooms_conv_id_error, '');
     const members = parse_members_input(rooms_members_input.value);
     if (!members.length) {
       set_rooms_status(`status: error (${action_label}: members required)`);
+      set_inline_error(rooms_members_input, rooms_members_error, 'at least one member user_id is required');
+      rooms_members_input.focus();
       return;
     }
+    set_inline_error(rooms_members_input, rooms_members_error, '');
     if (!rooms_session_token) {
       set_rooms_status(`status: error (${action_label}: session_token required)`);
       return;
@@ -1436,10 +1529,12 @@
   const send_ciphertext_with_deterministic_id = async (conv_id, ciphertext, existing_msg_id = '') => {
     if (!conv_id) {
       append_log('missing conv_id');
+      announce_status('send failed missing conv_id');
       return;
     }
     if (!ciphertext) {
       append_log('missing ciphertext');
+      announce_status('send failed missing ciphertext');
       return;
     }
     let msg_id = existing_msg_id || msg_id_input.value.trim();
@@ -1447,6 +1542,7 @@
       const env_bytes = base64_to_bytes(ciphertext);
       if (!env_bytes) {
         append_log('invalid base64 ciphertext');
+        announce_status('send failed invalid base64 ciphertext');
         return;
       }
       msg_id = await sha256_hex(env_bytes);
@@ -1470,6 +1566,7 @@
       if (failed_item) {
         render_local_outbound_event(failed_item);
       }
+      announce_status(`send failed for msg_id ${msg_id}`);
     }
   };
 
@@ -1522,11 +1619,13 @@
       this.ws = new WebSocket(url);
       this.ws.addEventListener('open', () => {
         connection_status.textContent = 'connected';
+        announce_status('connection connected');
         append_log('websocket open');
         this.flush_pending();
       });
       this.ws.addEventListener('close', (evt) => {
         connection_status.textContent = 'disconnected';
+        announce_status(`connection disconnected code ${evt.code}`);
         append_log(`websocket closed (code=${evt.code})`);
         mark_all_pending_failed();
         hydrate_local_outbox_rows();
@@ -2031,6 +2130,10 @@
     generate_room_id_btn.textContent = 'Generate room id';
     conv_row.appendChild(generate_room_id_btn);
     fieldset.appendChild(conv_row);
+    const conv_error = document.createElement('p');
+    conv_error.className = 'field-error';
+    conv_error.hidden = true;
+    fieldset.appendChild(conv_error);
 
     const members_label = document.createElement('label');
     members_label.textContent = 'members (comma-separated user_ids)';
@@ -2040,6 +2143,10 @@
     members_input.size = 48;
     members_label.appendChild(members_input);
     fieldset.appendChild(members_label);
+    const members_error = document.createElement('p');
+    members_error.className = 'field-error';
+    members_error.hidden = true;
+    fieldset.appendChild(members_error);
 
     const button_row = document.createElement('div');
     button_row.className = 'button-row';
@@ -2066,6 +2173,8 @@
     fieldset.appendChild(button_row);
 
     const status_line = document.createElement('p');
+    status_line.id = 'rooms_status_line';
+    status_line.setAttribute('aria-live', 'polite');
     status_line.textContent = 'status: idle';
     fieldset.appendChild(status_line);
 
@@ -2085,6 +2194,8 @@
     rooms_demote_btn = demote_btn;
     rooms_generate_room_id_btn = generate_room_id_btn;
     rooms_status_line = status_line;
+    rooms_conv_id_error = conv_error;
+    rooms_members_error = members_error;
   };
 
   const hydrate_inputs = async () => {
@@ -2206,6 +2317,34 @@
     return value.trim();
   };
 
+  const validate_conv_id_field = (value, field = conv_id_input, error_node = conv_id_error, label = 'conversation id') => {
+    const normalized = normalize_conv_id(value);
+    if (!normalized) {
+      set_inline_error(field, error_node, `${label} is required`);
+      return { ok: false, value: '', error: `${label} is required` };
+    }
+    set_inline_error(field, error_node, '');
+    return { ok: true, value: normalized, error: '' };
+  };
+
+  const focus_conversations_list = () => {
+    if (!conversations_list) {
+      return;
+    }
+    const options = Array.from(conversations_list.querySelectorAll('button[data-roving-tabindex="true"]'));
+    if (!options.length) {
+      return;
+    }
+    const next_index = Math.max(0, Math.min(last_selected_conv_index, options.length - 1));
+    options.forEach((option, option_index) => {
+      const selected = option_index === next_index;
+      option.setAttribute('tabindex', selected ? '0' : '-1');
+      option.setAttribute('aria-selected', selected ? 'true' : 'false');
+      option.setAttribute('aria-current', selected ? 'true' : 'false');
+    });
+    options[next_index].focus();
+  };
+
   const maybe_dispatch_conv_selected = (value) => {
     const conv_id = normalize_conv_id(value);
     if (conv_id === last_selected_conv_id) {
@@ -2277,7 +2416,13 @@
   }
 
   subscribe_btn.addEventListener('click', async () => {
-    const conv_id = conv_id_input.value.trim();
+    const conv_validation = validate_conv_id_field(conv_id_input.value);
+    if (!conv_validation.ok) {
+      conv_id_input.focus();
+      announce_status(`error ${conv_validation.error}`);
+      return;
+    }
+    const conv_id = conv_validation.value;
     maybe_dispatch_conv_selected(conv_id);
     if (from_seq_input.value === '') {
       const stored_next_seq = (await read_cursor(conv_id)) ?? 1;
@@ -2291,13 +2436,32 @@
   });
 
   ack_btn.addEventListener('click', () => {
+    const conv_validation = validate_conv_id_field(conv_id_input.value);
+    if (!conv_validation.ok) {
+      conv_id_input.focus();
+      announce_status(`error ${conv_validation.error}`);
+      return;
+    }
     const seq_value = Number(seq_input.value);
-    client.ack(conv_id_input.value.trim(), seq_value);
+    client.ack(conv_validation.value, seq_value);
   });
 
   send_btn.addEventListener('click', async () => {
-    const conv_id = conv_id_input.value.trim();
+    const conv_validation = validate_conv_id_field(conv_id_input.value);
+    if (!conv_validation.ok) {
+      conv_id_input.focus();
+      announce_status(`error ${conv_validation.error}`);
+      return;
+    }
+    const conv_id = conv_validation.value;
     const ciphertext = ciphertext_input.value.trim();
+    if (!ciphertext) {
+      set_inline_error(ciphertext_input, compose_error, 'ciphertext payload is required');
+      ciphertext_input.focus();
+      announce_status('error ciphertext payload is required');
+      return;
+    }
+    set_inline_error(ciphertext_input, compose_error, '');
     await send_ciphertext_with_deterministic_id(conv_id, ciphertext);
   });
 
@@ -2312,7 +2476,23 @@
   });
 
   conv_id_input.addEventListener('input', () => {
+    set_inline_error(conv_id_input, conv_id_error, '');
     maybe_dispatch_conv_selected(conv_id_input.value);
+  });
+  ciphertext_input.addEventListener('input', () => {
+    set_inline_error(ciphertext_input, compose_error, '');
+  });
+
+  [ciphertext_input, msg_id_input].forEach((input) => {
+    if (!input) {
+      return;
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        focus_conversations_list();
+      }
+    });
   });
 
   conv_id_input.addEventListener('blur', () => {
@@ -2733,6 +2913,16 @@
       }
     });
   }
+  if (rooms_conv_id_input) {
+    rooms_conv_id_input.addEventListener('input', () => {
+      set_inline_error(rooms_conv_id_input, rooms_conv_id_error, '');
+    });
+  }
+  if (rooms_members_input) {
+    rooms_members_input.addEventListener('input', () => {
+      set_inline_error(rooms_members_input, rooms_members_error, '');
+    });
+  }
 
   build_social_panel();
   if (social_fetch_btn) {
@@ -2848,11 +3038,20 @@
       retry_btn.type = 'button';
       retry_btn.dataset.test = 'msg-retry';
       retry_btn.textContent = 'Retry send';
+      retry_btn.setAttribute('aria-label', `Retry send for msg_id ${item.msg_id} preview ${preview || 'none'}`);
       retry_btn.addEventListener('click', async () => {
         msg_id_input.value = item.msg_id;
         ciphertext_input.value = item.env || '';
         conv_id_input.value = item.conv_id;
         await send_ciphertext_with_deterministic_id(item.conv_id, item.env || '', item.msg_id);
+        last_selected_message_entry = entry;
+        window.setTimeout(() => {
+          if (last_selected_message_entry) {
+            last_selected_message_entry.setAttribute('tabindex', '-1');
+            last_selected_message_entry.focus();
+          }
+        }, 0);
+        announce_status(`retry queued for msg_id ${item.msg_id}`);
       });
       entry.append(' ');
       entry.appendChild(retry_btn);

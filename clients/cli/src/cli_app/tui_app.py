@@ -236,7 +236,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -279,6 +279,8 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
             attr = curses.A_REVERSE if idx == render.room_modal_active_field else 0
             _render_text(stdscr, y, 2, f"{field}: {value}", attr)
             y += 1
+        if render.room_modal_error_line and y < max_y:
+            _render_text(stdscr, y, 2, render.room_modal_error_line)
 
     transcript_top = header_offset
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
@@ -361,6 +363,27 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         _render_text(stdscr, compose_top - 1, right_start + 2, "Compose (Enter to send)")
         compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
         _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
+
+    if render.help_overlay_active:
+        overlay_lines = [
+            "Keybindings",
+            "Account: identity_new / identity_import / identity_export / logout",
+            "Conversations: L refresh, U next unread, Ctrl-N new DM",
+            "Rooms: Ctrl-R create, I invite, K remove, + promote, - demote",
+            "Messages: Enter send, R retry failed",
+            "Press Esc to close (or q)",
+        ]
+        box_width = min(max_x - 4, 88)
+        box_height = len(overlay_lines) + 2
+        box_top = max(1, (max_y - box_height) // 2)
+        box_left = max(2, (max_x - box_width) // 2)
+        for row in range(box_height):
+            fill = " " * max(1, box_width - 2)
+            _render_text(stdscr, box_top + row, box_left, f"|{fill}|")
+        _render_text(stdscr, box_top, box_left, "+" + "-" * max(1, box_width - 2) + "+")
+        _render_text(stdscr, box_top + box_height - 1, box_left, "+" + "-" * max(1, box_width - 2) + "+")
+        for index, line in enumerate(overlay_lines):
+            _render_text(stdscr, box_top + 1 + index, box_left + 2, line[: max(1, box_width - 4)])
 
 
 def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
@@ -1561,37 +1584,50 @@ def _submit_room_modal(
 ) -> str | None:
     action_name = model.room_modal_action
     fields = dict(model.room_modal_fields)
-    model.room_modal_active = False
-    model.room_modal_action = ""
-    model.room_modal_field_order = []
-    model.room_modal_active_field = 0
-    model.focus_area = "conversations"
+    model.room_modal_error_line = ""
     if action_name == "room_create":
         members = _parse_member_csv(fields.get("members", ""))
         conv_id = fields.get("conv_id", "").strip() or f"conv_{secrets.token_hex(16)}"
         state_dir = fields.get("state_dir", "").strip() or _default_state_dir_for_conv(conv_id)
         name = fields.get("name", "").strip() or f"room {conv_id[:8]}"
         if session is None:
-            _append_system_message(model, "No active session. Press r to resume.")
+            model.room_modal_error_line = "ERR_ROOM_MODAL: No active session. Press r to resume."
             return None
         if not members:
-            _append_system_message(model, "New room requires members.")
+            model.room_modal_error_line = "ERR_ROOM_MODAL: members required."
+            model.room_modal_active_field = 1
             return None
         try:
             gateway_client.rooms_create(session.base_url, session.session_token, conv_id, members)
         except urllib.error.HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="ignore")
             if exc.code == 403:
-                _append_system_message(model, f"room create forbidden conv_id={conv_id}")
+                model.room_modal_error_line = f"ERR_ROOM_MODAL: room create forbidden conv_id={conv_id}"
             else:
-                _append_system_message(model, f"room create failed http {exc.code}: {payload}")
+                model.room_modal_error_line = f"ERR_ROOM_MODAL: room create failed http {exc.code}: {payload}"
             return None
+        model.room_modal_active = False
+        model.room_modal_action = ""
+        model.room_modal_field_order = []
+        model.room_modal_active_field = 0
+        model.focus_area = "conversations"
         model.ensure_conversation(conv_id=conv_id, name=name, state_dir=state_dir, peer_user_id="", next_seq=1)
         _append_system_message(model, f"room create ok conv_id={conv_id}")
         return "conv_refresh"
 
     conv_id = model.get_selected_conv_id().strip()
     members = _parse_member_csv(fields.get("members", ""))
+    if not conv_id:
+        model.room_modal_error_line = "ERR_ROOM_MODAL: conv_id required."
+        return None
+    if not members:
+        model.room_modal_error_line = "ERR_ROOM_MODAL: members required."
+        return None
+    model.room_modal_active = False
+    model.room_modal_action = ""
+    model.room_modal_field_order = []
+    model.room_modal_active_field = 0
+    model.focus_area = "conversations"
     _run_room_action(model, session, action_name, members, conv_id=conv_id)
     return "conv_refresh"
 

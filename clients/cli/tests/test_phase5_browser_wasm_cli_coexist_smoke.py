@@ -665,7 +665,9 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             raise unittest.SkipTest("Set RUN_BROWSER_SMOKES=1 to enable browser launch smoke tests")
         chromium_bin = find_chromium()
         if not chromium_bin:
-            raise unittest.SkipTest("Chromium not available in PATH")
+            raise unittest.SkipTest(
+                "Chromium not available in PATH; set CHROMIUM_BIN or CHROMIUM_PATH to an executable browser"
+            )
 
         conv_ids = {"dm": "conv_dm_browser", "room": "conv_room_browser"}
         group_ids = {

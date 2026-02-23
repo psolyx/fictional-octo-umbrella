@@ -17,6 +17,14 @@ def find_free_port() -> int:
 
 
 def find_chromium() -> Optional[str]:
+    env_overrides = [
+        os.environ.get("CHROMIUM_BIN", "").strip(),
+        os.environ.get("CHROMIUM_PATH", "").strip(),
+    ]
+    for candidate in env_overrides:
+        if candidate and os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
     candidates = [
         "chromium",
         "chromium-browser",

@@ -95,6 +95,14 @@ class TuiModelTests(unittest.TestCase):
         self.assertEqual(render.transcript[-1]["text"], "hello")
         self.assertEqual(render.transcript[-1]["dir"], "sys")
 
+    def test_help_overlay_toggle(self):
+        model = self._model()
+        self.assertFalse(model.render().help_overlay_active)
+        model.handle_key("CHAR", "?")
+        self.assertTrue(model.render().help_overlay_active)
+        model.handle_key("ESC")
+        self.assertFalse(model.render().help_overlay_active)
+
     def test_persistence_round_trip(self):
         model = self._model()
         model.add_conv("dm2", "/tmp/dm2")

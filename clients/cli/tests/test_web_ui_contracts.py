@@ -90,6 +90,7 @@ class TestWebUiContracts(unittest.TestCase):
         cls.index_html = read_repo_text("clients", "web", "index.html")
         cls.readme = read_repo_text("clients", "web", "README.md")
         cls.gateway_ws_client = read_repo_text("clients", "web", "gateway_ws_client.js")
+        cls.styles_css = read_repo_text("clients", "web", "styles.css")
         cls.dm_ui = read_repo_text("clients", "web", "dm_ui.js")
         cls.social_ui = read_repo_text("clients", "web", "social_ui.js")
         cls.mls_vectors_loader = read_repo_text("clients", "web", "mls_vectors_loader.js")
@@ -219,6 +220,14 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("History pruned", self.index_html)
         self.assertIn("replay_window_banner", self.index_html)
         self.assertIn("replay_window_resubscribe_btn", self.index_html)
+
+    def test_accessibility_keyboard_contract_markers(self):
+        self.assertIn(":focus-visible", self.styles_css)
+        self.assertIn("sr-only", self.styles_css)
+        self.assertIn('aria-live="polite"', self.index_html)
+        self.assertIn("aria-selected", self.gateway_ws_client)
+        self.assertIn("tabindex", self.gateway_ws_client)
+        self.assertIn('retry_btn.type = \'button\'', self.gateway_ws_client)
     def test_serving_path_regressions(self):
         self.assertNotIn("/clients/web/", self.index_html)
         self.assertIn("open http://localhost:8000/index.html", self.readme)

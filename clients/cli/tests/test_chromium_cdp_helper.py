@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import unittest
 import urllib.error
@@ -8,6 +9,7 @@ from helpers.chromium_cdp import (
     _fetch_cdp_targets,
     _select_cdp_page_target,
     _wait_for_cdp_url,
+    find_chromium,
     find_free_port,
 )
 
@@ -141,6 +143,24 @@ class ChromiumCdpHelperTests(unittest.TestCase):
         ]
         ws_url = _select_cdp_page_target(targets, port)
         self.assertEqual(ws_url, f"ws://127.0.0.1:{port}/devtools/page/FIRST")
+
+    def test_find_chromium_prefers_env_override(self) -> None:
+        original_bin = os.environ.get("CHROMIUM_BIN")
+        original_path = os.environ.get("CHROMIUM_PATH")
+        try:
+            os.environ["CHROMIUM_BIN"] = "/bin/sh"
+            os.environ.pop("CHROMIUM_PATH", None)
+            resolved = find_chromium()
+            self.assertEqual(resolved, "/bin/sh")
+        finally:
+            if original_bin is None:
+                os.environ.pop("CHROMIUM_BIN", None)
+            else:
+                os.environ["CHROMIUM_BIN"] = original_bin
+            if original_path is None:
+                os.environ.pop("CHROMIUM_PATH", None)
+            else:
+                os.environ["CHROMIUM_PATH"] = original_path
 
     def test_select_uses_synthesized_id_when_websocket_missing(self) -> None:
         port = find_free_port()
