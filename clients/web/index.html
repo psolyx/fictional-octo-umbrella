@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div id="live_status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
   <h1>Gateway v1 WebSocket demo</h1>
   <p>This static page exercises gateway session lifecycle, conversation subscription with optional replay, ack, and ciphertext send flows.</p>
 
@@ -53,11 +54,11 @@
     <div class="button-row">
       <button id="connect_start">Start session</button>
       <button id="connect_resume">Resume session</button>
-      <span id="connection_status">disconnected</span>
+      <span id="connection_status" aria-live="polite">disconnected</span>
     </div>
   </fieldset>
 
-  <div id="replay_window_banner" class="replay-window-banner" hidden>
+  <div id="replay_window_banner" class="replay-window-banner" aria-live="polite" hidden>
     <span id="replay_window_text">History pruned.</span>
     <button id="replay_window_resubscribe_btn" type="button">Click to resubscribe</button>
   </div>
@@ -67,10 +68,10 @@
     <legend>Conversations</legend>
     <div class="button-row">
       <button id="conversations_refresh_btn" type="button">Refresh conversations</button>
-      <span id="conversations_status">idle</span>
+      <span id="conversations_status" aria-live="polite">idle</span>
     </div>
     <p>Legend: unread=N means messages newer than your local cursor. pruned means your cursor is behind retained history.</p>
-    <ul id="conversations_list"></ul>
+    <ul id="conversations_list" role="listbox" aria-label="Conversations"></ul>
   </fieldset>
 
   <fieldset>
@@ -79,6 +80,7 @@
       Conversation ID
       <input type="text" id="conv_id" size="32" />
     </label>
+    <p id="conv_id_error" class="field-error" hidden></p>
     <label>
       from_seq (optional subscribe replay)
       <input type="number" id="from_seq" min="0" />
@@ -95,6 +97,7 @@
       Ciphertext payload
       <input type="text" id="ciphertext_input" size="64" />
     </label>
+    <p id="compose_error" class="field-error" hidden></p>
     <div class="button-row">
       <button id="subscribe_btn">Subscribe</button>
       <button id="ack_btn">Ack</button>

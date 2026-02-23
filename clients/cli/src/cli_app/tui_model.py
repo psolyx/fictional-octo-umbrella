@@ -84,6 +84,8 @@ class RenderState:
     room_modal_fields: Dict[str, str]
     room_modal_field_order: List[str]
     room_modal_active_field: int
+    room_modal_error_line: str
+    help_overlay_active: bool
     social_active: bool
     social_target: str
     social_view_mode: str
@@ -216,6 +218,8 @@ class TuiModel:
         self.room_modal_fields = {}
         self.room_modal_field_order = []
         self.room_modal_active_field = 0
+        self.room_modal_error_line = ""
+        self.help_overlay_active = False
 
         self.social_active = False
         self.social_target = "self"
@@ -643,10 +647,23 @@ class TuiModel:
         else:
             self.room_modal_field_order = list(ROOM_MEMBERS_FIELD_ORDER)
             self.room_modal_fields = {"members": ""}
+        self.room_modal_error_line = ""
         self.focus_area = "room_modal"
 
     def handle_key(self, key: str, char: Optional[str] = None) -> Optional[str]:
         """Handle a normalized key and return an action string when needed."""
+
+        if key == "CHAR" and char == "?":
+            key = "?"
+
+        if self.help_overlay_active:
+            if key in {"ESC", "q", "?"}:
+                self.help_overlay_active = False
+            return None
+
+        if key == "?":
+            self.help_overlay_active = True
+            return None
 
         if key == "q":
             return "quit"
@@ -703,6 +720,7 @@ class TuiModel:
                 self.room_modal_action = ""
                 self.room_modal_fields = {}
                 self.room_modal_field_order = []
+                self.room_modal_error_line = ""
                 self.focus_area = "conversations"
                 return None
             if key == "UP":
@@ -714,10 +732,12 @@ class TuiModel:
             if key == "BACKSPACE":
                 field_key = self.room_modal_field_order[self.room_modal_active_field]
                 self.room_modal_fields[field_key] = self.room_modal_fields.get(field_key, "")[:-1]
+                self.room_modal_error_line = ""
                 return None
             if key == "DELETE":
                 field_key = self.room_modal_field_order[self.room_modal_active_field]
                 self.room_modal_fields[field_key] = ""
+                self.room_modal_error_line = ""
                 return None
             if key == "ENTER":
                 if self.room_modal_active_field == len(self.room_modal_field_order) - 1:
@@ -727,6 +747,7 @@ class TuiModel:
             if char:
                 field_key = self.room_modal_field_order[self.room_modal_active_field]
                 self.room_modal_fields[field_key] = self.room_modal_fields.get(field_key, "") + char
+                self.room_modal_error_line = ""
                 return None
             return None
 
@@ -1055,6 +1076,8 @@ class TuiModel:
             room_modal_fields=dict(self.room_modal_fields),
             room_modal_field_order=list(self.room_modal_field_order),
             room_modal_active_field=self.room_modal_active_field,
+            room_modal_error_line=self.room_modal_error_line,
+            help_overlay_active=self.help_overlay_active,
             social_active=self.social_active,
             social_target=self.social_target,
             social_view_mode=self.social_view_mode,

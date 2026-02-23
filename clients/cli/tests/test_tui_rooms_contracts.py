@@ -62,6 +62,11 @@ class TestTuiRoomsContracts(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app if marker in self.tui_app else self.tui_model)
 
+    def test_tui_help_overlay_contracts(self):
+        self.assertIn('if key == "?"', self.tui_model)
+        self.assertIn('"Keybindings"', self.tui_app)
+        self.assertIn('"Press Esc to close (or q)"', self.tui_app)
+
 
 if __name__ == "__main__":
     unittest.main()
