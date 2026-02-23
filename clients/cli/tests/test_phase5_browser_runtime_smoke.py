@@ -19,7 +19,8 @@ VECTORS_DIR = WEB_DIR / "vectors"
 TOOLS_DIR = ROOT_DIR / "tools" / "mls_harness"
 WASM_PATH = WEB_DIR / "vendor" / "mls_harness.wasm"
 WASM_EXEC = WEB_DIR / "vendor" / "wasm_exec.js"
-VECTORS_JSON = VECTORS_DIR / "room_seeded_bootstrap_v1.json"
+VECTORS_JSON = VECTORS_DIR / "dm_smoke_v1.json"
+ROOM_TRANSCRIPT_JSON = VECTORS_DIR / "room_seeded_bootstrap_v1.json"
 HELPERS_DIR = Path(__file__).resolve().parent / "helpers"
 sys.path.insert(0, str(HELPERS_DIR))
 from chromium_cdp import (  # noqa: E402
@@ -275,6 +276,8 @@ def _prepare_smoke_assets(temp_root: Path) -> tuple[Path, Path]:
     shutil.copy(WASM_PATH, vendor_dir / "mls_harness.wasm")
     shutil.copy(WEB_DIR / "mls_vectors_loader.js", temp_root / "mls_vectors_loader.js")
     shutil.copy(VECTORS_JSON, vectors_dir / VECTORS_JSON.name)
+    shutil.copy(ROOM_TRANSCRIPT_JSON, vectors_dir / ROOM_TRANSCRIPT_JSON.name)
+    (temp_root / "favicon.ico").write_bytes(b"")
 
     module_file = temp_root / "phase5_browser_runtime_smoke.js"
     module_file.write_text(
@@ -405,9 +408,24 @@ const require_ok = (result, label) => {
 };
 
 const run = async () => {
-  const vectors = await verify_vectors_from_url('./vectors/room_seeded_bootstrap_v1.json');
+  const vectors = await verify_vectors_from_url('./vectors/dm_smoke_v1.json');
   if (!vectors || vectors.ok !== true) {
     throw new Error(`vector verify failed: ${JSON.stringify(vectors)}`);
+  }
+
+  const roomTranscriptResp = await fetch('./vectors/room_seeded_bootstrap_v1.json');
+  if (!roomTranscriptResp.ok) {
+    throw new Error(`room transcript fetch failed: ${roomTranscriptResp.status}`);
+  }
+  const roomTranscript = JSON.parse(await roomTranscriptResp.text());
+  if (!Number.isInteger(roomTranscript.schema_version)) {
+    throw new Error('room transcript schema_version must be int');
+  }
+  if (typeof roomTranscript.conv_id !== 'string') {
+    throw new Error('room transcript conv_id must be string');
+  }
+  if (!Array.isArray(roomTranscript.events) || roomTranscript.events.length === 0) {
+    throw new Error('room transcript events must be non-empty array');
   }
 
   const group_id_bytes = new Uint8Array(32);

@@ -12,8 +12,9 @@ import threading
 import unittest
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Deque, Optional
 
 from aiohttp import ClientSession, WSMsgType
 from aiohttp.test_utils import TestClient, TestServer
@@ -110,12 +111,36 @@ async def _ws_receive_payload(ws, *, deadline: float) -> dict:
             return payload
 
 
-async def _ws_recv_until(ws, *, timeout_s: float, predicate: Callable[[dict], bool]) -> dict:
+def _stash_take_first(stash: Deque[dict], predicate: Callable[[dict], bool]) -> Optional[dict]:
+    for index, payload in enumerate(stash):
+        if predicate(payload):
+            del stash[index]
+            return payload
+    return None
+
+
+def _stash_append(stash: Deque[dict], payload: dict, *, max_size: int = 200) -> None:
+    stash.append(payload)
+    while len(stash) > max_size:
+        stash.popleft()
+
+
+async def _ws_recv_until(
+    ws,
+    *,
+    timeout_s: float,
+    predicate: Callable[[dict], bool],
+    stash: Deque[dict],
+) -> dict:
     deadline = asyncio.get_running_loop().time() + timeout_s
+    stashed = _stash_take_first(stash, predicate)
+    if stashed is not None:
+        return stashed
     while True:
         payload = await _ws_receive_payload(ws, deadline=deadline)
         if predicate(payload):
             return payload
+        _stash_append(stash, payload)
 
 
 async def _ws_open_session(client: TestClient, device_id: str, auth_token: str):
@@ -132,6 +157,7 @@ async def _ws_open_session(client: TestClient, device_id: str, auth_token: str):
         ws,
         timeout_s=WS_READY_TIMEOUT_S,
         predicate=lambda payload: payload.get("t") == "session.ready",
+        stash=deque(),
     )
     return ws
 
@@ -147,11 +173,12 @@ async def _ws_subscribe(ws, *, conv_id: str, from_seq: int) -> None:
     )
 
 
-async def _ws_wait_for_ack(ws, *, request_id: str, timeout_s: float) -> int:
+async def _ws_wait_for_ack(ws, *, request_id: str, timeout_s: float, stash: Deque[dict]) -> int:
     payload = await _ws_recv_until(
         ws,
         timeout_s=timeout_s,
         predicate=lambda message: message.get("t") == "conv.acked" and message.get("id") == request_id,
+        stash=stash,
     )
     body = payload.get("body") if isinstance(payload, dict) else None
     if not isinstance(body, dict) or not isinstance(body.get("seq"), int):
@@ -159,7 +186,14 @@ async def _ws_wait_for_ack(ws, *, request_id: str, timeout_s: float) -> int:
     return body["seq"]
 
 
-async def _ws_wait_for_event(ws, *, conv_id: str, expected_seq: int, timeout_s: float) -> dict:
+async def _ws_wait_for_event(
+    ws,
+    *,
+    conv_id: str,
+    expected_seq: int,
+    timeout_s: float,
+    stash: Deque[dict],
+) -> dict:
     payload = await _ws_recv_until(
         ws,
         timeout_s=timeout_s,
@@ -167,24 +201,75 @@ async def _ws_wait_for_event(ws, *, conv_id: str, expected_seq: int, timeout_s: 
         and isinstance(message.get("body"), dict)
         and message["body"].get("conv_id") == conv_id
         and message["body"].get("seq") == expected_seq,
+        stash=stash,
     )
     return payload
 
 
-async def _ws_assert_no_conv_event(ws, *, conv_id: str, timeout_s: float) -> None:
+async def _ws_assert_no_conv_event(ws, *, conv_id: str, timeout_s: float, stash: Deque[dict]) -> None:
+    forbidden = (
+        lambda message: message.get("t") == "conv.event"
+        and isinstance(message.get("body"), dict)
+        and message["body"].get("conv_id") == conv_id
+    )
+    stashed_forbidden = _stash_take_first(stash, forbidden)
+    if stashed_forbidden is not None:
+        raise AssertionError(f"Unexpected conv.event rebroadcast: {stashed_forbidden}")
+
     deadline = asyncio.get_running_loop().time() + timeout_s
     while True:
         try:
             payload = await _ws_receive_payload(ws, deadline=deadline)
         except asyncio.TimeoutError:
             return
-        if payload.get("t") != "conv.event":
-            continue
-        body = payload.get("body")
-        if not isinstance(body, dict):
-            continue
-        if body.get("conv_id") == conv_id:
+        if forbidden(payload):
             raise AssertionError(f"Unexpected conv.event rebroadcast: {payload}")
+        _stash_append(stash, payload)
+
+
+class _FakeWSMessage:
+    def __init__(self, payload: dict):
+        self.type = WSMsgType.TEXT
+        self.data = json.dumps(payload)
+
+
+class _FakeWS:
+    def __init__(self, payloads: list[dict]):
+        self._messages = [_FakeWSMessage(payload) for payload in payloads]
+
+    async def receive(self, timeout=None):  # noqa: ANN001 - test fake mirrors aiohttp API
+        if self._messages:
+            return self._messages.pop(0)
+        await asyncio.sleep(timeout if timeout is not None else 0)
+        raise asyncio.TimeoutError
+
+    async def pong(self):
+        return None
+
+    def exception(self):
+        return None
+
+
+class WebsocketStashRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_event_assertion_stashes_other_conversation_frames(self) -> None:
+        room_event = {
+            "v": 1,
+            "t": "conv.event",
+            "body": {"conv_id": "room-conv", "seq": 4, "env": "room-env"},
+        }
+        ws = _FakeWS([room_event])
+        stash: Deque[dict] = deque()
+
+        await _ws_assert_no_conv_event(ws, conv_id="dm-conv", timeout_s=0.01, stash=stash)
+
+        recovered = await _ws_wait_for_event(
+            ws,
+            conv_id="room-conv",
+            expected_seq=4,
+            timeout_s=0.01,
+            stash=stash,
+        )
+        self.assertEqual(recovered, room_event)
 
 
 async def _cdp_wait_for_sentinel(ws_url: str, page_url: str, timeout_s: float) -> None:
@@ -354,12 +439,14 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
         bob_room_dir: Path,
     ) -> None:
         expected_seq = {"dm": 1, "room": 1}
+        stash: Deque[dict] = deque()
 
         dm_welcome_event = await _ws_wait_for_event(
             ws,
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         dm_welcome_kind, dm_welcome_payload = dm_envelope.unpack(dm_welcome_event["body"]["env"])
         self.assertEqual(dm_welcome_kind, 1)
@@ -376,6 +463,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         room_welcome_kind, room_welcome_payload = dm_envelope.unpack(room_welcome_event["body"]["env"])
         self.assertEqual(room_welcome_kind, 1)
@@ -393,6 +481,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         dm_commit_kind, dm_commit_payload = dm_envelope.unpack(dm_commit_event["body"]["env"])
         self.assertEqual(dm_commit_kind, 2)
@@ -410,6 +499,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         room_commit_kind, room_commit_payload = dm_envelope.unpack(room_commit_event["body"]["env"])
         self.assertEqual(room_commit_kind, 2)
@@ -427,6 +517,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         dm_app_kind, dm_app_payload = dm_envelope.unpack(dm_app_event["body"]["env"])
         self.assertEqual(dm_app_kind, 3)
@@ -462,6 +553,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             request_id="dm-app-bob",
             timeout_s=WS_ACK_TIMEOUT_S,
+            stash=stash,
         )
         self.assertEqual(dm_reply_seq, expected_seq["dm"] + 1)
         expected_seq["dm"] += 1
@@ -470,12 +562,14 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["dm"],
             expected_seq=expected_seq["dm"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
 
         await _ws_assert_no_conv_event(
             ws,
             conv_id=conv_ids["dm"],
             timeout_s=WS_NO_EVENT_TIMEOUT_S,
+            stash=stash,
         )
 
         expected_seq["room"] += 1
@@ -484,6 +578,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
         room_app_kind, room_app_payload = dm_envelope.unpack(room_app_event["body"]["env"])
         self.assertEqual(room_app_kind, 3)
@@ -519,6 +614,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             ws,
             request_id="room-app-bob",
             timeout_s=WS_ACK_TIMEOUT_S,
+            stash=stash,
         )
         self.assertEqual(room_reply_seq, expected_seq["room"] + 1)
         expected_seq["room"] += 1
@@ -527,6 +623,7 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
             conv_id=conv_ids["room"],
             expected_seq=expected_seq["room"],
             timeout_s=WS_EVENT_TIMEOUT_S,
+            stash=stash,
         )
 
     async def test_forbidden_subscribe_returns_error_frame(self) -> None:
@@ -545,12 +642,14 @@ class Phase5BrowserWasmCliCoexistSmokeTests(unittest.IsolatedAsyncioTestCase):
         await self._create_room(alice_ready["session_token"], conv_id)
 
         bob_ws = await _ws_open_session(self.client, "dev-bob-forbidden", bob_auth)
+        stash: Deque[dict] = deque()
         try:
             await _ws_subscribe(bob_ws, conv_id=conv_id, from_seq=1)
             error_payload = await _ws_recv_until(
                 bob_ws,
                 timeout_s=WS_ACK_TIMEOUT_S,
                 predicate=lambda message: message.get("t") == "error",
+                stash=stash,
             )
             body = error_payload.get("body") if isinstance(error_payload, dict) else None
             self.assertIsInstance(body, dict)
