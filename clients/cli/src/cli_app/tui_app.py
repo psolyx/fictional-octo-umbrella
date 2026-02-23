@@ -236,7 +236,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -364,12 +364,42 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         compose_attr = curses.A_REVERSE if render.focus_area == "compose" else 0
         _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
+    if render.room_roster_active:
+        overlay_lines = ["Room roster", "A/Enter: Add selected to modal members", "Esc: close"]
+        for member in render.room_roster_members:
+            overlay_lines.append(f"{member.get('role', '')} {member.get('user_id', '')}")
+        box_width = min(max_x - 4, 88)
+        box_height = min(max_y - 2, len(overlay_lines) + 2)
+        box_top = max(1, (max_y - box_height) // 2)
+        box_left = max(2, (max_x - box_width) // 2)
+        for row in range(box_height):
+            fill = " " * max(1, box_width - 2)
+            _render_text(stdscr, box_top + row, box_left, f"|{fill}|")
+        _render_text(stdscr, box_top, box_left, "+" + "-" * max(1, box_width - 2) + "+")
+        _render_text(stdscr, box_top + box_height - 1, box_left, "+" + "-" * max(1, box_width - 2) + "+")
+        visible_count = max(0, box_height - 2)
+        start_idx = 0
+        if render.room_roster_selected_idx >= visible_count and visible_count > 0:
+            start_idx = render.room_roster_selected_idx - visible_count + 1
+        for index in range(visible_count):
+            line_idx = start_idx + index
+            if line_idx >= len(overlay_lines):
+                break
+            line = overlay_lines[line_idx]
+            attr = 0
+            member_start_idx = 3
+            if line_idx >= member_start_idx:
+                member_idx = line_idx - member_start_idx
+                if member_idx == render.room_roster_selected_idx:
+                    attr = curses.A_REVERSE
+            _render_text(stdscr, box_top + 1 + index, box_left + 2, line[: max(1, box_width - 4)], attr)
+
     if render.help_overlay_active:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout",
             "Conversations: L refresh, U next unread, Ctrl-N new DM",
-            "Rooms: Ctrl-R create, I invite, K remove, + promote, - demote",
+            "Rooms: Ctrl-R create, M roster, I invite, K remove, + promote, - demote",
             "Messages: Enter send, R retry failed",
             "Press Esc to close (or q)",
         ]
@@ -1578,6 +1608,47 @@ def _run_room_action(
     _append_system_message(model, f"room {action_name} ok conv_id={conv_id}")
 
 
+
+def _refresh_room_roster(model: TuiModel, session: SessionState | None) -> None:
+    conv_id = model.get_selected_conv_id().strip()
+    if session is None:
+        _append_system_message(model, "Room roster unavailable: no active session.")
+        model.set_room_roster([])
+        return
+    if not conv_id:
+        _append_system_message(model, "Room roster unavailable: no selected conversation.")
+        model.set_room_roster([])
+        return
+    try:
+        payload = gateway_client.rooms_members(session.base_url, session.session_token, conv_id)
+    except urllib.error.HTTPError as exc:
+        payload_text = exc.read().decode("utf-8", errors="ignore")
+        _append_system_message(model, f"room roster failed http {exc.code}: {payload_text}")
+        model.set_room_roster([])
+        return
+    members = payload.get("members") if isinstance(payload, dict) else []
+    if not isinstance(members, list):
+        members = []
+    model.set_room_roster(members)
+
+
+def _append_selected_roster_member_to_modal(model: TuiModel) -> None:
+    if not model.room_modal_active:
+        _append_system_message(model, "Open a room modal before adding roster members.")
+        return
+    selected_user_id = model.selected_room_roster_member()
+    if not selected_user_id:
+        return
+    existing = model.room_modal_fields.get("members", "")
+    parsed = [item.strip() for item in existing.split(",") if item.strip()]
+    if selected_user_id in parsed:
+        return
+    parsed.append(selected_user_id)
+    parsed.sort()
+    model.room_modal_fields["members"] = ", ".join(parsed)
+    model.room_modal_error_line = ""
+
+
 def _submit_room_modal(
     model: TuiModel,
     session: SessionState | None,
@@ -2119,6 +2190,16 @@ def main() -> int:
                 session_state = _resume_or_start_session(model)
                 _stop_tail_threads()
                 _ensure_tail_threads()
+            if action == "room_roster_toggle":
+                render = model.render()
+                model.room_roster_active = not render.room_roster_active
+                if model.room_roster_active:
+                    model.focus_area = "room_roster"
+                    _refresh_room_roster(model, session_state)
+                else:
+                    model.focus_area = "room_modal" if model.room_modal_active else "conversations"
+            if action == "room_roster_add_selected":
+                _append_selected_roster_member_to_modal(model)
             if action == "conv_refresh":
                 _refresh_conversations(model, session_state)
                 _stop_tail_threads()

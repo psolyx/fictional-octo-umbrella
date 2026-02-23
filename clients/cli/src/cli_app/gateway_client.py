@@ -288,6 +288,19 @@ def rooms_demote(
     return room_demote(base_url, session_token, conv_id, members)
 
 
+
+
+def rooms_members(base_url: str, session_token: str, conv_id: str) -> Dict[str, object]:
+    query = urllib.parse.urlencode({"conv_id": conv_id})
+    request = urllib.request.Request(
+        _build_url(base_url, f"/v1/rooms/members?{query}"),
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
 def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict[str, object]:
     payload = {"v": 1, "t": "conv.ack", "body": {"conv_id": conv_id, "seq": seq}}
     _post_json(

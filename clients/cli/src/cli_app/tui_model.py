@@ -85,6 +85,9 @@ class RenderState:
     room_modal_field_order: List[str]
     room_modal_active_field: int
     room_modal_error_line: str
+    room_roster_active: bool
+    room_roster_members: List[Dict[str, str]]
+    room_roster_selected_idx: int
     help_overlay_active: bool
     social_active: bool
     social_target: str
@@ -219,6 +222,9 @@ class TuiModel:
         self.room_modal_field_order = []
         self.room_modal_active_field = 0
         self.room_modal_error_line = ""
+        self.room_roster_active = False
+        self.room_roster_members: List[Dict[str, str]] = []
+        self.room_roster_selected_idx = 0
         self.help_overlay_active = False
 
         self.social_active = False
@@ -650,6 +656,27 @@ class TuiModel:
         self.room_modal_error_line = ""
         self.focus_area = "room_modal"
 
+
+    def set_room_roster(self, members: List[Dict[str, str]]) -> None:
+        normalized: List[Dict[str, str]] = []
+        for row in members:
+            user_id = str(row.get("user_id", "")).strip()
+            role = str(row.get("role", "")).strip()
+            if not user_id or not role:
+                continue
+            normalized.append({"user_id": user_id, "role": role})
+        self.room_roster_members = normalized
+        self.room_roster_selected_idx = min(
+            max(0, self.room_roster_selected_idx),
+            max(0, len(self.room_roster_members) - 1),
+        )
+
+    def selected_room_roster_member(self) -> str:
+        if not self.room_roster_members:
+            return ""
+        idx = min(max(0, self.room_roster_selected_idx), len(self.room_roster_members) - 1)
+        return str(self.room_roster_members[idx].get("user_id", ""))
+
     def handle_key(self, key: str, char: Optional[str] = None) -> Optional[str]:
         """Handle a normalized key and return an action string when needed."""
 
@@ -672,6 +699,7 @@ class TuiModel:
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
             self.new_dm_active = False
             self.room_modal_active = False
+            self.room_roster_active = False
             self.social_active = False
             self.presence_active = False
             self.social_compose_active = False
@@ -712,6 +740,28 @@ class TuiModel:
         if key == "SHIFT_TAB":
             self.focus_prev()
             return None
+
+
+        if self.mode == MODE_DM_CLIENT and self.room_roster_active:
+            if key == "ESC":
+                self.room_roster_active = False
+                self.focus_area = "room_modal" if self.room_modal_active else "conversations"
+                return None
+            if key == "UP":
+                self.room_roster_selected_idx = max(0, self.room_roster_selected_idx - 1)
+                return None
+            if key == "DOWN":
+                self.room_roster_selected_idx = min(
+                    max(0, len(self.room_roster_members) - 1),
+                    self.room_roster_selected_idx + 1,
+                )
+                return None
+            if key == "CHAR" and char in {"A"}:
+                return "room_roster_add_selected"
+            if key == "ENTER":
+                return "room_roster_add_selected"
+            return None
+
 
 
         if self.mode == MODE_DM_CLIENT and self.room_modal_active:
@@ -945,6 +995,8 @@ class TuiModel:
             if key == "CHAR" and char in {"-"}:
                 self._open_room_modal("room_demote")
                 return None
+            if key == "CHAR" and char in {"m", "M"}:
+                return "room_roster_toggle"
             if key == "CHAR" and char in {"l", "L"}:
                 return "conv_refresh"
             if key == "CHAR" and char in {"U"}:
@@ -1077,6 +1129,9 @@ class TuiModel:
             room_modal_field_order=list(self.room_modal_field_order),
             room_modal_active_field=self.room_modal_active_field,
             room_modal_error_line=self.room_modal_error_line,
+            room_roster_active=self.room_roster_active,
+            room_roster_members=list(self.room_roster_members),
+            room_roster_selected_idx=self.room_roster_selected_idx,
             help_overlay_active=self.help_overlay_active,
             social_active=self.social_active,
             social_target=self.social_target,
