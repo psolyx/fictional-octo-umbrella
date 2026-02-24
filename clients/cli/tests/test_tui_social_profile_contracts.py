@@ -10,6 +10,7 @@ class TestTuiSocialProfileContracts(unittest.TestCase):
     def setUpClass(cls):
         cls.tui_app = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "tui_app.py").read_text(encoding="utf-8")
         cls.tui_model = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "tui_model.py").read_text(encoding="utf-8")
+        cls.gateway_client = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "gateway_client.py").read_text(encoding="utf-8")
         cls.social_helpers = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "social.py").read_text(encoding="utf-8")
         cls.tui_main = (REPO_ROOT / "clients" / "tui" / "src" / "tui_app" / "__main__.py").read_text(encoding="utf-8")
 
@@ -25,7 +26,13 @@ class TestTuiSocialProfileContracts(unittest.TestCase):
         self.assertIn("social_view_mode", self.tui_model)
         self.assertIn('char in {"v", "V"}', self.tui_model)
         self.assertIn('char in {"f", "F"}', self.tui_model)
+        self.assertIn('char in {"d", "D"}', self.tui_model)
         self.assertIn('if self.focus_area == "social" and self.social_active', self.tui_model)
+
+    def test_social_start_dm_contracts(self):
+        self.assertIn('/v1/dms/create', self.gateway_client)
+        self.assertIn('def dms_create(', self.gateway_client)
+        self.assertIn('Start DM (D)', self.tui_app)
 
 
     def test_conversation_refresh_contract(self):

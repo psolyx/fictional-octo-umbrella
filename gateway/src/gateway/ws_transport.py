@@ -836,6 +836,17 @@ async def _parse_room_members(body: dict[str, Any]) -> list[str] | None:
     return list(members)
 
 
+def _is_valid_conv_id(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    trimmed = value.strip()
+    if not trimmed or trimmed != value:
+        return False
+    if len(trimmed) > 128:
+        return False
+    return all(char.isalnum() or char in {"_", "-"} for char in trimmed)
+
+
 async def handle_room_create(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -861,6 +872,48 @@ async def handle_room_create(request: web.Request) -> web.Response:
     except LimitExceeded as exc:
         return _limit_exceeded(str(exc))
     return web.json_response({"status": "ok"})
+
+
+async def handle_dms_create(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    peer_user_id = body.get("peer_user_id")
+    if not isinstance(peer_user_id, str) or not peer_user_id.strip():
+        return _invalid_request("peer_user_id required")
+    peer_user_id = peer_user_id.strip()
+    if peer_user_id == session.user_id:
+        return _invalid_request("peer_user_id must not equal self")
+
+    conv_id_raw = body.get("conv_id")
+    if conv_id_raw is None or conv_id_raw == "":
+        conv_id = f"dm_{secrets.token_urlsafe(12)}"
+    elif isinstance(conv_id_raw, str):
+        conv_id = conv_id_raw
+    else:
+        return _invalid_request("conv_id must be a string when provided")
+
+    if not _is_valid_conv_id(conv_id):
+        return _invalid_request("invalid conv_id")
+
+    try:
+        runtime.conversations.create(
+            conv_id,
+            session.user_id,
+            [peer_user_id],
+            home_gateway=runtime.gateway_id,
+        )
+    except ValueError:
+        return _invalid_request("conversation already exists")
+    except LimitExceeded as exc:
+        return _limit_exceeded(str(exc))
+    return web.json_response({"status": "ok", "conv_id": conv_id})
 
 
 async def handle_conversations_list(request: web.Request) -> web.Response:
@@ -1320,6 +1373,7 @@ def create_app(
     app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
     app.router.add_post("/v1/presence/status", handle_presence_status)
     app.router.add_post("/v1/rooms/create", handle_room_create)
+    app.router.add_post("/v1/dms/create", handle_dms_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)

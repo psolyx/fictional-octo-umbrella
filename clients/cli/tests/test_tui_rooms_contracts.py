@@ -35,6 +35,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
     def test_gateway_client_rooms_wrappers_and_usage(self):
         for marker in (
             'def rooms_create(',
+            'def dms_create(',
             'def rooms_invite(',
             'def rooms_remove(',
             'def rooms_promote(',
@@ -55,6 +56,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
+        self.assertIn('/v1/dms/create', self.gateway_client)
 
     def test_tui_message_lifecycle_and_preview_contracts(self):
         for marker in (

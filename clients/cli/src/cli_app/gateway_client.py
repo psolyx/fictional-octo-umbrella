@@ -187,6 +187,22 @@ def room_create(
     )
 
 
+def dms_create(
+    base_url: str,
+    session_token: str,
+    peer_user_id: str,
+    conv_id: str | None = None,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"peer_user_id": peer_user_id}
+    if isinstance(conv_id, str) and conv_id:
+        payload["conv_id"] = conv_id
+    return _post_json(
+        _build_url(base_url, "/v1/dms/create"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def room_invite(
     base_url: str,
     session_token: str,

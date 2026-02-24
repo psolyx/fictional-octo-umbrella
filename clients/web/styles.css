@@ -130,6 +130,20 @@ pre {
   overflow-y: auto;
 }
 
+.profile_friend_row,
+.feed_entry_controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.feed_entry {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  padding: 0.5rem;
+}
+
 .presence-dot{display:inline-block;width:0.6rem;height:0.6rem;border-radius:50%;margin-left:0.35rem;margin-right:0.2rem;vertical-align:middle;}
 .presence-online{background:#2aa952;}
 .presence-offline{background:#737373;}

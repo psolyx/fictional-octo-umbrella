@@ -498,6 +498,23 @@ Semantics match WS frames.
   - `latest_seq` MUST be the maximum retained `seq`.
   - `latest_ts_ms` MUST equal the `ts_ms` of the event at `latest_seq`.
 
+### 8.1b DM create alias
+- Endpoint: `POST /v1/dms/create` (HTTP, authenticated via `Authorization: Bearer {session_token}`).
+- Body:
+  ```json
+  {
+    "peer_user_id": "u_02F...",
+    "conv_id": "dm_optional_id"
+  }
+  ```
+- Semantics:
+  - Thin alias over room creation for the DM-as-2-member-room model.
+  - `peer_user_id` is required, MUST be non-empty, and MUST NOT equal the caller `user_id`.
+  - If `conv_id` is omitted/empty, server generates a new DM conversation id and returns it.
+  - Underlying creation path MUST match `POST /v1/rooms/create` semantics with exactly one peer member.
+  - Success response includes room-create compatibility fields plus `conv_id`, e.g. `{ "status": "ok", "conv_id": "dm_..." }`.
+  - Errors: `invalid_request` for invalid peer or invalid `conv_id`; `unauthorized` when auth is missing/invalid.
+
 ### 8.2 Invite
 - Endpoint: `POST /v1/rooms/invite` (HTTP, authenticated as above).
 - Body:

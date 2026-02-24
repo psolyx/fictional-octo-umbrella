@@ -43,6 +43,41 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
             params={"conv_id": conv_id},
         )
 
+    async def _dms_create(self, token: str | None, peer_user_id: str, conv_id: str | None = None):
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = {"peer_user_id": peer_user_id}
+        if conv_id is not None:
+            payload["conv_id"] = conv_id
+        return await self.client.post("/v1/dms/create", headers=headers, json=payload)
+
+    async def test_dms_create_requires_auth(self):
+        response = await self._dms_create(None, "u_bob")
+        self.assertEqual(response.status, 401)
+
+    async def test_dms_create_rejects_self_peer(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        response = await self._dms_create(alice_token, "u_alice")
+        self.assertEqual(response.status, 400)
+        self.assertEqual((await response.json()).get("code"), "invalid_request")
+
+    async def test_dms_create_generates_conv_id_and_returns_shape(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        response = await self._dms_create(alice_token, "u_bob")
+        self.assertEqual(response.status, 200)
+        payload = await response.json()
+        self.assertIn("status", payload)
+        self.assertIn("conv_id", payload)
+        self.assertEqual(payload.get("status"), "ok")
+        self.assertTrue(str(payload.get("conv_id", "")).startswith("dm_"))
+
+    async def test_dms_create_rejects_invalid_conv_id(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        response = await self._dms_create(alice_token, "u_bob", conv_id=" bad conv id ")
+        self.assertEqual(response.status, 400)
+        self.assertEqual((await response.json()).get("code"), "invalid_request")
+
     async def test_promote_demote_changes_member_permissions(self):
         alice_token = await self._session("u_alice", "d_alice")
         bob_token = await self._session("u_bob", "d_bob")

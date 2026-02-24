@@ -975,6 +975,8 @@ class TuiModel:
                     self.social_scroll = 0
                     self.social_selected_idx = 0
                     return None
+                if key == "CHAR" and char in {"d", "D"}:
+                    return "social_start_dm"
                 return None
             if key == "CTRL_N":
                 self.new_dm_active = True

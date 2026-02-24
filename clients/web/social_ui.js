@@ -10,6 +10,7 @@ const social_event_list = document.getElementById('social_event_list');
 const profile_refresh_btn = document.getElementById('profile_refresh_btn');
 const feed_refresh_btn = document.getElementById('feed_refresh_btn');
 const follow_toggle_btn = document.getElementById('follow_toggle_btn');
+const profile_message_btn = document.getElementById('profile_message_btn');
 
 const social_prev_hash_input = document.getElementById('social_prev_hash');
 const social_kind_input = document.getElementById('social_kind');
@@ -41,6 +42,7 @@ let social_http_base_url = '';
 let local_user_id = '';
 let viewed_user_id = '';
 let latest_profile_view = null;
+const prefer_client_generated_dm_conv_id = false;
 
 const set_social_status = (text) => {
   if (social_status) {
@@ -187,10 +189,11 @@ const render_profile = (profile_body) => {
   const friends = Array.isArray(profile_body.friends) ? profile_body.friends : [];
   friends.forEach((friend_user_id) => {
     const item = document.createElement('li');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = friend_user_id;
-    btn.addEventListener('click', () => {
+    item.className = 'profile_friend_row';
+    const view_btn = document.createElement('button');
+    view_btn.type = 'button';
+    view_btn.textContent = friend_user_id;
+    view_btn.addEventListener('click', () => {
       if (social_user_id_input) {
         social_user_id_input.value = friend_user_id;
       }
@@ -198,7 +201,15 @@ const render_profile = (profile_body) => {
       window.dispatchEvent(new CustomEvent('social.peer.selected', { detail: { user_id: friend_user_id } }));
       void fetch_profile_view();
     });
-    item.appendChild(btn);
+    const message_btn = document.createElement('button');
+    message_btn.type = 'button';
+    message_btn.dataset.test = 'friends-start-dm';
+    message_btn.textContent = 'Message';
+    message_btn.addEventListener('click', () => {
+      void start_dm_with_peer(friend_user_id, friend_user_id);
+    });
+    item.appendChild(view_btn);
+    item.appendChild(message_btn);
     profile_friends_list.appendChild(item);
   });
 
@@ -214,6 +225,62 @@ const render_profile = (profile_body) => {
   if (follow_toggle_btn) {
     follow_toggle_btn.textContent = 'Add Friend';
   }
+  if (profile_message_btn) {
+    const is_peer_profile = !!viewed_user_id && viewed_user_id !== local_user_id;
+    profile_message_btn.disabled = !(is_peer_profile && !!social_session_token);
+    profile_message_btn.style.display = is_peer_profile ? '' : 'none';
+  }
+};
+
+const generate_dm_conv_id_fallback = () => {
+  const random_bytes = new Uint8Array(9);
+  crypto.getRandomValues(random_bytes);
+  const token = btoa(String.fromCharCode(...random_bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return `dm_${token}`;
+};
+
+const start_dm_with_peer = async (peer_user_id, peer_display_name = '') => {
+  if (!social_session_token || !social_http_base_url) {
+    set_social_status('message requires gateway session');
+    return;
+  }
+  if (!peer_user_id || peer_user_id === local_user_id) {
+    set_social_status('select another profile to message');
+    return;
+  }
+  const payload = { peer_user_id };
+  if (prefer_client_generated_dm_conv_id) {
+    payload.conv_id = generate_dm_conv_id_fallback();
+  }
+  const response = await fetch(`${get_social_api_base()}/v1/dms/create`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${social_session_token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    set_social_status(`message failed (${response.status})`);
+    return;
+  }
+  const body = await response.json();
+  const conv_id = typeof body.conv_id === 'string' ? body.conv_id : '';
+  if (!conv_id) {
+    set_social_status('message failed (missing conv_id)');
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent('social.dm.created', {
+      detail: {
+        conv_id,
+        peer_user_id,
+        peer_display_name,
+      },
+    })
+  );
+  set_social_status(`DM ready with ${peer_display_name || peer_user_id}`);
 };
 
 const fetch_profile_view = async () => {
@@ -235,9 +302,35 @@ const render_home_feed = (feed_body) => {
   clear_children(home_feed);
   const items = Array.isArray(feed_body.items) ? feed_body.items : [];
   items.forEach((item) => {
-    const row = document.createElement('pre');
+    const row = document.createElement('div');
+    row.className = 'feed_entry';
+    const controls = document.createElement('div');
+    controls.className = 'feed_entry_controls';
+    const author_btn = document.createElement('button');
+    author_btn.type = 'button';
+    author_btn.textContent = item.user_id;
+    author_btn.addEventListener('click', () => {
+      if (social_user_id_input) {
+        social_user_id_input.value = item.user_id;
+      }
+      viewed_user_id = item.user_id;
+      void fetch_profile_view();
+    });
+    const message_btn = document.createElement('button');
+    message_btn.type = 'button';
+    message_btn.dataset.test = 'feed-start-dm';
+    message_btn.textContent = 'Message';
+    message_btn.disabled = !item.user_id || item.user_id === local_user_id;
+    message_btn.addEventListener('click', () => {
+      void start_dm_with_peer(item.user_id, item.username || item.user_id);
+    });
+    controls.appendChild(author_btn);
+    controls.appendChild(message_btn);
+    row.appendChild(controls);
+    const body = document.createElement('pre');
     const text = item && item.payload ? item.payload.value || item.payload.text || JSON.stringify(item.payload) : '';
-    row.textContent = `${item.user_id} • ${item.ts_ms}\n${text}`;
+    body.textContent = `${item.user_id} • ${item.ts_ms}\n${text}`;
+    row.appendChild(body);
     home_feed.appendChild(row);
   });
 };
@@ -339,3 +432,8 @@ if (social_publish_btn) social_publish_btn.addEventListener('click', () => void 
 if (profile_update_btn) profile_update_btn.addEventListener('click', () => void submit_profile_updates());
 if (bulletin_post_btn) bulletin_post_btn.addEventListener('click', () => void post_bulletin());
 if (follow_toggle_btn) follow_toggle_btn.addEventListener('click', () => void toggle_follow());
+if (profile_message_btn) {
+  profile_message_btn.addEventListener('click', () => {
+    void start_dm_with_peer(viewed_user_id, (latest_profile_view && latest_profile_view.username) || viewed_user_id);
+  });
+}
