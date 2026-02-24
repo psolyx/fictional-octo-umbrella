@@ -300,9 +300,69 @@
     return { kind_label, payload_len: payload_bytes.length, payload_b64 };
   };
 
+  const sensitive_log_keys = new Set([
+    'auth_token',
+    'bootstrap_token',
+    'device_credential',
+    'session_token',
+    'resume_token',
+  ]);
+
+  const redact_key = (key) => {
+    if (typeof key !== 'string') {
+      return false;
+    }
+    return sensitive_log_keys.has(key.toLowerCase());
+  };
+
+  const redact_object = (value) => {
+    if (Array.isArray(value)) {
+      return value.map((entry) => redact_object(entry));
+    }
+    if (!value || typeof value !== 'object') {
+      return value;
+    }
+    const output = {};
+    Object.keys(value).forEach((key) => {
+      if (redact_key(key)) {
+        output[key] = '[REDACTED]';
+      } else {
+        output[key] = redact_object(value[key]);
+      }
+    });
+    return output;
+  };
+
+  const redact_url = (url) => {
+    if (typeof url !== 'string' || !url) {
+      return '';
+    }
+    try {
+      const parsed = new URL(url);
+      ['auth_token', 'resume_token', 'token', 'credential'].forEach((key) => {
+        if (parsed.searchParams.has(key)) {
+          parsed.searchParams.set(key, '[REDACTED]');
+        }
+      });
+      return parsed.toString();
+    } catch (err) {
+      return url
+        .replace(/([?&](?:auth_token|resume_token|token|credential)=)([^&#\s]+)/gi, '$1[REDACTED]')
+        .replace(/(Bearer\s+)([^\s]+)/gi, '$1[REDACTED]');
+    }
+  };
+
+  const redact_line = (text) => {
+    const normalized = typeof text === 'string' ? text : String(text);
+    return normalized
+      .replace(/(Bearer\s+)([^\s]+)/gi, '$1[REDACTED]')
+      .replace(/(["']?(?:auth_token|bootstrap_token|device_credential|session_token|resume_token|token|credential)["']?\s*[:=]\s*["']?)([^"'\s,}]+)/gi, '$1[REDACTED]')
+      .replace(/([?&](?:auth_token|resume_token|token|credential)=)([^&#\s]+)/gi, '$1[REDACTED]');
+  };
+
   const append_log = (line) => {
     const now = new Date().toISOString();
-    debug_log.value += `[${now}] ${line}\n`;
+    debug_log.value += `[${now}] ${redact_line(line)}\n`;
     debug_log.scrollTop = debug_log.scrollHeight;
   };
 
@@ -1721,7 +1781,7 @@
       }
       this.gateway_url = url;
       this.pending_frames = [];
-      append_log(`connecting to ${url}`);
+      append_log(`connecting to ${redact_url(url)}`);
       this.ws = new WebSocket(url);
       this.ws.addEventListener('open', () => {
         connection_status.textContent = 'connected';
@@ -1896,7 +1956,7 @@
         return;
       }
       if (message.t === 'conv.acked') {
-        append_log(`conv.acked ${JSON.stringify(body)}`);
+        append_log(`conv.acked ${JSON.stringify(redact_object(body))}`);
         advance_cursor(body.conv_id, body.seq).catch((err) =>
           append_log(`failed to persist conv.acked cursor: ${err.message}`)
         );
@@ -1915,10 +1975,10 @@
             show_replay_window_banner(active_conv_id, details);
           }
         }
-        append_log(`error ${JSON.stringify(body)}`);
+        append_log(`error ${JSON.stringify(redact_object(body))}`);
         return;
       }
-      append_log(`received ${message.t || 'unknown'}: ${JSON.stringify(body)}`);
+      append_log(`received ${message.t || 'unknown'}: ${JSON.stringify(redact_object(body))}`);
     }
   }
 

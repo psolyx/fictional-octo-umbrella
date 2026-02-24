@@ -227,6 +227,17 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("replay_window_banner", self.index_html)
         self.assertIn("replay_window_resubscribe_btn", self.index_html)
 
+
+    def test_web_secret_redaction_contracts(self):
+        self.assertIn("const redact_object =", self.gateway_ws_client)
+        self.assertIn("const redact_url =", self.gateway_ws_client)
+        self.assertIn("[REDACTED]", self.gateway_ws_client)
+        self.assertRegex(
+            self.gateway_ws_client,
+            r"received \${message\.t \|\| 'unknown'}: \${JSON\.stringify\(redact_object\(body\)\)}",
+        )
+        self.assertIn("connecting to ${redact_url(url)}", self.gateway_ws_client)
+
     def test_accessibility_keyboard_contract_markers(self):
         self.assertIn(":focus-visible", self.styles_css)
         self.assertIn("sr-only", self.styles_css)

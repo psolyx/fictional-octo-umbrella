@@ -378,3 +378,11 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - No Node/npm-based UI framework adoption.
 - No federation-specific UX guarantees beyond existing v1 constraints.
 - No full visual polish requirements beyond functional production gates.
+
+
+## Secret redaction (Phase 5.2 baseline)
+- Passive diagnostics (web debug log + TUI status/transcript lines) must always redact high-value secrets.
+- Keys redacted by default: `auth_token`, `bootstrap_token`, `device_credential`, `session_token`, `resume_token` (and common `token`/`credential` query aliases).
+- Redaction applies to structured payload rendering and free-form lines (for example `Bearer ...` text).
+- Session/resume values may only be intentionally revealed via explicit export/reveal UX actions with user-facing warnings; passive status/log surfaces must not display raw values.
+- This is tracked as Phase 5.2 hardening evidence under baseline security checklist themes (ASVS-style logging/data-protection expectations).

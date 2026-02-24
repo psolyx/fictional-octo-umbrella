@@ -18,6 +18,7 @@ from cli_app.identity_store import (
     load_or_create_identity,
     rotate_device,
 )
+from cli_app.redact import redact_text
 
 DEFAULT_SETTINGS_FILE = Path.home() / ".mls_tui_state.json"
 MODE_DM_CLIENT = "DM_CLIENT"
@@ -575,7 +576,7 @@ class TuiModel:
                     conv = item
                     break
         transcript = conv.setdefault("transcript", [])
-        transcript.append({"ts": time.time(), "dir": direction, "text": text})
+        transcript.append({"ts": time.time(), "dir": direction, "text": redact_text(text)})
         if len(transcript) > self.max_log_lines:
             conv["transcript"] = transcript[-self.max_log_lines :]
         self.transcript_scroll = 0
@@ -1168,7 +1169,7 @@ class TuiModel:
         )
 
     def set_presence_status(self, text: str) -> None:
-        self.presence_status_line = text
+        self.presence_status_line = redact_text(text)
 
     def ensure_presence_contact(self, user_id: str) -> None:
         if not user_id:
