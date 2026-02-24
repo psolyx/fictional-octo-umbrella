@@ -35,6 +35,11 @@ class TestTuiAccountContracts(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
 
+    def test_tui_redaction_hooks_present(self):
+        self.assertIn("from cli_app.redact import redact_text", self.tui_app)
+        self.assertIn("model.social_status_line = redact_text(text)", self.tui_app)
+        self.assertIn("redact_text(text)", self.tui_model)
+
 
 if __name__ == "__main__":
     unittest.main()

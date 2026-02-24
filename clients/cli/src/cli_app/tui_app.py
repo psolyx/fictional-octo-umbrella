@@ -24,6 +24,7 @@ from typing import Callable, Dict, Iterable, Optional
 import aiohttp
 
 from cli_app import dm_envelope, gateway_client, gateway_store, social
+from cli_app.redact import redact_text
 from cli_app import identity_store, mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
 
@@ -984,11 +985,11 @@ def _invoke(func: Callable[[], int]) -> tuple[int, list[str]]:
 
 def _append_system_message(model: TuiModel, text: str) -> None:
     conv_id = model.get_selected_conv_id()
-    model.append_message(conv_id, "sys", text)
+    model.append_message(conv_id, "sys", redact_text(text))
 
 
 def _set_social_status(model: TuiModel, text: str) -> None:
-    model.social_status_line = text
+    model.social_status_line = redact_text(text)
 
 
 def _load_social_base_url(model: TuiModel) -> str | None:
