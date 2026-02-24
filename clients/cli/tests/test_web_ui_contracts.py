@@ -202,6 +202,19 @@ class TestWebUiContracts(unittest.TestCase):
         )
         self.assertIn("set_commit_echo_state('received'", window)
 
+    def test_presence_contracts(self):
+        for marker in (
+            '/v1/presence/lease',
+            '/v1/presence/renew',
+            '/v1/presence/watch',
+            '/v1/presence/status',
+            'presence.update',
+            'data-test="presence-indicator"',
+            'Presence enabled',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.gateway_ws_client if marker != 'Presence enabled' else self.index_html)
+
 
     def test_replay_window_error_contracts(self):
         self.assertIn("replay_window_exceeded", self.gateway_ws_client)

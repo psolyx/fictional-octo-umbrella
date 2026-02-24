@@ -358,6 +358,108 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 429)
 
+    async def test_presence_status_requires_auth(self):
+        clock = FakeClock()
+        presence = Presence(PresenceConfig(), now_func=clock.now)
+        await self._setup_app(presence)
+
+        resp = await self.client.post('/v1/presence/status', json={'contacts': ['target']})
+        self.assertEqual(resp.status, 401)
+
+    async def test_presence_status_unavailable_when_not_mutual(self):
+        clock = FakeClock()
+        presence = Presence(PresenceConfig(min_ttl_seconds=1), now_func=clock.now)
+        await self._setup_app(presence)
+        watcher_session = await self._create_session('watcher', 'w1')
+        target_session = await self._create_session('target', 't1')
+
+        await self.client.post(
+            '/v1/presence/watch',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        await self.client.post(
+            '/v1/presence/lease',
+            json={'device_id': 't1', 'ttl_seconds': 30},
+            headers={'Authorization': f'Bearer {target_session.session_token}'},
+        )
+
+        resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        body = await resp.json()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body['statuses'][0]['status'], 'unavailable')
+
+    async def test_presence_status_online_offline_and_blocked(self):
+        clock = FakeClock()
+        presence = Presence(PresenceConfig(min_ttl_seconds=1), now_func=clock.now)
+        await self._setup_app(presence)
+        watcher_session = await self._create_session('watcher', 'w1')
+        target_session = await self._create_session('target', 't1')
+
+        for user_id, token in (("watcher", watcher_session.session_token), ("target", target_session.session_token)):
+            peer = 'target' if user_id == 'watcher' else 'watcher'
+            await self.client.post(
+                '/v1/presence/watch',
+                json={'contacts': [peer]},
+                headers={'Authorization': f'Bearer {token}'},
+            )
+
+        await self.client.post(
+            '/v1/presence/lease',
+            json={'device_id': 't1', 'ttl_seconds': 2},
+            headers={'Authorization': f'Bearer {target_session.session_token}'},
+        )
+        resp_online = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        online_body = await resp_online.json()
+        self.assertEqual(online_body['statuses'][0]['status'], 'online')
+        self.assertEqual(online_body['statuses'][0]['last_seen_bucket'], 'now')
+
+        clock.advance(6)
+        presence.expire()
+        resp_offline = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        offline_body = await resp_offline.json()
+        self.assertEqual(offline_body['statuses'][0]['status'], 'offline')
+        self.assertIn(offline_body['statuses'][0]['last_seen_bucket'], {'5m', 'now'})
+
+        await self.client.post(
+            '/v1/presence/block',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        resp_blocked = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': ['target']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        blocked_body = await resp_blocked.json()
+        self.assertEqual(blocked_body['statuses'][0]['status'], 'unavailable')
+
+    async def test_presence_status_deterministic_ordering(self):
+        clock = FakeClock()
+        presence = Presence(PresenceConfig(), now_func=clock.now)
+        await self._setup_app(presence)
+        watcher_session = await self._create_session('watcher', 'w1')
+
+        resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': ['u_z', 'u_a', 'u_m', 'u_a']},
+            headers={'Authorization': f'Bearer {watcher_session.session_token}'},
+        )
+        body = await resp.json()
+        self.assertEqual([item['user_id'] for item in body['statuses']], ['u_a', 'u_m', 'u_z'])
+
 
 if __name__ == "__main__":
     unittest.main()

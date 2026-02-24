@@ -29,6 +29,8 @@ from cli_app import identity_store, mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
 
 
+PRESENCE_STATES = ("online", "offline", "unavailable")
+
 def _normalize_key(key: int) -> tuple[str, str | None]:
     if key in (curses.KEY_BTAB, 353):  # shift-tab variations
         return "SHIFT_TAB", None
@@ -249,9 +251,12 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
         label = conv.get("label", conv.get("name", ""))
+        presence_status = conv.get("presence_status", "")
         unread_count = int(conv.get("unread_count", "0") or "0")
         if unread_count > 0:
             label = f"{label} [unread {unread_count}]"
+        if presence_status:
+            label = f"{label} [{presence_status}]"
         subtitle = conv.get("last_preview", "") or conv.get("peer_user_id", "")
         _render_text(stdscr, header_offset + 1 + idx * 2, 2, label, attr)
         if subtitle and header_offset + 2 + idx * 2 < max_y:
@@ -368,7 +373,9 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     if render.room_roster_active:
         overlay_lines = ["Room roster", "A/Enter: Add selected to modal members", "Esc: close"]
         for member in render.room_roster_members:
-            overlay_lines.append(f"{member.get('role', '')} {member.get('user_id', '')}")
+            overlay_lines.append(
+                f"{member.get('role', '')} {member.get('user_id', '')} {member.get('presence_status', 'unavailable')}"
+            )
         box_width = min(max_x - 4, 88)
         box_height = min(max_y - 2, len(overlay_lines) + 2)
         box_top = max(1, (max_y - box_height) // 2)
@@ -440,6 +447,7 @@ def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
         label = conv.get("label", conv.get("name", ""))
+        presence_status = conv.get("presence_status", "")
         _render_text(stdscr, header_offset + 1 + idx, 2, label, attr)
 
     action_start = header_offset + 2 + len(render.dm_conversations)
@@ -1319,6 +1327,14 @@ def _presence_unblock(
     return _presence_post(base_url, session_token, "/v1/presence/unblock", {"contacts": contacts})
 
 
+def _presence_status(
+    base_url: str,
+    session_token: str,
+    contacts: list[str],
+) -> Dict[str, object]:
+    return _presence_post(base_url, session_token, "/v1/presence/status", {"contacts": contacts})
+
+
 def _start_presence_thread(
     base_url: str,
     identity: object,
@@ -1743,6 +1759,7 @@ def main() -> int:
         presence_last_lease_attempt: float = 0.0
         presence_ttl_seconds = 120
         presence_renew_margin_seconds = 20
+        presence_watched_contacts: set[str] = set()
 
         def _stop_tail_threads() -> None:
             for tail in tail_threads.values():
@@ -1995,6 +2012,48 @@ def main() -> int:
         def _set_presence_status(text: str) -> None:
             model.set_presence_status(text)
 
+        def _presence_sync_contacts(contacts: list[str]) -> None:
+            if session_state is None:
+                return
+            sorted_contacts = sorted({contact for contact in contacts if contact and contact != model.identity.user_id})
+            if not sorted_contacts:
+                return
+            incremental = [contact for contact in sorted_contacts if contact not in presence_watched_contacts]
+            for start in range(0, len(incremental), 64):
+                chunk = incremental[start : start + 64]
+                if not chunk:
+                    continue
+                _presence_watch(session_state.base_url, session_state.session_token, chunk)
+                for user_id in chunk:
+                    presence_watched_contacts.add(user_id)
+            statuses_payload = _presence_status(session_state.base_url, session_state.session_token, sorted_contacts)
+            statuses = statuses_payload.get("statuses") if isinstance(statuses_payload, dict) else []
+            if isinstance(statuses, list):
+                for status_entry in statuses:
+                    if not isinstance(status_entry, dict):
+                        continue
+                    user_id = str(status_entry.get("user_id", "")).strip()
+                    status = str(status_entry.get("status", "unavailable"))
+                    expires_at = status_entry.get("expires_at") if isinstance(status_entry.get("expires_at"), int) else None
+                    bucket = status_entry.get("last_seen_bucket") if isinstance(status_entry.get("last_seen_bucket"), str) else None
+                    model.update_presence_entry(user_id, status, expires_at, bucket)
+
+        def _auto_watch_from_conversations() -> None:
+            contacts: list[str] = []
+            for conv in model.dm_conversations:
+                peer_user_id = str(conv.get("peer_user_id", "")).strip()
+                if peer_user_id:
+                    contacts.append(peer_user_id)
+            _presence_sync_contacts(contacts)
+
+        def _auto_watch_from_room_roster() -> None:
+            roster_contacts = [
+                str(member.get("user_id", "")).strip()
+                for member in model.room_roster_members[:64]
+                if isinstance(member, dict)
+            ]
+            _presence_sync_contacts(roster_contacts)
+
         def _execute_presence_prompt(action: str, user_id: str) -> None:
             if not user_id:
                 _set_presence_status("User id is required.")
@@ -2197,6 +2256,7 @@ def main() -> int:
                 if model.room_roster_active:
                     model.focus_area = "room_roster"
                     _refresh_room_roster(model, session_state)
+                    _auto_watch_from_room_roster()
                 else:
                     model.focus_area = "room_modal" if model.room_modal_active else "conversations"
             if action == "room_roster_add_selected":
@@ -2280,6 +2340,7 @@ def main() -> int:
                 follow_up = _submit_room_modal(model, session_state)
                 if follow_up == "conv_refresh":
                     _refresh_conversations(model, session_state)
+                    _auto_watch_from_conversations()
                     _stop_tail_threads()
                     _ensure_tail_threads()
             if action == "send":

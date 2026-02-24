@@ -74,6 +74,15 @@
     <ul id="conversations_list" role="listbox" aria-label="Conversations"></ul>
   </fieldset>
 
+
+  <fieldset>
+    <legend>Presence</legend>
+    <label><input type="checkbox" id="presence_enabled_toggle" checked /> Presence enabled</label>
+    <label><input type="checkbox" id="presence_invisible_toggle" /> Invisible mode</label>
+    <p id="presence_status_line" aria-live="polite">presence: idle</p>
+    <p id="selected_presence_status" data-test="presence-indicator">Selected conversation presence: unavailable</p>
+  </fieldset>
+
   <fieldset>
     <legend>Conversation controls</legend>
     <label>

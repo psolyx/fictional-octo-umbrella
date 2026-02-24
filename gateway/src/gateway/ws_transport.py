@@ -626,6 +626,23 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
 
 
+async def handle_presence_status(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    try:
+        body = await request.json()
+    except Exception:
+        return _with_no_store(_invalid_request("malformed json"))
+
+    contacts = body.get("contacts")
+    if not isinstance(contacts, list) or any(not isinstance(c, str) for c in contacts):
+        return _with_no_store(_invalid_request("contacts must be a list of user_ids"))
+    statuses = runtime.presence.status_for_viewer(session.user_id, contacts)
+    return _no_store_response({"statuses": statuses})
+
+
 async def handle_inbox(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1301,6 +1318,7 @@ def create_app(
     app.router.add_post("/v1/presence/unwatch", handle_presence_unwatch)
     app.router.add_post("/v1/presence/block", handle_presence_block)
     app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
+    app.router.add_post("/v1/presence/status", handle_presence_status)
     app.router.add_post("/v1/rooms/create", handle_room_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)

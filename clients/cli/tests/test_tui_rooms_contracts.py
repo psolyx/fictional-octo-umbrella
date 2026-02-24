@@ -72,6 +72,18 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('"Keybindings"', self.tui_app)
         self.assertIn('"Press Esc to close (or q)"', self.tui_app)
 
+    def test_tui_presence_room_markers(self):
+        for marker in (
+            '/v1/presence/watch',
+            '/v1/presence/status',
+            'presence.update',
+            'online',
+            'offline',
+            'unavailable',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.tui_app)
+
 
 if __name__ == "__main__":
     unittest.main()
