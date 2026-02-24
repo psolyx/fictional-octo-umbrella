@@ -187,6 +187,11 @@ class TestWebUiContracts(unittest.TestCase):
                 self.assertIn(marker, self.index_html)
         self.assertIn("/v1/social/profile", self.social_ui)
         self.assertIn("/v1/social/feed", self.social_ui)
+        self.assertIn("/v1/dms/create", self.social_ui)
+        self.assertIn('id="profile_message_btn"', self.index_html)
+        self.assertIn('data-test="start-dm"', self.index_html)
+        self.assertIn("friends-start-dm", self.social_ui)
+        self.assertIn("feed-start-dm", self.social_ui)
         self.assertIn("Add Friend", self.social_ui)
         self.assertIn("Remove Friend", self.social_ui)
 

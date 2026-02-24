@@ -183,6 +183,18 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
   - Replay window exceeded is surfaced as explicit pruned-history state.
   - Recovery action is available without reconfiguring account/session.
 
+### DM creation happy-path
+- Web:
+  1. Open a peer profile (or friend/feed author card).
+  2. Activate `Message`.
+  3. Client calls `/v1/dms/create` with `peer_user_id` and opens the returned conversation.
+  4. Conversation appears with peer label and `(no messages yet)` preview, then send first message.
+- TUI:
+  1. Open social profile/feed and highlight a peer/friend/feed entry.
+  2. Press `D` (Start DM).
+  3. Client calls `/v1/dms/create`, navigates to conversations, and selects the DM.
+  4. Send first message from compose.
+
 ### Rooms acceptance contract
 - Preconditions:
   - Authenticated session exists.

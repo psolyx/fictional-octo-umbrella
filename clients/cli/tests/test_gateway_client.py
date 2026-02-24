@@ -258,6 +258,20 @@ def test_room_create_posts_expected_payload():
     assert response == {"status": "ok"}
 
 
+def test_dms_create_posts_expected_payload_with_generated_conv_id_support():
+    def fake_urlopen(request):
+        assert request.full_url == "https://gw.test/v1/dms/create"
+        assert request.get_header("Authorization") == "Bearer st"
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload == {"peer_user_id": "u_456", "conv_id": "dm_123"}
+        return DummyResponse(b'{"status":"ok","conv_id":"dm_123"}')
+
+    with mock.patch("urllib.request.urlopen", fake_urlopen):
+        response = gateway_client.dms_create("https://gw.test", "st", "u_456", "dm_123")
+
+    assert response == {"status": "ok", "conv_id": "dm_123"}
+
+
 def test_load_session_uses_explicit_path():
     session_path = Path("session.json")
     with mock.patch("cli_app.mls_poc.gateway_store.load_session") as load_session:

@@ -239,7 +239,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | Start DM (D) | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -292,7 +292,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
     if render.social_active:
         help_line = (
-            f"SOCIAL {render.social_view_mode} ({render.social_target}) — v profile, f feed, r refresh, p post, e edit, a/u friend, 1/2 target, n more, s section"
+            f"SOCIAL {render.social_view_mode} ({render.social_target}) — v profile, f feed, r refresh, p post, e edit, a/u friend, 1/2 target, n more, s section, D start DM"
         )
         _render_text(stdscr, transcript_top - 1, right_start + 2, help_line)
         if render.social_view_mode == "profile":
@@ -407,6 +407,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout",
             "Conversations: L refresh, U next unread, Ctrl-N new DM",
+            "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, + promote, - demote",
             "Messages: Enter send, R retry failed",
             "Press Esc to close (or q)",
@@ -1545,16 +1546,27 @@ def _create_new_dm(
     if not peer_user_id:
         _append_system_message(model, "New DM requires peer_user_id.")
         return
-    conv_id = conv_id.strip() if conv_id.strip() else f"dm_{secrets.token_urlsafe(8)}"
+    conv_id = conv_id.strip() if conv_id.strip() else ""
     name = name.strip() if name.strip() else f"dm {_short_user_label(peer_user_id)}"
-    state_dir = state_dir.strip() if state_dir.strip() else _default_state_dir_for_conv(conv_id)
+    state_dir = state_dir.strip()
     response = gateway_client.keypackages_fetch(session.base_url, session.session_token, peer_user_id, 1)
     keypackages = response.get("keypackages", [])
     if not keypackages:
         _append_system_message(model, f"No KeyPackages available for user {peer_user_id}.")
         return
     peer_kp = str(keypackages[0])
-    gateway_client.room_create(session.base_url, session.session_token, conv_id, [peer_user_id])
+    create_response = gateway_client.dms_create(
+        session.base_url,
+        session.session_token,
+        peer_user_id,
+        conv_id if conv_id else None,
+    )
+    conv_id = str(create_response.get("conv_id", "")).strip()
+    if not conv_id:
+        _append_system_message(model, "DM create failed: missing conv_id.")
+        return
+    if not state_dir:
+        state_dir = _default_state_dir_for_conv(conv_id)
     group_id = _generate_group_id_b64()
     output = mls_poc._run_harness_capture(
         "dm-init",
@@ -1579,6 +1591,53 @@ def _create_new_dm(
     model.add_dm(peer_user_id, name, state_dir, conv_id)
     _ensure_runtime_state(runtime, conv_id, state_dir)
     model.append_message(conv_id, "sys", "DM created; waiting for echo.")
+
+
+def _selected_social_dm_target(model: TuiModel) -> tuple[str, str]:
+    if model.social_view_mode == "feed":
+        if not model.feed_items:
+            return "", ""
+        idx = min(max(0, model.social_selected_idx), len(model.feed_items) - 1)
+        item = model.feed_items[idx]
+        if not isinstance(item, dict):
+            return "", ""
+        peer_user_id = str(item.get("author") or item.get("user_id") or "").strip()
+        peer_name = str(item.get("username") or peer_user_id).strip()
+        return peer_user_id, peer_name
+
+    if model.social_view_mode == "profile":
+        if model.profile_selected_section == "friends":
+            friends = model.profile_data.get("friends", []) if isinstance(model.profile_data, dict) else []
+            if not isinstance(friends, list) or not friends:
+                return "", ""
+            idx = min(max(0, model.social_selected_idx), len(friends) - 1)
+            friend_user_id = str(friends[idx]).strip()
+            return friend_user_id, friend_user_id
+        peer_user_id = str(model.profile_user_id).strip()
+        profile = model.profile_data if isinstance(model.profile_data, dict) else {}
+        peer_name = str(profile.get("username") or peer_user_id).strip()
+        return peer_user_id, peer_name
+
+    return "", ""
+
+
+def _start_dm_from_social(
+    model: TuiModel,
+    session: SessionState | None,
+    runtime: dict[str, DmRuntime],
+) -> None:
+    peer_user_id, peer_name = _selected_social_dm_target(model)
+    if not peer_user_id:
+        _set_social_status(model, "Select a profile/friend/feed author to message.")
+        return
+    if peer_user_id == model.identity.social_public_key_b64:
+        _set_social_status(model, "Start DM requires another user.")
+        return
+    _create_new_dm(model, session, runtime, peer_user_id, peer_name, "", "")
+    _refresh_conversations(model, session)
+    model.social_active = False
+    model.focus_area = "conversations"
+    _set_social_status(model, f"DM started with {peer_name or peer_user_id}.")
 
 
 
@@ -2315,6 +2374,9 @@ def main() -> int:
                 _follow_toggle(True)
             if action == "social_follow_remove":
                 _follow_toggle(False)
+            if action == "social_start_dm":
+                _start_dm_from_social(model, session_state, runtime_state)
+                _ensure_tail_threads()
             if action == "create_dm":
                 new_dm = model.render().new_dm_fields
                 _create_new_dm(

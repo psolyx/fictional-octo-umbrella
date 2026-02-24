@@ -2685,6 +2685,12 @@
     options[next_index].focus();
   };
 
+  const focus_compose_box = () => {
+    if (ciphertext_input) {
+      ciphertext_input.focus();
+    }
+  };
+
   const maybe_dispatch_conv_selected = (value) => {
     const conv_id = normalize_conv_id(value);
     if (conv_id === last_selected_conv_id) {
@@ -2719,6 +2725,35 @@
         rooms_members_input.value = prefill_members;
       }
     }
+  });
+
+  window.addEventListener('social.dm.created', (event) => {
+    const detail = event && event.detail ? event.detail : {};
+    const conv_id = typeof detail.conv_id === 'string' ? normalize_conv_id(detail.conv_id) : '';
+    if (!conv_id) {
+      return;
+    }
+    const peer_display_name = typeof detail.peer_display_name === 'string' ? detail.peer_display_name.trim() : '';
+    const peer_user_id = typeof detail.peer_user_id === 'string' ? detail.peer_user_id.trim() : '';
+    const label_value = peer_display_name || peer_user_id;
+    const meta = ensure_conv_meta(conv_id);
+    if (meta) {
+      if (label_value) {
+        meta.label = label_value;
+      }
+      meta.last_preview = '(no messages yet)';
+      meta.last_ts_ms = now_ms();
+      persist_conv_meta().catch((err) => append_log(`failed to persist conv metadata: ${err.message}`));
+    }
+    refresh_conversations()
+      .then(() => {
+        conv_id_input.value = conv_id;
+        maybe_dispatch_conv_selected(conv_id);
+        prefill_from_seq().catch((err) => append_log(`failed to prefill from_seq: ${err.message}`));
+        subscribe_btn.click();
+        focus_compose_box();
+      })
+      .catch((err) => set_conversations_status(`status: error (${err.message || 'fetch failed'})`));
   });
 
   const handle_gateway_subscribe = (event) => {
