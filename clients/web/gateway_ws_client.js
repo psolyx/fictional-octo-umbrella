@@ -7,6 +7,10 @@
   const replay_window_text = document.getElementById('replay_window_text');
   const replay_window_resubscribe_btn = document.getElementById('replay_window_resubscribe_btn');
   const live_status = document.getElementById('live_status');
+  const presence_enabled_toggle = document.getElementById('presence_enabled_toggle');
+  const presence_invisible_toggle = document.getElementById('presence_invisible_toggle');
+  const presence_status_line = document.getElementById('presence_status_line');
+  const selected_presence_status = document.getElementById('selected_presence_status');
 
   const gateway_url_input = document.getElementById('gateway_url');
   const bootstrap_token_input = document.getElementById('bootstrap_token');
@@ -48,6 +52,12 @@
   let conversations_session_token = '';
   let conversations_http_base_url = '';
   let conversations_user_id = '';
+  let presence_map_by_user_id = {};
+  let presence_watched_contacts = new Set();
+  let presence_known_dm_peers = new Set();
+  let presence_known_room_members = new Set();
+  let presence_lease_expires_at = 0;
+  let presence_renew_timer = null;
   let dm_bridge_last_env_text = null;
   let dm_bridge_copy_btn = null;
   let dm_bridge_cli_block_input = null;
@@ -491,6 +501,123 @@
     );
   };
 
+  const set_presence_status_text = (value) => {
+    if (presence_status_line) {
+      presence_status_line.textContent = value;
+    }
+    announce_status(value);
+  };
+
+  const status_for_user_id = (user_id) => {
+    const entry = presence_map_by_user_id[user_id];
+    if (!entry) {
+      return { status: 'unavailable', last_seen_bucket: '7d', expires_at: 0 };
+    }
+    return entry;
+  };
+
+  const render_presence_indicator = (user_id) => {
+    const entry = status_for_user_id(user_id);
+    const status = entry.status || 'unavailable';
+    const bucket = entry.last_seen_bucket || '7d';
+    const dot_class = `presence-dot presence-${status}`;
+    return `<span data-test="presence-indicator" aria-label="${status} ${bucket}"><span class="${dot_class}"></span>${status} (${bucket})</span>`;
+  };
+
+  const post_presence_json = async (path, payload) => {
+    if (!conversations_http_base_url || !conversations_session_token) {
+      return null;
+    }
+    const response = await fetch(`${conversations_http_base_url}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${conversations_session_token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new Error(`presence ${path} http ${response.status}`);
+    }
+    return response.json();
+  };
+
+  const update_selected_presence_status = (members) => {
+    if (!selected_presence_status) {
+      return;
+    }
+    const peers = Array.isArray(members) ? members.filter((member) => member !== conversations_user_id) : [];
+    if (peers.length !== 1) {
+      selected_presence_status.textContent = 'Selected conversation presence: room';
+      return;
+    }
+    const peer = peers[0];
+    selected_presence_status.textContent = `Selected conversation presence: ${peer} ${render_presence_indicator(peer)}`;
+  };
+
+  const watch_presence_contacts = async (contacts) => {
+    const sorted_contacts = Array.from(new Set((Array.isArray(contacts) ? contacts : []).filter((contact) => typeof contact === 'string' && contact && contact !== conversations_user_id))).sort();
+    if (!sorted_contacts.length) {
+      return;
+    }
+    const incremental = sorted_contacts.filter((contact) => !presence_watched_contacts.has(contact));
+    if (incremental.length) {
+      for (let index = 0; index < incremental.length; index += 64) {
+        const chunk = incremental.slice(index, index + 64).sort();
+        await post_presence_json('/v1/presence/watch', { contacts: chunk });
+        chunk.forEach((contact) => presence_watched_contacts.add(contact));
+      }
+    }
+    const statuses_response = await post_presence_json('/v1/presence/status', { contacts: sorted_contacts });
+    const statuses = statuses_response && Array.isArray(statuses_response.statuses) ? statuses_response.statuses : [];
+    statuses.forEach((status_entry) => {
+      if (status_entry && typeof status_entry.user_id === 'string') {
+        presence_map_by_user_id[status_entry.user_id] = {
+          status: typeof status_entry.status === 'string' ? status_entry.status : 'unavailable',
+          last_seen_bucket: typeof status_entry.last_seen_bucket === 'string' ? status_entry.last_seen_bucket : '7d',
+          expires_at: Number.isInteger(status_entry.expires_at) ? status_entry.expires_at : 0,
+        };
+      }
+    });
+  };
+
+  const tick_presence_lease = async () => {
+    const active_device_id = device_id_input && device_id_input.value ? device_id_input.value.trim() : '';
+    if (!presence_enabled_toggle || !presence_enabled_toggle.checked || !conversations_session_token || !active_device_id) {
+      return;
+    }
+    const now_ms = Date.now();
+    const payload = {
+      device_id: active_device_id,
+      ttl_seconds: 120,
+      invisible: Boolean(presence_invisible_toggle && presence_invisible_toggle.checked),
+    };
+    if (!presence_lease_expires_at || now_ms >= presence_lease_expires_at - 30000) {
+      const path = presence_lease_expires_at ? '/v1/presence/renew' : '/v1/presence/lease';
+      const lease_payload = await post_presence_json(path, payload);
+      if (lease_payload && Number.isInteger(lease_payload.expires_at)) {
+        presence_lease_expires_at = lease_payload.expires_at;
+      }
+      set_presence_status_text(`presence: ${path === '/v1/presence/lease' ? 'lease' : 'renew'} ok`);
+    }
+  };
+
+  const ensure_presence_loop = () => {
+    if (presence_renew_timer) {
+      window.clearInterval(presence_renew_timer);
+      presence_renew_timer = null;
+    }
+    presence_lease_expires_at = 0;
+    if (!presence_enabled_toggle || !presence_enabled_toggle.checked) {
+      set_presence_status_text('presence: disabled');
+      return;
+    }
+    tick_presence_lease().catch((err) => set_presence_status_text(`presence: error (${err.message || 'lease failed'})`));
+    presence_renew_timer = window.setInterval(() => {
+      tick_presence_lease().catch((err) => set_presence_status_text(`presence: error (${err.message || 'renew failed'})`));
+    }, 5000);
+  };
+
   const set_conversations_status = (value) => {
     if (conversations_status) {
       conversations_status.textContent = value;
@@ -563,6 +690,7 @@
       const desired_from_seq = Math.max(item.cursor_next_seq, item.earliest_seq || 1);
       from_seq_input.value = String(desired_from_seq);
       maybe_dispatch_conv_selected(item.conv_id);
+      update_selected_presence_status(members);
       window.dispatchEvent(
         new CustomEvent('conv.selected', {
           detail: {
@@ -604,7 +732,14 @@
         status_markers.push('pruned');
       }
       const status_suffix = status_markers.length ? ` ${status_markers.join(' ')}` : '';
-      conversation_btn.textContent = `${(meta && meta.label) || default_label} role=${role} members=${member_count}${peer_label}${status_suffix}`;
+      conversation_btn.innerHTML = `${(meta && meta.label) || default_label} role=${role} members=${member_count}${peer_label}${status_suffix}`;
+      if (member_count === 2 && members.length > 0) {
+        const other_member = members.find((member) => member !== conversations_user_id) || members[0];
+        if (other_member) {
+          conversation_btn.innerHTML += ` ${render_presence_indicator(other_member)}`;
+          presence_known_dm_peers.add(other_member);
+        }
+      }
       const preview_line = document.createElement('div');
       preview_line.dataset.test = 'conv-preview';
       const preview_value = meta && meta.last_preview ? meta.last_preview : '(no messages yet)';
@@ -686,6 +821,7 @@
       const payload = await response.json();
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       await render_conversations(items);
+      await watch_presence_contacts(Array.from(presence_known_dm_peers));
       set_conversations_status(`status: loaded ${items.length}`);
     } catch (err) {
       set_conversations_status(`status: error (${err.message || 'fetch failed'})`);
@@ -778,7 +914,7 @@
       checkbox.setAttribute('data-user_id', member.user_id);
       const label = document.createElement('label');
       label.appendChild(checkbox);
-      label.append(` ${member.role} ${member.user_id}`);
+      label.insertAdjacentHTML('beforeend', ` ${member.role} ${member.user_id} ${render_presence_indicator(member.user_id)}`);
       row.appendChild(label);
       rooms_roster_list.appendChild(row);
     });
@@ -827,6 +963,8 @@
       }
       const members = payload && Array.isArray(payload.members) ? payload.members : [];
       render_rooms_roster(members);
+      presence_known_room_members = new Set(members.map((member) => member && member.user_id).filter((user_id) => typeof user_id === 'string' && user_id !== conversations_user_id).slice(0, 64));
+      await watch_presence_contacts(Array.from(presence_known_room_members));
       set_rooms_status(`status: roster loaded ${members.length}`);
     } catch (err) {
       set_rooms_status(`status: error (roster: ${err.message || 'request failed'})`);
@@ -1955,6 +2093,22 @@
         );
         return;
       }
+      if (message.t === 'presence.update') {
+        const user_id = typeof body.user_id === 'string' ? body.user_id : '';
+        if (user_id) {
+          presence_map_by_user_id[user_id] = {
+            status: typeof body.status === 'string' ? body.status : 'offline',
+            last_seen_bucket: typeof body.last_seen_bucket === 'string' ? body.last_seen_bucket : '7d',
+            expires_at: Number.isInteger(body.expires_at) ? body.expires_at : 0,
+          };
+          refresh_conversations().catch(() => {});
+          if (rooms_roster_list && rooms_roster_list.children.length) {
+            refresh_rooms_roster().catch(() => {});
+          }
+          announce_status(`presence.update ${user_id} ${presence_map_by_user_id[user_id].status}`);
+        }
+        return;
+      }
       if (message.t === 'conv.acked') {
         append_log(`conv.acked ${JSON.stringify(redact_object(body))}`);
         advance_cursor(body.conv_id, body.seq).catch((err) =>
@@ -2593,6 +2747,19 @@
       .catch((err) => append_log(`gateway.subscribe cursor read failed: ${err.message}`));
   };
 
+
+  if (presence_enabled_toggle) {
+    presence_enabled_toggle.addEventListener('change', () => {
+      ensure_presence_loop();
+    });
+  }
+  if (presence_invisible_toggle) {
+    presence_invisible_toggle.addEventListener('change', () => {
+      presence_lease_expires_at = 0;
+      ensure_presence_loop();
+    });
+  }
+
   if (conversations_refresh_btn) {
     conversations_refresh_btn.addEventListener('click', () => {
       refresh_conversations().catch((err) =>
@@ -2738,6 +2905,7 @@
     conversations_session_token = rooms_session_token;
     conversations_http_base_url = rooms_http_base_url;
     conversations_user_id = typeof detail.user_id === 'string' ? detail.user_id : '';
+    ensure_presence_loop();
     refresh_conversations().catch((err) =>
       set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
     );

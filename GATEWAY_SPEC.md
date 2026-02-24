@@ -664,6 +664,28 @@ Semantics match WS frames.
 - “Invisible mode” hides a user from watchers except whitelisted contacts; server MUST suppress updates accordingly.
 - `last_seen_bucket` is coarse (e.g., `now`, `5m`, `1h`, `1d`, `7d`).
 
+### 10.5 Status bootstrap (privacy-safe)
+- Endpoint: `POST /v1/presence/status`
+- Body:
+  ```json
+  {
+    "contacts": ["u_01F...", "u_02F..."]
+  }
+  ```
+- Response:
+  ```json
+  {
+    "statuses": [
+      {"user_id": "u_01F...", "status": "online", "expires_at": 1766793650123, "last_seen_bucket": "now"},
+      {"user_id": "u_02F...", "status": "unavailable", "expires_at": 1766793650123, "last_seen_bucket": "7d"}
+    ]
+  }
+  ```
+- Authorization is required.
+- Eligibility MUST match the same access-control rule as `presence.update` fanout (mutual watch + blocklist enforcement in v1).
+- Ineligible or blocked contacts MUST return `status: "unavailable"`.
+- Results MUST be deterministic: de-duplicated and sorted by `user_id`.
+
 ### 10.5 SSE/WS consumption
 - Presence updates MAY be delivered on the same WS connection as conversations or via SSE.
 - `presence.watch` and `presence.unwatch` MAY be invoked over WS frames with the same bodies.

@@ -255,7 +255,7 @@ class TuiModel:
         }
 
         self.presence_active = False
-        self.presence_enabled = False
+        self.presence_enabled = True
         self.presence_invisible = False
         self.presence_entries: Dict[str, Dict[str, Any]] = {}
         self.presence_selected_idx = 0
@@ -665,7 +665,8 @@ class TuiModel:
             role = str(row.get("role", "")).strip()
             if not user_id or not role:
                 continue
-            normalized.append({"user_id": user_id, "role": role})
+            entry = self.presence_entries.get(user_id, {})
+            normalized.append({"user_id": user_id, "role": role, "presence_status": str(entry.get("status", "unavailable"))})
         self.room_roster_members = normalized
         self.room_roster_selected_idx = min(
             max(0, self.room_roster_selected_idx),
@@ -1110,6 +1111,9 @@ class TuiModel:
                     "label": str(conv.get("label", conv.get("name", ""))),
                     "last_preview": str(conv.get("last_preview", "")),
                     "last_ts_ms": str(conv.get("last_ts_ms", "0")),
+                    "presence_status": str(
+                        self.presence_entries.get(str(conv.get("peer_user_id", "")), {}).get("status", "")
+                    ),
                 }
                 for conv in self.dm_conversations
             ],

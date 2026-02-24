@@ -133,8 +133,19 @@ class Presence:
         target_watchlist = self._watchlists.get(target_user_id, set())
         watchers = self._reverse_watchers.get(target_user_id, set())
         for watcher in watchers:
-            if watcher in target_watchlist and not self.is_blocked(watcher, target_user_id):
+            if self._can_view_status(watcher, target_user_id, target_watchlist=target_watchlist):
                 yield watcher
+
+    def _can_view_status(self, viewer_user_id: str, target_user_id: str, *, target_watchlist: Set[str] | None = None) -> bool:
+        if not viewer_user_id or not target_user_id or viewer_user_id == target_user_id:
+            return False
+        if self.is_blocked(viewer_user_id, target_user_id):
+            return False
+        viewer_watchlist = self._watchlists.get(viewer_user_id, set())
+        if target_user_id not in viewer_watchlist:
+            return False
+        active_target_watchlist = target_watchlist if target_watchlist is not None else self._watchlists.get(target_user_id, set())
+        return viewer_user_id in active_target_watchlist
 
     def _fanout(self, watcher_user_id: str, frame: dict) -> None:
         for device_id in self._user_devices.get(watcher_user_id, set()):
@@ -319,6 +330,24 @@ class Presence:
             return False
         return user_b in self._blocklists.get(user_a, set()) or user_a in self._blocklists.get(user_b, set())
 
+    def status_for_viewer(self, viewer_user_id: str, contacts: Iterable[str]) -> list[dict]:
+        statuses: list[dict] = []
+        for user_id in sorted({contact for contact in contacts if isinstance(contact, str)}):
+            entry = {
+                "user_id": user_id,
+                "status": "unavailable",
+                "expires_at": self._now(),
+                "last_seen_bucket": "7d",
+            }
+            if self._can_view_status(viewer_user_id, user_id):
+                user_status = self._user_status.get(user_id)
+                if user_status is None:
+                    user_status = self._compute_user_status(user_id, previous=None)
+                entry["status"] = user_status.status
+                entry["expires_at"] = user_status.expires_at_ms
+                entry["last_seen_bucket"] = self._bucket_last_seen(user_status.last_seen_ms)
+            statuses.append(entry)
+        return statuses
+
     def blocklist_size(self, user_id: str) -> int:
         return len(self._blocklists.get(user_id, set()))
-
