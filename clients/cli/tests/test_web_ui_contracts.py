@@ -261,12 +261,18 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn('legend>Conversations<', self.index_html)
         self.assertIn('/v1/conversations', self.gateway_ws_client)
         self.assertIn('/v1/conversations/mark_read', self.gateway_ws_client)
+        self.assertIn('/v1/conversations/title', self.gateway_ws_client)
+        self.assertIn('/v1/conversations/label', self.gateway_ws_client)
+        self.assertIn('/v1/conversations/pin', self.gateway_ws_client)
         self.assertIn("conv_id_input.value = item.conv_id", self.gateway_ws_client)
         self.assertIn("unread_count", self.gateway_ws_client)
         self.assertIn("mark_read", self.gateway_ws_client)
         self.assertIn("pruned", self.gateway_ws_client)
         self.assertIn("from_seq_input.value = String(desired_from_seq)", self.gateway_ws_client)
         self.assertIn("subscribe_btn.click()", self.gateway_ws_client)
+        self.assertIn("Conversation label", self.index_html)
+        self.assertIn("Pinned", self.index_html)
+        self.assertIn("Room title", self.index_html)
 
     def test_replay_window_ui_marker(self):
         self.assertIn("History pruned", self.index_html)

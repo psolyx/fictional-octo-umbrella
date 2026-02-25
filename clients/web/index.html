@@ -72,6 +72,24 @@
     </div>
     <p>Legend: unread=N comes from server read state. pruned means your read pointer is behind retained history.</p>
     <ul id="conversations_list" role="listbox" aria-label="Conversations"></ul>
+    <div>
+      <h4>Conversation details</h4>
+      <label>
+        Conversation label (private)
+        <input type="text" id="conversation_label_input" maxlength="64" aria-invalid="false" />
+      </label>
+      <button id="conversation_label_save_btn" type="button">Save Label</button>
+      <p id="conversation_label_error" class="field-error" hidden></p>
+      <label>
+        <input type="checkbox" id="conversation_pinned_toggle" /> Pinned
+      </label>
+      <label>
+        Room title
+        <input type="text" id="conversation_title_input" maxlength="64" aria-invalid="false" />
+      </label>
+      <button id="conversation_title_save_btn" type="button">Save Room title</button>
+      <p id="conversation_title_error" class="field-error" hidden></p>
+    </div>
   </fieldset>
 
 

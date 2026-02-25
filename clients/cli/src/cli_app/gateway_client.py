@@ -191,6 +191,48 @@ def conversations_mark_read(
     )
 
 
+def conversations_set_title(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    title: str,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "title": title}
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/title"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def conversations_set_label(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    label: str,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "label": label}
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/label"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def conversations_set_pinned(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    pinned: bool,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "pinned": pinned}
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/pin"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def presence_blocklist(base_url: str, session_token: str) -> list[str]:
     request = urllib.request.Request(
         _build_url(base_url, "/v1/presence/blocklist"),

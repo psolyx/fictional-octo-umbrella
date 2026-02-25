@@ -275,6 +275,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
   - Create/open DM, send/receive ciphertext-backed messages, replay catch-up, and commit echo-before-apply behavior.
 - Rooms:
   - Create room, invite/remove members, send/receive room messages, and membership-state rendering.
+  - Server-backed conversation naming parity: shared room title + per-user label + per-user pin ordering across web/TUI.
 - Timeline:
   - Publish post, fetch timeline entries, render per-user event-log ordering, and open author profile from timeline.
   - follow/unfollow UX and Home feed aggregation from self + friends.

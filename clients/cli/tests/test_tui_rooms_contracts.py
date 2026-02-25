@@ -24,6 +24,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"+"}',
             'char in {"-"}',
             'char in {"m", "M"}',
+            'char in {"n", "N"}',
+            'char in {"p", "P"}',
+            'char in {"t"}',
             'return "conv_mark_read"',
             'return f"{self.room_modal_action}_submit"',
             'self._open_room_modal("room_create")',
@@ -50,6 +53,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_bans(',
             'def rooms_members(',
             'def conversations_mark_read(',
+            'def conversations_set_title(',
+            'def conversations_set_label(',
+            'def conversations_set_pinned(',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_client)
@@ -64,10 +70,14 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_bans',
             'gateway_client.rooms_members',
             'gateway_client.conversations_mark_read',
+            'gateway_client.conversations_set_title',
+            'gateway_client.conversations_set_label',
+            'gateway_client.conversations_set_pinned',
             'Room roster',
             'Room bans',
             'Add selected to modal members',
             'mark_read',
+            'conv_toggle_pinned',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
