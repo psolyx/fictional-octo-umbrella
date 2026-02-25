@@ -26,6 +26,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"m", "M"}',
             'char in {"n", "N"}',
             'char in {"p", "P"}',
+            'char in {"z"}',
+            'char in {"A"}',
+            'char in {"H"}',
             'char in {"t"}',
             'return "conv_mark_read"',
             'return f"{self.room_modal_action}_submit"',
@@ -56,6 +59,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def conversations_set_title(',
             'def conversations_set_label(',
             'def conversations_set_pinned(',
+            'def conversations_set_muted(',
+            'def conversations_set_archived(',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_client)
@@ -73,11 +78,16 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.conversations_set_title',
             'gateway_client.conversations_set_label',
             'gateway_client.conversations_set_pinned',
+            'gateway_client.conversations_set_muted',
+            'gateway_client.conversations_set_archived',
             'Room roster',
             'Room bans',
             'Add selected to modal members',
             'mark_read',
             'conv_toggle_pinned',
+            'conv_toggle_muted',
+            'conv_toggle_archived',
+            'conv_toggle_show_archived',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
@@ -100,6 +110,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('"Keybindings"', self.tui_app)
         self.assertIn('"Press Esc to close (or q)"', self.tui_app)
         self.assertIn('r mark read', self.tui_app)
+        self.assertIn('z mute/unmute', self.tui_app)
+        self.assertIn('A archive/unarchive', self.tui_app)
+        self.assertIn('H show/hide archived', self.tui_app)
 
     def test_tui_presence_room_markers(self):
         for marker in (

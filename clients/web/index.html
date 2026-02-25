@@ -68,6 +68,7 @@
     <legend>Conversations</legend>
     <div class="button-row">
       <button id="conversations_refresh_btn" type="button">Refresh conversations</button>
+      <label><input type="checkbox" id="conversations_show_archived_toggle" /> Show archived</label>
       <span id="conversations_status" aria-live="polite">idle</span>
     </div>
     <p>Legend: unread=N comes from server read state. pruned means your read pointer is behind retained history.</p>
@@ -82,6 +83,12 @@
       <p id="conversation_label_error" class="field-error" hidden></p>
       <label>
         <input type="checkbox" id="conversation_pinned_toggle" /> Pinned
+      </label>
+      <label>
+        <input type="checkbox" id="conversation_muted_toggle" /> Mute
+      </label>
+      <label>
+        <input type="checkbox" id="conversation_archived_toggle" /> Archive
       </label>
       <label>
         Room title

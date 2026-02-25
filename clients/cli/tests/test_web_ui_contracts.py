@@ -264,6 +264,9 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn('/v1/conversations/title', self.gateway_ws_client)
         self.assertIn('/v1/conversations/label', self.gateway_ws_client)
         self.assertIn('/v1/conversations/pin', self.gateway_ws_client)
+        self.assertIn('/v1/conversations/mute', self.gateway_ws_client)
+        self.assertIn('/v1/conversations/archive', self.gateway_ws_client)
+        self.assertIn('include_archived=1', self.gateway_ws_client)
         self.assertIn("conv_id_input.value = item.conv_id", self.gateway_ws_client)
         self.assertIn("unread_count", self.gateway_ws_client)
         self.assertIn("mark_read", self.gateway_ws_client)
@@ -272,6 +275,9 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("subscribe_btn.click()", self.gateway_ws_client)
         self.assertIn("Conversation label", self.index_html)
         self.assertIn("Pinned", self.index_html)
+        self.assertIn("Show archived", self.index_html)
+        self.assertIn("Mute", self.index_html)
+        self.assertIn("Archive", self.index_html)
         self.assertIn("Room title", self.index_html)
 
     def test_replay_window_ui_marker(self):

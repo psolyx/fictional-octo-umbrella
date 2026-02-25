@@ -240,7 +240,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | z: mute | A: archive | H: archived filter | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -254,10 +254,17 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         label = conv.get("label", conv.get("name", ""))
         if str(conv.get("pinned", "0")) == "1":
             label = f"📌 {label}"
+        if str(conv.get("muted", "0")) == "1":
+            label = f"🔕 {label}"
+        if str(conv.get("archived", "0")) == "1" and render.show_archived:
+            label = f"{label} (archived)"
         presence_status = conv.get("presence_status", "")
         unread_count = int(conv.get("unread_count", "0") or "0")
         if unread_count > 0:
-            label = f"{label} [unread {unread_count}]"
+            if str(conv.get("muted", "0")) == "1":
+                label = f"{label} [unread~{unread_count}]"
+            else:
+                label = f"{label} [unread {unread_count}]"
         if presence_status:
             label = f"{label} [{presence_status}]"
         subtitle = conv.get("last_preview", "") or conv.get("peer_user_id", "")
@@ -410,7 +417,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout",
-            "Conversations: L refresh, U next unread, r mark read, Ctrl-N new DM",
+            "Conversations: L refresh, U next unread, r mark read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, + promote, - demote",
             "Messages: Enter send, R retry failed",
@@ -1436,7 +1443,12 @@ def _refresh_conversations(
     if session is None:
         _append_system_message(model, "No active session. Press r to resume.")
         return
-    payload = gateway_client.conversations_list(session.base_url, session.session_token)
+    previous_selected_conv_id = model.get_selected_conv_id().strip()
+    payload = gateway_client.conversations_list(
+        session.base_url,
+        session.session_token,
+        include_archived=model.show_archived,
+    )
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         _append_system_message(model, "Conversation refresh returned invalid payload.")
@@ -1500,6 +1512,8 @@ def _refresh_conversations(
         conversation["server_label"] = str(item.get("label") or "")
         conversation["pinned"] = "1" if bool(item.get("pinned")) else "0"
         conversation["pinned_at_ms"] = str(item.get("pinned_at_ms") or 0)
+        conversation["muted"] = "1" if bool(item.get("muted")) else "0"
+        conversation["archived"] = "1" if bool(item.get("archived")) else "0"
         conversation["role"] = str(item.get("role") or "member")
         conversation["server_earliest_seq"] = str(earliest_seq) if earliest_seq is not None else ""
         conversation["server_latest_seq"] = str(latest_seq) if latest_seq is not None else ""
@@ -1510,6 +1524,18 @@ def _refresh_conversations(
     if ordered_conv_ids:
         order_index = {conv_id: idx for idx, conv_id in enumerate(ordered_conv_ids)}
         model.dm_conversations.sort(key=lambda conv: (order_index.get(str(conv.get("conv_id", "")), len(order_index)), str(conv.get("conv_id", ""))))
+    if model.dm_conversations:
+        matched_index = 0
+        if previous_selected_conv_id:
+            for idx, conversation in enumerate(model.dm_conversations):
+                if str(conversation.get("conv_id", "")) == previous_selected_conv_id:
+                    matched_index = idx
+                    break
+            else:
+                matched_index = min(model.selected_conversation, len(model.dm_conversations) - 1)
+        model.selected_conversation = max(0, min(matched_index, len(model.dm_conversations) - 1))
+    else:
+        model.selected_conversation = 0
     _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
 
 
@@ -1580,6 +1606,54 @@ def _toggle_selected_conversation_pinned(model: TuiModel, session: SessionState 
     conversation["pinned"] = "1" if bool(payload.get("pinned")) else "0"
     conversation["pinned_at_ms"] = str(payload.get("pinned_at_ms") or 0)
     _append_system_message(model, f"pin {'on' if payload.get('pinned') else 'off'} for {conv_id}")
+
+
+def _toggle_selected_conversation_muted(model: TuiModel, session: SessionState | None) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    conv_id = model.get_selected_conv_id().strip()
+    if not conv_id:
+        _append_system_message(model, "Selected conversation has no conv_id.")
+        return
+    conversation = model.find_conversation(conv_id) or {}
+    currently_muted = str(conversation.get("muted", "0")) == "1"
+    try:
+        payload = gateway_client.conversations_set_muted(
+            session.base_url,
+            session.session_token,
+            conv_id,
+            not currently_muted,
+        )
+    except urllib.error.HTTPError as exc:
+        _append_system_message(model, f"mute failed: {_read_http_error_code(exc)}")
+        return
+    conversation["muted"] = "1" if bool(payload.get("muted")) else "0"
+    _append_system_message(model, f"mute {'on' if payload.get('muted') else 'off'} for {conv_id}")
+
+
+def _toggle_selected_conversation_archived(model: TuiModel, session: SessionState | None) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    conv_id = model.get_selected_conv_id().strip()
+    if not conv_id:
+        _append_system_message(model, "Selected conversation has no conv_id.")
+        return
+    conversation = model.find_conversation(conv_id) or {}
+    currently_archived = str(conversation.get("archived", "0")) == "1"
+    try:
+        payload = gateway_client.conversations_set_archived(
+            session.base_url,
+            session.session_token,
+            conv_id,
+            not currently_archived,
+        )
+    except urllib.error.HTTPError as exc:
+        _append_system_message(model, f"archive failed: {_read_http_error_code(exc)}")
+        return
+    conversation["archived"] = "1" if bool(payload.get("archived")) else "0"
+    _append_system_message(model, f"archive {'on' if payload.get('archived') else 'off'} for {conv_id}")
 
 
 def _send_dm_message(
@@ -2634,6 +2708,20 @@ def main() -> int:
                 )
             if action == "conv_toggle_pinned":
                 _toggle_selected_conversation_pinned(model, session_state)
+                _refresh_conversations(model, session_state)
+            if action == "conv_toggle_muted":
+                _toggle_selected_conversation_muted(model, session_state)
+                _refresh_conversations(model, session_state)
+            if action == "conv_toggle_archived":
+                selected_conv_id = model.get_selected_conv_id().strip()
+                _toggle_selected_conversation_archived(model, session_state)
+                _refresh_conversations(model, session_state)
+                if selected_conv_id and not model.show_archived:
+                    for idx, conversation in enumerate(model.dm_conversations):
+                        if str(conversation.get("conv_id", "")) == selected_conv_id:
+                            model.selected_conversation = idx
+                            break
+            if action == "conv_toggle_show_archived":
                 _refresh_conversations(model, session_state)
             if action == "conv_set_title_forbidden":
                 _append_system_message(model, "forbidden: room title requires owner/admin role")

@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -89,7 +89,11 @@ class SQLiteBackend:
             self._migrate_v10_to_v11()
             user_version = 11
 
-        if user_version != 11:
+        if user_version == 11:
+            self._migrate_v11_to_v12()
+            user_version = 12
+
+        if user_version != 12:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -337,3 +341,21 @@ class SQLiteBackend:
             """
         )
         self._conn.execute("PRAGMA user_version = 11")
+
+    def _migrate_v11_to_v12(self) -> None:
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(conversation_user_meta)").fetchall()}
+        if "muted" not in columns:
+            self._conn.execute(
+                "ALTER TABLE conversation_user_meta ADD COLUMN muted INTEGER NOT NULL DEFAULT 0"
+            )
+        if "archived" not in columns:
+            self._conn.execute(
+                "ALTER TABLE conversation_user_meta ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS conversation_user_meta_user_archived_idx
+            ON conversation_user_meta (user_id, archived ASC, conv_id ASC)
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 12")

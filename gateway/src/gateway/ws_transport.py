@@ -983,7 +983,8 @@ async def handle_conversations_list(request: web.Request) -> web.Response:
     session = _authenticate_request(request)
     if session is None:
         return _unauthorized()
-    items = runtime.conversations.list_for_user(session.user_id)
+    include_archived = request.query.get("include_archived") == "1"
+    items = runtime.conversations.list_for_user(session.user_id, include_archived=include_archived)
     enriched_items: list[dict[str, Any]] = []
     for item in items:
         conv_id = str(item.get("conv_id", ""))
@@ -1141,6 +1142,60 @@ async def handle_conversations_pin(request: web.Request) -> web.Response:
         return _forbidden("forbidden")
     pinned_value, pinned_at_ms = runtime.conversations.get_pinned(conv_id, session.user_id)
     return web.json_response({"status": "ok", "conv_id": conv_id, "pinned": pinned_value, "pinned_at_ms": pinned_at_ms})
+
+
+async def handle_conversations_mute(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    muted = body.get("muted")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if not isinstance(muted, bool):
+        return _invalid_request("muted must be a boolean")
+    try:
+        runtime.conversations.set_muted(conv_id, session.user_id, muted, runtime.now_func())
+    except PermissionError:
+        return _forbidden("forbidden")
+    return web.json_response(
+        {"status": "ok", "conv_id": conv_id, "muted": runtime.conversations.get_muted(conv_id, session.user_id)}
+    )
+
+
+async def handle_conversations_archive(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    archived = body.get("archived")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if not isinstance(archived, bool):
+        return _invalid_request("archived must be a boolean")
+    try:
+        runtime.conversations.set_archived(conv_id, session.user_id, archived, runtime.now_func())
+    except PermissionError:
+        return _forbidden("forbidden")
+    return web.json_response(
+        {
+            "status": "ok",
+            "conv_id": conv_id,
+            "archived": runtime.conversations.get_archived(conv_id, session.user_id),
+        }
+    )
 
 
 async def handle_room_invite(request: web.Request) -> web.Response:
@@ -1696,6 +1751,8 @@ def create_app(
     app.router.add_post("/v1/conversations/title", handle_conversations_title)
     app.router.add_post("/v1/conversations/label", handle_conversations_label)
     app.router.add_post("/v1/conversations/pin", handle_conversations_pin)
+    app.router.add_post("/v1/conversations/mute", handle_conversations_mute)
+    app.router.add_post("/v1/conversations/archive", handle_conversations_archive)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)
