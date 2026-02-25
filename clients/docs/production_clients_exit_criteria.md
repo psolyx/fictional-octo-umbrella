@@ -398,3 +398,16 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - Redaction applies to structured payload rendering and free-form lines (for example `Bearer ...` text).
 - Session/resume values may only be intentionally revealed via explicit export/reveal UX actions with user-facing warnings; passive status/log surfaces must not display raw values.
 - This is tracked as Phase 5.2 hardening evidence under baseline security checklist themes (ASVS-style logging/data-protection expectations).
+
+## Abuse controls
+- Message send paths MUST honor gateway-side abuse limits for resource-consumption mitigation:
+  - per-conversation send rate limits
+  - social publish rate limits
+  - DM creation rate limits
+  - payload caps for `env` base64 and social canonical event bytes
+- Web and TUI MUST expose block/unblock flows where users operate daily:
+  - Profile: toggle block/unblock for the viewed peer
+  - DM context: show blocked status and prevent local sends when peer is blocked
+- Error UX contracts:
+  - `429` (`rate_limited`) failures are rendered explicitly and deterministically, with retry affordances for failed pending work
+  - blocked failures (`403` with `blocked`) are rendered as a clear, persistent state and suppress local DM send actions

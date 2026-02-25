@@ -167,6 +167,27 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_room_invite_forbidden_when_blocked(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        bob_token = await self._session("u_bob", "d_bob")
+
+        create_response = await self._rooms_post(alice_token, "/v1/rooms/create", "conv_blocked", ["u_bob"])
+        self.assertEqual(create_response.status, 200)
+
+        block_response = await self.client.post(
+            "/v1/presence/block",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"contacts": ["u_alice"]},
+        )
+        self.assertEqual(block_response.status, 200)
+
+        invite_response = await self._rooms_post(alice_token, "/v1/rooms/invite", "conv_blocked", ["u_charlie"])
+        self.assertEqual(invite_response.status, 200)
+
+        blocked_invite = await self._rooms_post(alice_token, "/v1/rooms/invite", "conv_blocked", ["u_bob"])
+        self.assertEqual(blocked_invite.status, 403)
+        self.assertEqual((await blocked_invite.json()).get("code"), "forbidden")
+
 
 if __name__ == "__main__":
     unittest.main()

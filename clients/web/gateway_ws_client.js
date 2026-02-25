@@ -862,9 +862,10 @@
 
   const set_rooms_response_status = (response, payload_text) => {
     const forbidden_text = response && response.status === 403 ? ' forbidden' : '';
+    const rate_limited_text = response && response.status === 429 ? ' rate_limited' : '';
     const status_label = response ? `${response.status} ${response.statusText}${forbidden_text}`.trim() : 'unknown';
     const compact_payload = payload_text ? payload_text : '{}';
-    set_rooms_status(`status: ${status_label} ${compact_payload}`);
+    set_rooms_status(`status: ${status_label}${rate_limited_text} ${compact_payload}`);
   };
 
   const selected_roster_member_ids = () => {
@@ -2117,6 +2118,29 @@
         return;
       }
       if (message.t === 'error') {
+        // rate_limited marker: deterministic UI feedback for abuse controls.
+        if (body.code === 'rate_limited') {
+          announce_status(`rate_limited: ${body.message || 'retry later'}`);
+          const active_conv_id = conv_id_input && conv_id_input.value ? conv_id_input.value.trim() : '';
+          const active_msg_id = msg_id_input && msg_id_input.value ? msg_id_input.value.trim() : '';
+          if (active_conv_id && active_msg_id) {
+            const failed_item = set_outbox_item(active_conv_id, active_msg_id, {
+              status: 'failed',
+              failed_reason: `rate_limited: ${body.message || 'retry later'}`,
+            });
+            if (failed_item) {
+              render_local_outbound_event(failed_item);
+            }
+          }
+        }
+        if (body.code === 'forbidden' && body.message === 'blocked') {
+          announce_status('blocked');
+          const banner = document.getElementById('dm_block_banner');
+          if (banner) {
+            banner.hidden = false;
+            banner.textContent = 'Blocked by blocklist policy.';
+          }
+        }
         if (body.code === 'replay_window_exceeded') {
           const details = parse_replay_window_details(body);
           const active_conv_id = conv_id_input && conv_id_input.value ? conv_id_input.value.trim() : '';

@@ -111,6 +111,7 @@ class RenderState:
     social_edit_fields: Dict[str, str]
     social_publish_queue: List[Dict[str, Any]]
     social_last_publish_error: Optional[str]
+    blocked_user_ids: set[str]
     presence_active: bool
     presence_enabled: bool
     presence_invisible: bool
@@ -257,6 +258,7 @@ class TuiModel:
         }
         self.social_publish_queue: List[Dict[str, Any]] = []
         self.social_last_publish_error: Optional[str] = None
+        self.blocked_user_ids: set[str] = set()
 
         self.presence_active = False
         self.presence_enabled = True
@@ -983,6 +985,8 @@ class TuiModel:
                     return None
                 if key == "CHAR" and char in {"d", "D"}:
                     return "social_start_dm"
+                if key == "CHAR" and char in {"B"} and self.social_view_mode == "profile":
+                    return "social_toggle_block"
                 return None
             if key == "CTRL_N":
                 self.new_dm_active = True
@@ -1167,6 +1171,7 @@ class TuiModel:
             social_edit_fields=dict(self.social_edit_fields),
             social_publish_queue=list(self.social_publish_queue),
             social_last_publish_error=self.social_last_publish_error,
+            blocked_user_ids=set(self.blocked_user_ids),
             presence_active=self.presence_active,
             presence_enabled=self.presence_enabled,
             presence_invisible=self.presence_invisible,

@@ -351,3 +351,6 @@ class Presence:
 
     def blocklist_size(self, user_id: str) -> int:
         return len(self._blocklists.get(user_id, set()))
+
+    def list_blocked(self, user_id: str) -> list[str]:
+        return sorted(self._blocklists.get(user_id, set()))

@@ -27,12 +27,24 @@ class TestTuiSocialProfileContracts(unittest.TestCase):
         self.assertIn('char in {"v", "V"}', self.tui_model)
         self.assertIn('char in {"f", "F"}', self.tui_model)
         self.assertIn('char in {"d", "D"}', self.tui_model)
+        self.assertIn('char in {"B"}', self.tui_model)
         self.assertIn('if self.focus_area == "social" and self.social_active', self.tui_model)
 
     def test_social_start_dm_contracts(self):
         self.assertIn('/v1/dms/create', self.gateway_client)
         self.assertIn('def dms_create(', self.gateway_client)
+        self.assertIn('def presence_blocklist(', self.gateway_client)
         self.assertIn('Start DM (D)', self.tui_app)
+
+    def test_abuse_control_markers(self):
+        for marker in (
+            'BLOCKED',
+            'social_toggle_block',
+            'rate_limited:',
+            '/v1/presence/blocklist',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.tui_app if marker != '/v1/presence/blocklist' else self.gateway_client)
 
 
     def test_conversation_refresh_contract(self):

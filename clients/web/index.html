@@ -107,6 +107,7 @@
       <input type="text" id="ciphertext_input" size="64" />
     </label>
     <p id="compose_error" class="field-error" hidden></p>
+    <p id="dm_block_banner" class="blocked-banner" tabindex="0" aria-live="polite" hidden></p>
     <div class="button-row">
       <button id="subscribe_btn">Subscribe</button>
       <button id="ack_btn">Ack</button>
@@ -150,6 +151,8 @@
       <div class="button-row">
         <button id="follow_toggle_btn">Add Friend</button>
         <button id="profile_message_btn" data-test="start-dm" type="button">Message</button>
+        <button id="profile_block_toggle_btn" data-test="block-toggle" type="button">Block</button>
+        <span id="profile_block_status" aria-live="polite"></span>
       </div>
     </section>
 

@@ -65,6 +65,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             '[delivered',
             'last_preview',
             'R: retry failed',
+            'rate_limited:',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app if marker in self.tui_app else self.tui_model)

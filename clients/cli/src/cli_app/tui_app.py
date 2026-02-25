@@ -293,7 +293,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.hline(transcript_top - 1, right_start, curses.ACS_HLINE, max_x - right_start)
     if render.social_active:
         help_line = (
-            f"SOCIAL {render.social_view_mode} ({render.social_target}) — v profile, f feed, r refresh, p post, e edit, a/u friend, 1/2 target, n more, s section, D start DM"
+            f"SOCIAL {render.social_view_mode} ({render.social_target}) — v profile, f feed, r refresh, p post, e edit, a/u friend, B block/unblock, 1/2 target, n more, s section, D start DM"
         )
         _render_text(stdscr, transcript_top - 1, right_start + 2, help_line)
         if render.social_view_mode == "profile":
@@ -621,6 +621,10 @@ def _build_profile_lines(render: object) -> list[str]:
     lines.append(f"Pending publishes ({len(queue_rows)})")
     for row in queue_rows:
         lines.append(f"  - {row.get('state', 'pending')} {row.get('kind', '')}")
+    blocked_user_ids = getattr(render, "blocked_user_ids", set())
+    profile_user_id = _profile_value(profile, "user_id") or str(getattr(render, "profile_user_id", ""))
+    if isinstance(blocked_user_ids, set) and profile_user_id in blocked_user_ids:
+        lines.append("BLOCKED")
     return lines
 
 
@@ -1513,6 +1517,10 @@ def _send_dm_message(
     if not state_dir:
         _append_system_message(model, "Selected conversation has no state_dir.")
         return
+    peer_user_id = str(conv.get("peer_user_id", "")).strip()
+    if peer_user_id and peer_user_id in model.blocked_user_ids:
+        _append_system_message(model, "BLOCKED: cannot send DM while peer is blocked.")
+        return
     env_b64 = env_b64_override
     if not env_b64:
         output = mls_poc._run_harness_capture(
@@ -1532,6 +1540,19 @@ def _send_dm_message(
     try:
         gateway_client.inbox_send(session.base_url, session.session_token, conv_id, msg_id, env_b64)
         model.append_pending_outbound(conv_id, msg_id, plaintext)
+    except urllib.error.HTTPError as exc:
+        model.append_pending_outbound(conv_id, msg_id, plaintext)
+        if exc.code == 429:
+            model.mark_outbound_failed(conv_id, msg_id, f"rate_limited: {exc}")
+            _append_system_message(model, "rate_limited: send failed; retry with R.")
+            return
+        if exc.code == 403:
+            model.mark_outbound_failed(conv_id, msg_id, "blocked")
+            _append_system_message(model, "BLOCKED: send forbidden by gateway policy.")
+            return
+        model.mark_outbound_failed(conv_id, msg_id, str(exc))
+        _append_system_message(model, f"Send failed; retry with R (msg_id={msg_id}).")
+        return
     except Exception as exc:
         model.append_pending_outbound(conv_id, msg_id, plaintext)
         model.mark_outbound_failed(conv_id, msg_id, str(exc))
@@ -1555,6 +1576,9 @@ def _create_new_dm(
     if not peer_user_id:
         _append_system_message(model, "New DM requires peer_user_id.")
         return
+    if peer_user_id in model.blocked_user_ids:
+        _append_system_message(model, "BLOCKED: unblock user before creating a DM.")
+        return
     conv_id = conv_id.strip() if conv_id.strip() else ""
     name = name.strip() if name.strip() else f"dm {_short_user_label(peer_user_id)}"
     state_dir = state_dir.strip()
@@ -1564,12 +1588,21 @@ def _create_new_dm(
         _append_system_message(model, f"No KeyPackages available for user {peer_user_id}.")
         return
     peer_kp = str(keypackages[0])
-    create_response = gateway_client.dms_create(
-        session.base_url,
-        session.session_token,
-        peer_user_id,
-        conv_id if conv_id else None,
-    )
+    try:
+        create_response = gateway_client.dms_create(
+            session.base_url,
+            session.session_token,
+            peer_user_id,
+            conv_id if conv_id else None,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _append_system_message(model, "rate_limited: DM create failed; retry later.")
+            return
+        if exc.code == 403:
+            _append_system_message(model, "BLOCKED: DM create forbidden by gateway policy.")
+            return
+        raise
     conv_id = str(create_response.get("conv_id", "")).strip()
     if not conv_id:
         _append_system_message(model, "DM create failed: missing conv_id.")
@@ -1642,6 +1675,9 @@ def _start_dm_from_social(
     if peer_user_id == model.identity.social_public_key_b64:
         _set_social_status(model, "Start DM requires another user.")
         return
+    if peer_user_id in model.blocked_user_ids:
+        _set_social_status(model, "BLOCKED: unblock user before starting a DM.")
+        return
     _create_new_dm(model, session, runtime, peer_user_id, peer_name, "", "")
     _refresh_conversations(model, session)
     model.social_active = False
@@ -1685,6 +1721,9 @@ def _run_room_action(
         runner(session.base_url, session.session_token, conv_id, members)
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="ignore")
+        if exc.code == 429:
+            _append_system_message(model, f"rate_limited: room {action_name} conv_id={conv_id}")
+            return
         if exc.code == 403:
             _append_system_message(model, f"room {action_name} forbidden conv_id={conv_id}")
         else:
@@ -1947,7 +1986,45 @@ def main() -> int:
             except Exception as exc:
                 _set_social_status(model, f"Error: {exc}")
                 return
+            _refresh_blocklist()
             _set_social_status(model, f"Profile refreshed {time.strftime('%H:%M:%S')}")
+
+        def _refresh_blocklist() -> None:
+            if session_state is None:
+                return
+            try:
+                model.blocked_user_ids = set(
+                    gateway_client.presence_blocklist(
+                        session_state.base_url,
+                        session_state.session_token,
+                    )
+                )
+            except Exception:
+                model.blocked_user_ids = set()
+
+        def _toggle_profile_block() -> None:
+            if session_state is None:
+                _set_social_status(model, "No active session. Press r to resume.")
+                return
+            target_user_id = str(model.profile_user_id).strip()
+            if not target_user_id or target_user_id == model.identity.social_public_key_b64:
+                _set_social_status(model, "Select a peer profile to block/unblock.")
+                return
+            try:
+                if target_user_id in model.blocked_user_ids:
+                    gateway_client.presence_unblock(session_state.base_url, session_state.session_token, [target_user_id])
+                    model.blocked_user_ids.discard(target_user_id)
+                    _set_social_status(model, f"Unblocked {target_user_id}.")
+                else:
+                    gateway_client.presence_block(session_state.base_url, session_state.session_token, [target_user_id])
+                    model.blocked_user_ids.add(target_user_id)
+                    _set_social_status(model, f"Blocked {target_user_id}.")
+                _refresh_blocklist()
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    _set_social_status(model, f"rate_limited: block toggle failed for {target_user_id}")
+                    return
+                _set_social_status(model, f"Block toggle failed: {exc}")
 
         def _refresh_social_feed(load_more: bool = False) -> None:
             base_url = _load_social_base_url(model)
@@ -2011,8 +2088,11 @@ def main() -> int:
                 )
             except Exception as exc:
                 item["state"] = "failed"
-                item["error"] = str(exc)
-                model.social_last_publish_error = str(exc)
+                message = str(exc)
+                if "HTTP Error 429" in message:
+                    message = f"rate_limited: {message}"
+                item["error"] = message
+                model.social_last_publish_error = message
                 return False
             item["state"] = "confirmed"
             item["confirmed_at_ms"] = int(time.time() * 1000)
@@ -2425,6 +2505,8 @@ def main() -> int:
                 _follow_toggle(True)
             if action == "social_follow_remove":
                 _follow_toggle(False)
+            if action == "social_toggle_block":
+                _toggle_profile_block()
             if action == "social_start_dm":
                 _start_dm_from_social(model, session_state, runtime_state)
             if action == "social_publish_retry_failed":

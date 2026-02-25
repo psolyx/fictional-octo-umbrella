@@ -188,8 +188,14 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("/v1/social/profile", self.social_ui)
         self.assertIn("/v1/social/feed", self.social_ui)
         self.assertIn("/v1/dms/create", self.social_ui)
+        self.assertIn("/v1/presence/blocklist", self.social_ui)
+        self.assertIn("/v1/presence/block", self.social_ui)
+        self.assertIn("/v1/presence/unblock", self.social_ui)
         self.assertIn('id="profile_message_btn"', self.index_html)
         self.assertIn('data-test="start-dm"', self.index_html)
+        self.assertIn('data-test="block-toggle"', self.index_html)
+        self.assertIn("Block", self.social_ui)
+        self.assertIn("Unblock", self.social_ui)
         self.assertIn("friends-start-dm", self.social_ui)
         self.assertIn("feed-start-dm", self.social_ui)
         self.assertIn("Add Friend", self.social_ui)
@@ -229,6 +235,10 @@ class TestWebUiContracts(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_ws_client if marker != 'Presence enabled' else self.index_html)
+
+    def test_rate_limited_marker_contract(self):
+        self.assertIn("rate_limited", self.social_ui)
+        self.assertIn("rate_limited", self.gateway_ws_client)
 
 
     def test_replay_window_error_contracts(self):

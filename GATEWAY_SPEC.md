@@ -83,7 +83,9 @@ Semantics match WS frames.
     - Body: `{ prev_hash, ts_ms, kind, payload, sig_b64 }` (uses session-bound `user_id`).
     - Server MUST verify the signature against `user_id` (Ed25519), enforce the single-head rule, and persist `(user_id, event_hash, prev_hash, ts_ms, kind, payload_json, sig_b64)` append-only.
     - Duplicate publishes (same canonical bytes) MUST be idempotent: the gateway returns the existing event even if `prev_hash` no longer matches the current head, and duplicate rows are rejected.
-    - Failure cases return `400 invalid_request` (bad signature, bad chain) or `401 unauthorized` (missing/expired session).
+    - Failure cases return `400 invalid_request` (bad signature, bad chain, oversized canonical event payload) or `401 unauthorized` (missing/expired session).
+    - Gateways MUST enforce a per-user fixed-window publish limit (`GATEWAY_SOCIAL_PUBLISHES_PER_MIN`, default 30/min) before signature verification; exceeded requests return `429 rate_limited`.
+    - Gateways MUST reject oversized canonical social events (`GATEWAY_MAX_SOCIAL_EVENT_BYTES`, default 65536) with `400 invalid_request` and message `social event too large`.
   - `GET /v1/social/events?user_id=...&limit=...&after_hash=...`
     - Returns `{ "events": [ {user_id, event_hash, prev_hash, ts_ms, kind, payload, sig_b64}, ... ] }` ordered from oldest after `after_hash`.
     - Responses MUST include `Cache-Control: public, max-age=30` and SHOULD include a strong validator (`ETag` based on the returned head hash and `Last-Modified` based on the newest `ts_ms`).
@@ -448,6 +450,9 @@ Semantics match WS frames.
 - Server MUST enforce membership for both streaming and persistence operations:
   - `conv.subscribe`/replay MUST return `error.forbidden` to non-members and MUST NOT deliver history.
   - `conv.send` MUST return `error.forbidden` to non-members and MUST NOT append or broadcast the payload.
+  - Gateways MUST enforce per-user-per-conversation fixed-window send limits (`GATEWAY_CONV_SENDS_PER_MIN`, default 120/min). Exceeding limits returns `rate_limited` (`429` on HTTP inbox, `error` frame on WS).
+  - Gateways MUST reject oversized `env` payloads (`GATEWAY_MAX_ENV_B64_LEN`, default 262144 chars) with `400 invalid_request` and message `env too large`.
+  - For 2-member DM conversations, if either user has blocked the other, `conv.send` MUST fail with `forbidden` and message `blocked`.
   - Active subscriptions MUST stop receiving `conv.event` once membership is revoked; servers SHOULD unsubscribe the device and MAY emit a one-time `{code: "forbidden", message: "membership revoked"}` error frame instead of closing the socket.
 - Deterministic caps and rate limits (per conversation):
   - MAX_MEMBERS_PER_CONV: 1024 (server MAY reject above this cap using `limit_exceeded`).
@@ -514,6 +519,8 @@ Semantics match WS frames.
   - Underlying creation path MUST match `POST /v1/rooms/create` semantics with exactly one peer member.
   - Success response includes room-create compatibility fields plus `conv_id`, e.g. `{ "status": "ok", "conv_id": "dm_..." }`.
   - Errors: `invalid_request` for invalid peer or invalid `conv_id`; `unauthorized` when auth is missing/invalid.
+  - Gateways MUST enforce per-user DM-create fixed-window limits (`GATEWAY_DMS_CREATES_PER_MIN`, default 30/min) and return `429 rate_limited` on exceed.
+  - DM create MUST return `403 forbidden` with message `blocked` if either side has blocked the other.
 
 ### 8.2 Invite
 - Endpoint: `POST /v1/rooms/invite` (HTTP, authenticated as above).
@@ -527,6 +534,7 @@ Semantics match WS frames.
 - Semantics:
   - Only owners/admins may invite; unauthorized callers receive `forbidden`.
   - Invites MUST respect per-actor invite rate limits and the overall member cap (errors: `rate_limited`, `limit_exceeded`).
+  - Invites MUST return `403 forbidden` with message `blocked` when inviter/target blocklists conflict.
   - Success response: `{ "status": "ok" }`.
 
 ### 8.3 Remove
@@ -662,6 +670,7 @@ Semantics match WS frames.
   ```
 - Endpoint: `POST /v1/presence/unblock` (same schema)
 - Blocking is user-centric and multi-device aware. If either participant blocks the other, presence updates MUST NOT be delivered in either direction, including in mutual-watch cases. Servers MAY silently ignore blocked targets when processing watch requests. Responses SHOULD include the current blocked count for the caller.
+- Endpoint: `GET /v1/presence/blocklist` (authenticated) returns `{ "blocked": ["u_...", ...] }` for the caller only; list order MUST be deterministic (sorted ascending).
 
 ### 10.4 Presence updates
 - Presence events are delivered as `presence.update` frames:
