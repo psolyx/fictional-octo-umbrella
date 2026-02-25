@@ -240,7 +240,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | Enter: send | R: retry failed | Start DM (D) | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -408,7 +408,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout",
-            "Conversations: L refresh, U next unread, Ctrl-N new DM",
+            "Conversations: L refresh, U next unread, r mark read, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, + promote, - demote",
             "Messages: Enter send, R retry failed",
@@ -1498,6 +1498,50 @@ def _refresh_conversations(
     _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
 
 
+def _read_http_error_code(exc: urllib.error.HTTPError) -> str:
+    payload_text = exc.read().decode("utf-8", errors="ignore")
+    if exc.code == 403:
+        return "forbidden"
+    if exc.code == 429:
+        return "rate_limited"
+    try:
+        payload = json.loads(payload_text) if payload_text else {}
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and payload.get("code") == "invalid_request":
+        return "invalid_request"
+    return f"http_{exc.code}"
+
+
+def _mark_selected_conversation_read(
+    model: TuiModel,
+    session: SessionState | None,
+    *,
+    force: bool,
+    last_marked_conv_id: str,
+) -> str:
+    if session is None:
+        return last_marked_conv_id
+    conv_id = model.get_selected_conv_id().strip()
+    if not conv_id:
+        return last_marked_conv_id
+    if not force and conv_id == last_marked_conv_id:
+        return last_marked_conv_id
+    try:
+        response = gateway_client.conversations_mark_read(session.base_url, session.session_token, conv_id)
+    except urllib.error.HTTPError as exc:
+        _append_system_message(model, f"mark_read {conv_id} {_read_http_error_code(exc)}")
+        return last_marked_conv_id
+
+    unread_count = response.get("unread_count") if isinstance(response, dict) else 0
+    unread_value = int(unread_count) if isinstance(unread_count, int) else 0
+    conversation = model.find_conversation(conv_id)
+    if conversation is not None:
+        conversation["unread_count"] = str(unread_value)
+    _append_system_message(model, f"mark_read {conv_id} ok unread={unread_value}")
+    return conv_id
+
+
 def _send_dm_message(
     model: TuiModel,
     session: SessionState | None,
@@ -1909,6 +1953,7 @@ def main() -> int:
         presence_ttl_seconds = 120
         presence_renew_margin_seconds = 20
         presence_watched_contacts: set[str] = set()
+        last_marked_conv_id = ""
 
         def _stop_tail_threads() -> None:
             for tail in tail_threads.values():
@@ -2495,11 +2540,24 @@ def main() -> int:
                 _append_selected_roster_member_to_modal(model)
             if action == "conv_refresh":
                 _refresh_conversations(model, session_state)
+                last_marked_conv_id = _mark_selected_conversation_read(
+                    model,
+                    session_state,
+                    force=True,
+                    last_marked_conv_id=last_marked_conv_id,
+                )
                 _stop_tail_threads()
                 _ensure_tail_threads()
             if action == "conv_next_unread":
                 if not model.select_next_unread_conv():
                     _append_system_message(model, "No unread conversations.")
+            if action == "conv_mark_read":
+                last_marked_conv_id = _mark_selected_conversation_read(
+                    model,
+                    session_state,
+                    force=True,
+                    last_marked_conv_id=last_marked_conv_id,
+                )
             if action == "social_toggle":
                 if model.social_active:
                     _set_social_status(model, "Social panel active.")
@@ -2566,6 +2624,12 @@ def main() -> int:
                     new_dm.get("conv_id", "").strip(),
                 )
                 _refresh_conversations(model, session_state)
+                last_marked_conv_id = _mark_selected_conversation_read(
+                    model,
+                    session_state,
+                    force=True,
+                    last_marked_conv_id=last_marked_conv_id,
+                )
                 model.new_dm_active = False
                 model.focus_area = "conversations"
                 _ensure_tail_threads()
@@ -2581,6 +2645,12 @@ def main() -> int:
                 follow_up = _submit_room_modal(model, session_state)
                 if follow_up == "conv_refresh":
                     _refresh_conversations(model, session_state)
+                    last_marked_conv_id = _mark_selected_conversation_read(
+                        model,
+                        session_state,
+                        force=True,
+                        last_marked_conv_id=last_marked_conv_id,
+                    )
                     _auto_watch_from_conversations()
                     _stop_tail_threads()
                     _ensure_tail_threads()
@@ -2609,6 +2679,13 @@ def main() -> int:
                 _set_presence_status(f"Presence {label}.")
                 presence_lease_expires_at = None
                 _ensure_presence_thread()
+
+            last_marked_conv_id = _mark_selected_conversation_read(
+                model,
+                session_state,
+                force=False,
+                last_marked_conv_id=last_marked_conv_id,
+            )
 
         _stop_tail_threads()
         _stop_presence_thread()

@@ -220,6 +220,26 @@ def _with_cache(response: web.Response, *, etag: str | None, last_modified_ms: i
     return response
 
 
+def _clamp_last_read_seq(last_read_seq: int | None, earliest_seq: int | None) -> int | None:
+    if last_read_seq is None:
+        return None
+    min_allowed = max((earliest_seq - 1) if earliest_seq is not None else 0, 0)
+    return max(int(last_read_seq), min_allowed)
+
+
+def _compute_unread_count(
+    *,
+    earliest_seq: int | None,
+    latest_seq: int | None,
+    last_read_seq: int | None,
+) -> int:
+    if latest_seq is None:
+        return 0
+    effective_last_read = _clamp_last_read_seq(last_read_seq, earliest_seq)
+    acked_seq = 0 if effective_last_read is None else int(effective_last_read)
+    return max(0, int(latest_seq) - acked_seq)
+
+
 class SSEWriter:
     def __init__(self, response: web.StreamResponse, on_disconnect: Callable[[], None]) -> None:
         self._response = response
@@ -968,12 +988,68 @@ async def handle_conversations_list(request: web.Request) -> web.Response:
     for item in items:
         conv_id = str(item.get("conv_id", ""))
         earliest_seq, latest_seq, latest_ts_ms = runtime.log.bounds(conv_id)
+        raw_last_read_seq = runtime.conversations.get_last_read_seq(conv_id, session.user_id)
+        last_read_seq = _clamp_last_read_seq(raw_last_read_seq, earliest_seq)
+        unread_count = _compute_unread_count(
+            earliest_seq=earliest_seq,
+            latest_seq=latest_seq,
+            last_read_seq=last_read_seq,
+        )
         enriched = dict(item)
         enriched["earliest_seq"] = earliest_seq
         enriched["latest_seq"] = latest_seq
         enriched["latest_ts_ms"] = latest_ts_ms
+        enriched["last_read_seq"] = last_read_seq
+        enriched["unread_count"] = unread_count
         enriched_items.append(enriched)
     return web.json_response({"items": enriched_items})
+
+
+async def handle_conversations_mark_read(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    to_seq = body.get("to_seq")
+    if to_seq is not None and not isinstance(to_seq, int):
+        return _invalid_request("to_seq must be an integer")
+    if isinstance(to_seq, int) and to_seq < 0:
+        return _invalid_request("to_seq must be non-negative")
+
+    earliest_seq, latest_seq, _ = runtime.log.bounds(conv_id)
+    try:
+        last_read_seq = runtime.conversations.mark_read(
+            conv_id,
+            session.user_id,
+            to_seq=to_seq,
+            now_ms=runtime.now_func(),
+            latest_seq=latest_seq,
+            earliest_seq=earliest_seq,
+        )
+    except PermissionError:
+        return _forbidden("forbidden")
+
+    unread_count = _compute_unread_count(
+        earliest_seq=earliest_seq,
+        latest_seq=latest_seq,
+        last_read_seq=last_read_seq,
+    )
+    return web.json_response(
+        {
+            "status": "ok",
+            "conv_id": conv_id,
+            "last_read_seq": last_read_seq,
+            "unread_count": unread_count,
+        }
+    )
 
 
 async def handle_room_invite(request: web.Request) -> web.Response:
@@ -1525,6 +1601,7 @@ def create_app(
     app.router.add_post("/v1/rooms/create", handle_room_create)
     app.router.add_post("/v1/dms/create", handle_dms_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
+    app.router.add_post("/v1/conversations/mark_read", handle_conversations_mark_read)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)

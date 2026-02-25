@@ -56,7 +56,7 @@ class SQLiteBackendTests(unittest.TestCase):
 
     def test_schema_version_and_home_gateway_defaulting(self):
         user_version = self.backend.connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(user_version, 9)
+        self.assertEqual(user_version, 10)
 
         columns = {
             row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversations)").fetchall()
@@ -68,6 +68,7 @@ class SQLiteBackendTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertIn("conversation_bans", ban_tables)
+        self.assertIn("conversation_reads", ban_tables)
 
         self.backend.connection.execute(
             "INSERT INTO conversations (conv_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)",

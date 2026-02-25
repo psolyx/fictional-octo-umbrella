@@ -143,6 +143,83 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(empty["latest_seq"])
         self.assertIsNone(empty["latest_ts_ms"])
 
+    async def test_mark_read_and_unread_counts_follow_server_state(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        await self._create_room(alice_token, "conv_reads", [])
+
+        await self._send_inbox(
+            alice_token,
+            conv_id="conv_reads",
+            msg_id="m1",
+            env="ZW52MQ==",
+            ts_ms=1000,
+        )
+        await self._send_inbox(
+            alice_token,
+            conv_id="conv_reads",
+            msg_id="m2",
+            env="ZW52Mg==",
+            ts_ms=2000,
+        )
+
+        initial_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(initial_list.status, 200)
+        initial_item = (await initial_list.json())["items"][0]
+        self.assertEqual(initial_item["unread_count"], 2)
+        self.assertIsNone(initial_item["last_read_seq"])
+
+        mark_read_response = await self.client.post(
+            "/v1/conversations/mark_read",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"conv_id": "conv_reads"},
+        )
+        self.assertEqual(mark_read_response.status, 200)
+        mark_read_body = await mark_read_response.json()
+        self.assertEqual(mark_read_body["status"], "ok")
+        self.assertEqual(mark_read_body["conv_id"], "conv_reads")
+        self.assertEqual(mark_read_body["last_read_seq"], 2)
+        self.assertEqual(mark_read_body["unread_count"], 0)
+
+        await self._send_inbox(
+            alice_token,
+            conv_id="conv_reads",
+            msg_id="m3",
+            env="ZW52Mw==",
+            ts_ms=3000,
+        )
+        post_send_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(post_send_list.status, 200)
+        post_send_item = (await post_send_list.json())["items"][0]
+        self.assertEqual(post_send_item["last_read_seq"], 2)
+        self.assertEqual(post_send_item["unread_count"], 1)
+
+        runtime = self.app[RUNTIME_KEY]
+        with runtime.backend.lock:
+            runtime.backend.connection.execute(
+                "DELETE FROM conv_events WHERE conv_id=? AND seq=?",
+                ("conv_reads", 1),
+            )
+            runtime.backend.connection.execute(
+                "UPDATE conversation_reads SET last_read_seq=? WHERE conv_id=? AND user_id=?",
+                (0, "conv_reads", "u_alice"),
+            )
+
+        clamped_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(clamped_list.status, 200)
+        clamped_item = (await clamped_list.json())["items"][0]
+        self.assertEqual(clamped_item["earliest_seq"], 2)
+        self.assertEqual(clamped_item["last_read_seq"], 1)
+        self.assertEqual(clamped_item["unread_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

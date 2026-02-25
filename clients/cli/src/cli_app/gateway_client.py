@@ -175,6 +175,22 @@ def conversations_list(base_url: str, session_token: str) -> Dict[str, object]:
     return json.loads(raw) if raw else {}
 
 
+def conversations_mark_read(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    to_seq: int | None = None,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id}
+    if isinstance(to_seq, int):
+        payload["to_seq"] = to_seq
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/mark_read"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def presence_blocklist(base_url: str, session_token: str) -> list[str]:
     request = urllib.request.Request(
         _build_url(base_url, "/v1/presence/blocklist"),
