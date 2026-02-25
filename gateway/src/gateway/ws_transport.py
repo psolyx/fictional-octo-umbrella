@@ -997,7 +997,9 @@ async def handle_room_invite(request: web.Request) -> web.Response:
             return _forbidden("blocked")
     try:
         runtime.conversations.invite(conv_id, session.user_id, members)
-    except PermissionError:
+    except PermissionError as exc:
+        if str(exc) == "banned":
+            return _forbidden("banned")
         return _forbidden("forbidden")
     except RateLimitExceeded as exc:
         return _rate_limited(str(exc))
@@ -1087,6 +1089,73 @@ async def handle_room_demote(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+
+
+async def handle_room_ban(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.ban(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_unban(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.unban(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_bans(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    conv_id = request.query.get("conv_id", "")
+    if not conv_id:
+        return _invalid_request("conv_id required")
+    try:
+        bans = runtime.conversations.list_bans(conv_id, session.user_id)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("forbidden")
+    return _with_no_store(web.json_response({"conv_id": conv_id, "bans": bans}))
 async def handle_room_members(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1460,6 +1529,9 @@ def create_app(
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
+    app.router.add_post("/v1/rooms/ban", handle_room_ban)
+    app.router.add_post("/v1/rooms/unban", handle_room_unban)
+    app.router.add_get("/v1/rooms/bans", handle_room_bans)
     app.router.add_get("/v1/rooms/members", handle_room_members)
     app.router.add_post("/v1/social/events", handle_social_publish)
     app.router.add_get("/v1/social/events", handle_social_events)

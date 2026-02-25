@@ -37,13 +37,17 @@
   let rooms_remove_btn = null;
   let rooms_promote_btn = null;
   let rooms_demote_btn = null;
+  let rooms_ban_btn = null;
+  let rooms_unban_btn = null;
   let rooms_generate_room_id_btn = null;
   let rooms_status_line = null;
   let rooms_conv_id_error = null;
   let rooms_members_error = null;
   let rooms_refresh_roster_btn = null;
+  let rooms_refresh_bans_btn = null;
   let rooms_copy_selected_btn = null;
   let rooms_roster_list = null;
+  let rooms_bans_list = null;
   let rooms_session_token = '';
   let rooms_http_base_url = '';
   let conversations_refresh_btn = null;
@@ -861,11 +865,23 @@
   };
 
   const set_rooms_response_status = (response, payload_text) => {
-    const forbidden_text = response && response.status === 403 ? ' forbidden' : '';
-    const rate_limited_text = response && response.status === 429 ? ' rate_limited' : '';
-    const status_label = response ? `${response.status} ${response.statusText}${forbidden_text}`.trim() : 'unknown';
     const compact_payload = payload_text ? payload_text : '{}';
-    set_rooms_status(`status: ${status_label}${rate_limited_text} ${compact_payload}`);
+    let payload = {};
+    try {
+      payload = payload_text ? JSON.parse(payload_text) : {};
+    } catch (err) {
+      payload = {};
+    }
+    let detail = '';
+    if (payload && payload.code === 'forbidden' && payload.message === 'banned') {
+      detail = ' banned';
+    } else if (response && response.status === 403) {
+      detail = ' forbidden';
+    } else if (response && response.status === 429) {
+      detail = ' rate_limited';
+    }
+    const status_label = response ? `${response.status} ${response.statusText}${detail}`.trim() : 'unknown';
+    set_rooms_status(`status: ${status_label} ${compact_payload}`);
   };
 
   const selected_roster_member_ids = () => {
@@ -898,6 +914,39 @@
     rooms_members_input.value = selected.join(', ');
     set_inline_error(rooms_members_input, rooms_members_error, '');
     set_rooms_status(`status: selected ${selected.length} member(s)`);
+  };
+
+  const selected_ban_member_ids = () => {
+    if (!rooms_bans_list) {
+      return [];
+    }
+    const selected = [];
+    const checkboxes = rooms_bans_list.querySelectorAll('input[type="checkbox"][data-user_id]');
+    checkboxes.forEach((checkbox) => {
+      if (checkbox.checked) {
+        const user_id = checkbox.getAttribute('data-user_id');
+        if (user_id) {
+          selected.push(user_id);
+        }
+      }
+    });
+    selected.sort();
+    return selected;
+  };
+
+  const copy_selected_rooms_members = () => {
+    if (!rooms_members_input) {
+      return;
+    }
+    const selected = [...selected_roster_member_ids(), ...selected_ban_member_ids()];
+    const deduped = Array.from(new Set(selected));
+    if (!deduped.length) {
+      set_rooms_status('status: no roster/bans members selected');
+      return;
+    }
+    rooms_members_input.value = deduped.join(', ');
+    set_inline_error(rooms_members_input, rooms_members_error, '');
+    set_rooms_status(`status: selected ${deduped.length} member(s)`);
   };
 
   const render_rooms_roster = (members) => {
@@ -969,6 +1018,74 @@
       set_rooms_status(`status: roster loaded ${members.length}`);
     } catch (err) {
       set_rooms_status(`status: error (roster: ${err.message || 'request failed'})`);
+    }
+  };
+
+  const render_rooms_bans = (bans) => {
+    if (!rooms_bans_list) {
+      return;
+    }
+    rooms_bans_list.textContent = '';
+    const sorted_bans = [...bans].sort((left, right) => String(left.user_id).localeCompare(String(right.user_id)));
+    sorted_bans.forEach((ban) => {
+      const row = document.createElement('li');
+      row.className = 'rooms-roster-row';
+      row.setAttribute('data-test', 'rooms-ban-row');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.setAttribute('data-user_id', ban.user_id);
+      const label = document.createElement('label');
+      label.appendChild(checkbox);
+      label.insertAdjacentHTML('beforeend', ` banned ${ban.user_id} by ${ban.banned_by_user_id} at ${ban.banned_at_ms}`);
+      row.appendChild(label);
+      rooms_bans_list.appendChild(row);
+    });
+  };
+
+  const refresh_rooms_bans = async () => {
+    if (!rooms_conv_id_input) {
+      return;
+    }
+    const conv_id = rooms_conv_id_input.value.trim();
+    if (!conv_id) {
+      set_rooms_status('status: error (bans: conv_id required)');
+      set_inline_error(rooms_conv_id_input, rooms_conv_id_error, 'conv_id is required');
+      rooms_conv_id_input.focus();
+      return;
+    }
+    set_inline_error(rooms_conv_id_input, rooms_conv_id_error, '');
+    if (!rooms_session_token) {
+      set_rooms_status('status: error (bans: session_token required)');
+      return;
+    }
+    const fallback_base_url = derive_http_base_url(gateway_url_input.value.trim());
+    const base_url = rooms_http_base_url || fallback_base_url;
+    if (!base_url) {
+      set_rooms_status('status: error (bans: gateway_url must be ws:// or wss://)');
+      return;
+    }
+    try {
+      const request_url = new URL('/v1/rooms/bans', base_url);
+      request_url.searchParams.set('conv_id', conv_id);
+      const response = await fetch(request_url.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${rooms_session_token}` },
+      });
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = {};
+      }
+      if (!response.ok) {
+        set_rooms_response_status(response, JSON.stringify(payload || {}));
+        return;
+      }
+      const bans = payload && Array.isArray(payload.bans) ? payload.bans : [];
+      render_rooms_bans(bans);
+      set_rooms_status(`status: bans loaded ${bans.length}`);
+    } catch (err) {
+      set_rooms_status(`status: error (bans: ${err.message || 'request failed'})`);
     }
   };
 
@@ -2509,11 +2626,19 @@
     const demote_btn = document.createElement('button');
     demote_btn.type = 'button';
     demote_btn.textContent = 'Demote admins';
+    const ban_btn = document.createElement('button');
+    ban_btn.type = 'button';
+    ban_btn.textContent = 'Ban';
+    const unban_btn = document.createElement('button');
+    unban_btn.type = 'button';
+    unban_btn.textContent = 'Unban';
     button_row.appendChild(create_btn);
     button_row.appendChild(invite_btn);
     button_row.appendChild(remove_btn);
     button_row.appendChild(promote_btn);
     button_row.appendChild(demote_btn);
+    button_row.appendChild(ban_btn);
+    button_row.appendChild(unban_btn);
     fieldset.appendChild(button_row);
 
     const roster_actions = document.createElement('div');
@@ -2521,10 +2646,14 @@
     const refresh_roster_btn = document.createElement('button');
     refresh_roster_btn.type = 'button';
     refresh_roster_btn.textContent = 'Refresh roster';
+    const refresh_bans_btn = document.createElement('button');
+    refresh_bans_btn.type = 'button';
+    refresh_bans_btn.textContent = 'Refresh bans';
     const copy_selected_btn = document.createElement('button');
     copy_selected_btn.type = 'button';
     copy_selected_btn.textContent = 'Copy selected to members input';
     roster_actions.appendChild(refresh_roster_btn);
+    roster_actions.appendChild(refresh_bans_btn);
     roster_actions.appendChild(copy_selected_btn);
     fieldset.appendChild(roster_actions);
 
@@ -2532,6 +2661,11 @@
     roster_list.id = 'rooms_roster_list';
     roster_list.setAttribute('data-test', 'rooms-roster-list');
     fieldset.appendChild(roster_list);
+
+    const bans_list = document.createElement('ul');
+    bans_list.id = 'rooms_bans_list';
+    bans_list.setAttribute('data-test', 'rooms-bans-list');
+    fieldset.appendChild(bans_list);
 
     const status_line = document.createElement('p');
     status_line.id = 'rooms_status_line';
@@ -2554,12 +2688,16 @@
     rooms_promote_btn = promote_btn;
     rooms_demote_btn = demote_btn;
     rooms_generate_room_id_btn = generate_room_id_btn;
+    rooms_ban_btn = ban_btn;
+    rooms_unban_btn = unban_btn;
     rooms_status_line = status_line;
     rooms_conv_id_error = conv_error;
     rooms_members_error = members_error;
     rooms_refresh_roster_btn = refresh_roster_btn;
+    rooms_refresh_bans_btn = refresh_bans_btn;
     rooms_copy_selected_btn = copy_selected_btn;
     rooms_roster_list = roster_list;
+    rooms_bans_list = bans_list;
   };
 
   const hydrate_inputs = async () => {
@@ -3319,6 +3457,20 @@
       );
     });
   }
+  if (rooms_ban_btn) {
+    rooms_ban_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/ban', 'ban').catch((err) =>
+        set_rooms_status(`status: error (ban: ${err.message || 'request failed'})`)
+      );
+    });
+  }
+  if (rooms_unban_btn) {
+    rooms_unban_btn.addEventListener('click', () => {
+      request_rooms_action('/v1/rooms/unban', 'unban').catch((err) =>
+        set_rooms_status(`status: error (unban: ${err.message || 'request failed'})`)
+      );
+    });
+  }
   if (rooms_generate_room_id_btn) {
     rooms_generate_room_id_btn.addEventListener('click', () => {
       if (rooms_conv_id_input) {
@@ -3333,9 +3485,16 @@
       );
     });
   }
+  if (rooms_refresh_bans_btn) {
+    rooms_refresh_bans_btn.addEventListener('click', () => {
+      refresh_rooms_bans().catch((err) =>
+        set_rooms_status(`status: error (bans: ${err.message || 'request failed'})`)
+      );
+    });
+  }
   if (rooms_copy_selected_btn) {
     rooms_copy_selected_btn.addEventListener('click', () => {
-      copy_selected_roster_members();
+      copy_selected_rooms_members();
     });
   }
   if (rooms_conv_id_input) {

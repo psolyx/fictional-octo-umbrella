@@ -240,7 +240,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/+/-: moderate | Enter: send | R: retry failed | Start DM (D) | r: resume | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | Enter: send | R: retry failed | Start DM (D) | r: resume | Ctrl-P: panel | t: harness | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -372,7 +372,8 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
     if render.room_roster_active:
-        overlay_lines = ["Room roster", "A/Enter: Add selected to modal members", "Esc: close"]
+        overlay_title = "Room bans" if render.room_roster_view == "bans" else "Room roster"
+        overlay_lines = [overlay_title, "A/Enter: Add selected to modal members", "B: toggle roster/bans", "Esc: close"]
         for member in render.room_roster_members:
             overlay_lines.append(
                 f"{member.get('role', '')} {member.get('user_id', '')} {member.get('presence_status', 'unavailable')}"
@@ -409,7 +410,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
             "Account: identity_new / identity_import / identity_export / logout",
             "Conversations: L refresh, U next unread, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
-            "Rooms: Ctrl-R create, M roster, I invite, K remove, + promote, - demote",
+            "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, + promote, - demote",
             "Messages: Enter send, R retry failed",
             "Social: R retry failed publish",
             "Press Esc to close (or q)",
@@ -1712,6 +1713,8 @@ def _run_room_action(
         "room_remove": gateway_client.rooms_remove,
         "room_promote": gateway_client.rooms_promote,
         "room_demote": gateway_client.rooms_demote,
+        "room_ban": gateway_client.rooms_ban,
+        "room_unban": gateway_client.rooms_unban,
     }
     runner = action_map.get(action_name)
     if runner is None:
@@ -1721,16 +1724,55 @@ def _run_room_action(
         runner(session.base_url, session.session_token, conv_id, members)
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="ignore")
+        payload_json: dict[str, object] = {}
+        try:
+            parsed = json.loads(payload) if payload else {}
+            if isinstance(parsed, dict):
+                payload_json = parsed
+        except Exception:
+            payload_json = {}
         if exc.code == 429:
             _append_system_message(model, f"rate_limited: room {action_name} conv_id={conv_id}")
             return
         if exc.code == 403:
+            message = str(payload_json.get("message", "forbidden"))
+            if message == "banned":
+                _append_system_message(model, f"room {action_name} forbidden (banned) conv_id={conv_id}")
+                return
             _append_system_message(model, f"room {action_name} forbidden conv_id={conv_id}")
-        else:
-            _append_system_message(model, f"room {action_name} failed http {exc.code}: {payload}")
+            return
+        _append_system_message(model, f"room {action_name} failed http {exc.code}: {payload}")
         return
     _append_system_message(model, f"room {action_name} ok conv_id={conv_id}")
 
+
+
+def _refresh_room_bans(model: TuiModel, session: SessionState | None) -> None:
+    conv_id = model.get_selected_conv_id().strip()
+    if session is None:
+        _append_system_message(model, "Room bans unavailable: no active session.")
+        model.set_room_roster([])
+        return
+    if not conv_id:
+        _append_system_message(model, "Room bans unavailable: no selected conversation.")
+        model.set_room_roster([])
+        return
+    try:
+        payload = gateway_client.rooms_bans(session.base_url, session.session_token, conv_id)
+    except urllib.error.HTTPError as exc:
+        payload_text = exc.read().decode("utf-8", errors="ignore")
+        _append_system_message(model, f"room bans failed http {exc.code}: {payload_text}")
+        model.set_room_roster([])
+        return
+    bans = payload.get("bans") if isinstance(payload, dict) else []
+    if not isinstance(bans, list):
+        bans = []
+    normalized = []
+    for row in bans:
+        if not isinstance(row, dict):
+            continue
+        normalized.append({"user_id": str(row.get("user_id", "")), "role": "banned"})
+    model.set_room_roster(normalized)
 
 
 def _refresh_room_roster(model: TuiModel, session: SessionState | None) -> None:
@@ -2533,6 +2575,8 @@ def main() -> int:
                 "room_remove_submit",
                 "room_promote_submit",
                 "room_demote_submit",
+                "room_ban_submit",
+                "room_unban_submit",
             }:
                 follow_up = _submit_room_modal(model, session_state)
                 if follow_up == "conv_refresh":

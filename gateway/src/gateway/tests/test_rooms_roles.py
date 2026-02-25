@@ -43,6 +43,16 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
             params={"conv_id": conv_id},
         )
 
+    async def _rooms_bans(self, token: str | None, conv_id: str):
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        return await self.client.get(
+            "/v1/rooms/bans",
+            headers=headers,
+            params={"conv_id": conv_id},
+        )
+
     async def _dms_create(self, token: str | None, peer_user_id: str, conv_id: str | None = None):
         headers = {}
         if token is not None:
@@ -187,6 +197,46 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
         blocked_invite = await self._rooms_post(alice_token, "/v1/rooms/invite", "conv_blocked", ["u_bob"])
         self.assertEqual(blocked_invite.status, 403)
         self.assertEqual((await blocked_invite.json()).get("code"), "forbidden")
+
+    async def test_room_ban_unban_enforcement_and_visibility(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        bob_token = await self._session("u_bob", "d_bob")
+        charlie_token = await self._session("u_charlie", "d_charlie")
+
+        create_response = await self._rooms_post(alice_token, "/v1/rooms/create", "conv_ban", ["u_bob", "u_charlie"])
+        self.assertEqual(create_response.status, 200)
+
+        ban_response = await self._rooms_post(alice_token, "/v1/rooms/ban", "conv_ban", ["u_bob"])
+        self.assertEqual(ban_response.status, 200)
+
+        members_after_ban = await self._rooms_members(alice_token, "conv_ban")
+        self.assertEqual(members_after_ban.status, 200)
+        member_payload = await members_after_ban.json()
+        member_ids = [row.get("user_id") for row in member_payload.get("members", [])]
+        self.assertNotIn("u_bob", member_ids)
+
+        invite_banned = await self._rooms_post(alice_token, "/v1/rooms/invite", "conv_ban", ["u_bob"])
+        self.assertEqual(invite_banned.status, 403)
+        invite_banned_payload = await invite_banned.json()
+        self.assertEqual(invite_banned_payload.get("code"), "forbidden")
+        self.assertEqual(invite_banned_payload.get("message"), "banned")
+
+        owner_bans = await self._rooms_bans(alice_token, "conv_ban")
+        self.assertEqual(owner_bans.status, 200)
+        owner_bans_payload = await owner_bans.json()
+        self.assertEqual([row.get("user_id") for row in owner_bans_payload.get("bans", [])], ["u_bob"])
+
+        non_admin_bans = await self._rooms_bans(charlie_token, "conv_ban")
+        self.assertEqual(non_admin_bans.status, 403)
+
+        unban_response = await self._rooms_post(alice_token, "/v1/rooms/unban", "conv_ban", ["u_bob"])
+        self.assertEqual(unban_response.status, 200)
+
+        invite_unbanned = await self._rooms_post(alice_token, "/v1/rooms/invite", "conv_ban", ["u_bob"])
+        self.assertEqual(invite_unbanned.status, 200)
+
+        rebanned_bob_bans = await self._rooms_bans(bob_token, "conv_ban")
+        self.assertEqual(rebanned_bob_bans.status, 403)
 
 
 if __name__ == "__main__":

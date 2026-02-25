@@ -27,6 +27,7 @@ class InMemoryConversationStore:
     def __init__(self) -> None:
         self._conversations: Dict[str, Conversation] = {}
         self._members: Dict[str, Dict[str, str]] = {}
+        self._bans: Dict[str, Dict[str, dict[str, int | str]]] = {}
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
         self._remove_limits = FixedWindowRateLimiter(REMOVES_PER_MIN)
 
@@ -55,6 +56,9 @@ class InMemoryConversationStore:
         if not self._invite_limits.allow(f"{conv_id}:{actor_user_id}", now_ms):
             raise RateLimitExceeded("invite rate limit exceeded")
         roster = self._members.setdefault(conv_id, {})
+        for user_id in members:
+            if self.is_banned(conv_id, user_id):
+                raise PermissionError("banned")
         new_members = set(members) - set(roster.keys())
         if len(roster) + len(new_members) > MAX_MEMBERS_PER_CONV:
             raise LimitExceeded("too many members")
@@ -72,6 +76,42 @@ class InMemoryConversationStore:
             if user_id == conversation.owner_user_id:
                 continue
             roster.pop(user_id, None)
+
+    def ban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        roster = self._members.setdefault(conv_id, {})
+        now_ms = _now_ms()
+        bans = self._bans.setdefault(conv_id, {})
+        for user_id in members:
+            if user_id == conversation.owner_user_id:
+                continue
+            roster.pop(user_id, None)
+            bans[user_id] = {
+                "user_id": user_id,
+                "banned_by_user_id": actor_user_id,
+                "banned_at_ms": now_ms,
+            }
+
+    def unban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        bans = self._bans.setdefault(conv_id, {})
+        for user_id in members:
+            bans.pop(user_id, None)
+
+    def list_bans(self, conv_id: str, actor_user_id: str) -> list[dict[str, int | str]]:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        bans = list(self._bans.get(conv_id, {}).values())
+        bans.sort(key=lambda item: (str(item["user_id"]), int(item["banned_at_ms"])))
+        return bans
+
+    def is_banned(self, conv_id: str, user_id: str) -> bool:
+        bans = self._bans.get(conv_id)
+        if bans is None:
+            return False
+        return user_id in bans
 
     def promote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
         conversation = self._require_conversation(conv_id)
@@ -219,6 +259,17 @@ class SQLiteConversationStore:
                         "SELECT user_id FROM conversation_members WHERE conv_id=?", (conv_id,)
                     ).fetchall()
                 }
+                banned_members = {
+                    row[0]
+                    for row in cursor.execute(
+                        "SELECT user_id FROM conversation_bans WHERE conv_id=?",
+                        (conv_id,),
+                    ).fetchall()
+                }
+                for member in members:
+                    if member in banned_members:
+                        conn.rollback()
+                        raise PermissionError("banned")
                 new_members = set(members) - existing_members
                 if len(existing_members) + len(new_members) > MAX_MEMBERS_PER_CONV:
                     conn.rollback()
@@ -259,6 +310,89 @@ class SQLiteConversationStore:
                 raise
             finally:
                 cursor.close()
+
+    def ban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        now_ms = _now_ms()
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    if member == conversation.owner_user_id:
+                        continue
+                    cursor.execute(
+                        "DELETE FROM conversation_members WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO conversation_bans (conv_id, user_id, banned_by_user_id, banned_at_ms)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                            banned_by_user_id=excluded.banned_by_user_id,
+                            banned_at_ms=excluded.banned_at_ms
+                        """,
+                        (conv_id, member, actor_user_id, now_ms),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def unban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    cursor.execute(
+                        "DELETE FROM conversation_bans WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def list_bans(self, conv_id: str, actor_user_id: str) -> list[dict[str, int | str]]:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        with self._backend.lock:
+            rows = self._backend.connection.execute(
+                """
+                SELECT user_id, banned_by_user_id, banned_at_ms
+                FROM conversation_bans
+                WHERE conv_id=?
+                ORDER BY user_id ASC, banned_at_ms ASC
+                """,
+                (conv_id,),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(row["user_id"]),
+                "banned_by_user_id": str(row["banned_by_user_id"]),
+                "banned_at_ms": int(row["banned_at_ms"]),
+            }
+            for row in rows
+        ]
+
+    def is_banned(self, conv_id: str, user_id: str) -> bool:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT 1 FROM conversation_bans WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        return row is not None
 
     def promote_admin(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
         conversation = self._require_conversation(conv_id)

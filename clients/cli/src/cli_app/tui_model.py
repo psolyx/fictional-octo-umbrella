@@ -89,6 +89,7 @@ class RenderState:
     room_roster_active: bool
     room_roster_members: List[Dict[str, str]]
     room_roster_selected_idx: int
+    room_roster_view: str
     help_overlay_active: bool
     social_active: bool
     social_target: str
@@ -229,6 +230,7 @@ class TuiModel:
         self.room_roster_active = False
         self.room_roster_members: List[Dict[str, str]] = []
         self.room_roster_selected_idx = 0
+        self.room_roster_view = "roster"
         self.help_overlay_active = False
 
         self.social_active = False
@@ -768,6 +770,8 @@ class TuiModel:
                 return "room_roster_add_selected"
             if key == "ENTER":
                 return "room_roster_add_selected"
+            if key == "CHAR" and char in {"B"}:
+                return "room_roster_toggle_view"
             return None
 
 
@@ -1003,6 +1007,12 @@ class TuiModel:
             if key == "CHAR" and char in {"K"}:
                 self._open_room_modal("room_remove")
                 return None
+            if key == "CHAR" and char in {"b"}:
+                self._open_room_modal("room_ban")
+                return None
+            if key == "CHAR" and char in {"u"}:
+                self._open_room_modal("room_unban")
+                return None
             if key == "CHAR" and char in {"+"}:
                 self._open_room_modal("room_promote")
                 return None
@@ -1149,6 +1159,7 @@ class TuiModel:
             room_roster_active=self.room_roster_active,
             room_roster_members=list(self.room_roster_members),
             room_roster_selected_idx=self.room_roster_selected_idx,
+            room_roster_view=self.room_roster_view,
             help_overlay_active=self.help_overlay_active,
             social_active=self.social_active,
             social_target=self.social_target,
