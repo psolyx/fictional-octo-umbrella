@@ -19,6 +19,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'if key == "CTRL_R"',
             'char in {"I"}',
             'char in {"K"}',
+            'char in {"b"}',
+            'char in {"u"}',
             'char in {"+"}',
             'char in {"-"}',
             'char in {"m", "M"}',
@@ -26,6 +28,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'self._open_room_modal("room_create")',
             'self._open_room_modal("room_invite")',
             'self._open_room_modal("room_remove")',
+            'self._open_room_modal("room_ban")',
+            'self._open_room_modal("room_unban")',
             'self._open_room_modal("room_promote")',
             'self._open_room_modal("room_demote")',
         ):
@@ -40,6 +44,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_remove(',
             'def rooms_promote(',
             'def rooms_demote(',
+            'def rooms_ban(',
+            'def rooms_unban(',
+            'def rooms_bans(',
             'def rooms_members(',
         ):
             with self.subTest(marker=marker):
@@ -50,8 +57,12 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_remove',
             'gateway_client.rooms_promote',
             'gateway_client.rooms_demote',
+            'gateway_client.rooms_ban',
+            'gateway_client.rooms_unban',
+            'gateway_client.rooms_bans',
             'gateway_client.rooms_members',
             'Room roster',
+            'Room bans',
             'Add selected to modal members',
         ):
             with self.subTest(marker=marker):

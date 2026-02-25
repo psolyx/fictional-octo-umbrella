@@ -292,6 +292,46 @@ def room_demote(
     )
 
 
+
+
+def room_ban(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/ban"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_unban(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/unban"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def room_bans(base_url: str, session_token: str, conv_id: str) -> Dict[str, object]:
+    request_url = _build_url(base_url, "/v1/rooms/bans") + "?" + urllib.parse.urlencode({"conv_id": conv_id})
+    request = urllib.request.Request(
+        request_url,
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
 def rooms_create(
     base_url: str,
     session_token: str,
@@ -336,6 +376,27 @@ def rooms_demote(
 ) -> Dict[str, object]:
     return room_demote(base_url, session_token, conv_id, members)
 
+
+def rooms_ban(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_ban(base_url, session_token, conv_id, members)
+
+
+def rooms_unban(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    return room_unban(base_url, session_token, conv_id, members)
+
+
+def rooms_bans(base_url: str, session_token: str, conv_id: str) -> Dict[str, object]:
+    return room_bans(base_url, session_token, conv_id)
 
 
 

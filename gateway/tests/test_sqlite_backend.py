@@ -56,12 +56,18 @@ class SQLiteBackendTests(unittest.TestCase):
 
     def test_schema_version_and_home_gateway_defaulting(self):
         user_version = self.backend.connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(user_version, 8)
+        self.assertEqual(user_version, 9)
 
         columns = {
             row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversations)").fetchall()
         }
         self.assertIn("home_gateway", columns)
+        ban_tables = {
+            row[0] for row in self.backend.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        self.assertIn("conversation_bans", ban_tables)
 
         self.backend.connection.execute(
             "INSERT INTO conversations (conv_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)",

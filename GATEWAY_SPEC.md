@@ -535,6 +535,7 @@ Semantics match WS frames.
   - Only owners/admins may invite; unauthorized callers receive `forbidden`.
   - Invites MUST respect per-actor invite rate limits and the overall member cap (errors: `rate_limited`, `limit_exceeded`).
   - Invites MUST return `403 forbidden` with message `blocked` when inviter/target blocklists conflict.
+  - Invites MUST return `403 forbidden` with message `banned` when any target is room-banned.
   - Success response: `{ "status": "ok" }`.
 
 ### 8.3 Remove
@@ -572,6 +573,48 @@ Semantics match WS frames.
   - Only the `owner` may demote; demoting non-admins is a no-op.
   - The owner role is immutable and MUST NOT be changed.
   - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+### 8.6 Ban / unban and ban listing
+- Endpoint: `POST /v1/rooms/ban` (HTTP, authenticated as above).
+- Body:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "members": ["u_03F...", "u_04F..."]
+  }
+  ```
+- Semantics:
+  - Only owners/admins may ban; banning the owner is ignored.
+  - Ban MUST remove the target from current room membership if present and persist `(conv_id, user_id)` in the room banlist.
+  - Banned targets MUST be rejected from subsequent `POST /v1/rooms/invite` attempts with `403 forbidden` and message `banned`.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+- Endpoint: `POST /v1/rooms/unban` (HTTP, authenticated as above).
+- Body matches ban.
+- Semantics:
+  - Only owners/admins may unban.
+  - Unban removes the persisted ban entry; it does not re-add membership automatically.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+- Endpoint: `GET /v1/rooms/bans?conv_id=...` (HTTP, authenticated as above).
+- Response:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "bans": [
+      {
+        "user_id": "u_03F...",
+        "banned_by_user_id": "u_01F...",
+        "banned_at_ms": 1766793600123
+      }
+    ]
+  }
+  ```
+- Semantics:
+  - Visibility is admin-only (`owner`/`admin`). Non-admin members and non-members MUST receive `403 forbidden`.
+  - Results MUST be deterministic and sorted by `user_id` ascending.
+  - `banned_at_ms` MUST be serialized as an integer epoch-ms value.
+
 
 ---
 
