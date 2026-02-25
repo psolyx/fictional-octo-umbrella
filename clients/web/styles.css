@@ -148,3 +148,7 @@ pre {
 .presence-online{background:#2aa952;}
 .presence-offline{background:#737373;}
 .presence-unavailable{background:#b37a0a;}
+
+#social_publish_queue [data-test="publish-queue-row"] { border-top: 1px solid #ddd; padding: 4px 0; }
+#social_publish_queue button { margin-left: 8px; }
+

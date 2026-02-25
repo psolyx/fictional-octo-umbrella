@@ -159,6 +159,11 @@
     </section>
 
     <section class="profile_card">
+      <h4>Pending publishes</h4>
+      <div id="social_publish_queue" aria-live="polite"></div>
+    </section>
+
+    <section class="profile_card">
       <h4>Post bulletin</h4>
       <label>Bulletin text <input type="text" id="bulletin_text" size="64" /></label>
       <button id="bulletin_post_btn">Post bulletin</button>
@@ -166,11 +171,16 @@
 
     <section class="profile_card">
       <h4>Update profile</h4>
-      <label>Username <input type="text" id="profile_username_input" size="48" /></label>
-      <label>Description <input type="text" id="profile_description_input" size="64" /></label>
-      <label>Avatar URL/data <input type="text" id="profile_avatar_input" size="64" /></label>
-      <label>Banner URL/data <input type="text" id="profile_banner_input" size="64" /></label>
-      <label>Interests <input type="text" id="profile_interests_input" size="64" /></label>
+      <label>Username <input type="text" id="profile_username_input" size="48" aria-invalid="false" /></label>
+      <p id="username_field_error" class="field-error" data-test="field-error"></p>
+      <label>Description <input type="text" id="profile_description_input" size="64" aria-invalid="false" /></label>
+      <p id="description_field_error" class="field-error" data-test="field-error"></p>
+      <label>Avatar URL/data <input type="text" id="profile_avatar_input" size="64" aria-invalid="false" /></label>
+      <p id="avatar_field_error" class="field-error" data-test="field-error"></p>
+      <label>Banner URL/data <input type="text" id="profile_banner_input" size="64" aria-invalid="false" /></label>
+      <p id="banner_field_error" class="field-error" data-test="field-error"></p>
+      <label>Interests <input type="text" id="profile_interests_input" size="64" aria-invalid="false" /></label>
+      <p id="interests_field_error" class="field-error" data-test="field-error"></p>
       <label>Signature (sig_b64, advanced/debug) <input type="text" id="social_sig_b64" size="64" /></label>
       <button id="profile_update_btn">Update profile</button>
     </section>

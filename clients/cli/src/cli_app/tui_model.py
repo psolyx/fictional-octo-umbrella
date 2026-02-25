@@ -109,6 +109,8 @@ class RenderState:
     social_edit_active: bool
     social_edit_field: int
     social_edit_fields: Dict[str, str]
+    social_publish_queue: List[Dict[str, Any]]
+    social_last_publish_error: Optional[str]
     presence_active: bool
     presence_enabled: bool
     presence_invisible: bool
@@ -253,6 +255,8 @@ class TuiModel:
             "banner": "",
             "interests": "",
         }
+        self.social_publish_queue: List[Dict[str, Any]] = []
+        self.social_last_publish_error: Optional[str] = None
 
         self.presence_active = False
         self.presence_enabled = True
@@ -938,6 +942,8 @@ class TuiModel:
                     if self.social_view_mode == "profile":
                         return "social_profile_refresh"
                     return "social_refresh"
+                if key == "CHAR" and char in {"R"}:
+                    return "social_publish_retry_failed"
                 if key == "CHAR" and char in {"1"}:
                     self.social_target = "self"
                     return "social_target_self"
@@ -1159,6 +1165,8 @@ class TuiModel:
             social_edit_active=self.social_edit_active,
             social_edit_field=self.social_edit_field,
             social_edit_fields=dict(self.social_edit_fields),
+            social_publish_queue=list(self.social_publish_queue),
+            social_last_publish_error=self.social_last_publish_error,
             presence_active=self.presence_active,
             presence_enabled=self.presence_enabled,
             presence_invisible=self.presence_invisible,

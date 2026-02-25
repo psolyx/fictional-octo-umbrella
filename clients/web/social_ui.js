@@ -36,18 +36,168 @@ const profile_description_input = document.getElementById('profile_description_i
 const profile_avatar_input = document.getElementById('profile_avatar_input');
 const profile_banner_input = document.getElementById('profile_banner_input');
 const profile_interests_input = document.getElementById('profile_interests_input');
+const live_status = document.getElementById('live_status');
+const social_publish_queue = document.getElementById('social_publish_queue');
 
 let social_session_token = '';
 let social_http_base_url = '';
 let local_user_id = '';
 let viewed_user_id = '';
 let latest_profile_view = null;
+let latest_feed_body = { items: [] };
+const publish_queue_storage_key = 'social_publish_queue_v1';
+const social_queue = [];
+let social_queue_id = 0;
 const prefer_client_generated_dm_conv_id = false;
+
+const profile_field_inputs = {
+  username: profile_username_input,
+  description: profile_description_input,
+  avatar: profile_avatar_input,
+  banner: profile_banner_input,
+  interests: profile_interests_input,
+};
 
 const set_social_status = (text) => {
   if (social_status) {
     social_status.textContent = text;
   }
+  if (live_status) {
+    live_status.textContent = text;
+  }
+};
+
+const next_queue_id = () => {
+  social_queue_id += 1;
+  return `publish_${social_queue_id}`;
+};
+
+const save_social_queue = () => {
+  window.localStorage.setItem(publish_queue_storage_key, JSON.stringify(social_queue));
+};
+
+const queue_sort = (left, right) => {
+  if (left.started_at_ms !== right.started_at_ms) {
+    return left.started_at_ms - right.started_at_ms;
+  }
+  return left.id.localeCompare(right.id);
+};
+
+const queue_item_text = (item) => {
+  const value = item && item.payload ? item.payload.value || item.payload.text || '' : '';
+  return `${item.kind}: ${String(value).replace(/\n/g, ' ')}`;
+};
+
+const render_publish_queue = () => {
+  clear_children(social_publish_queue);
+  [...social_queue].sort(queue_sort).forEach((item) => {
+    const row = document.createElement('div');
+    row.dataset.test = 'publish-queue-row';
+    row.textContent = `${item.state} • ${queue_item_text(item)}`;
+    if (item.state === 'failed') {
+      const retry_btn = document.createElement('button');
+      retry_btn.type = 'button';
+      retry_btn.dataset.test = 'publish-retry';
+      retry_btn.textContent = 'Retry publish';
+      retry_btn.addEventListener('click', () => {
+        void retry_publish_queue_item(item.id);
+      });
+      row.appendChild(retry_btn);
+    }
+    social_publish_queue.appendChild(row);
+  });
+};
+
+const load_social_queue = () => {
+  const raw = window.localStorage.getItem(publish_queue_storage_key);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    parsed.forEach((item) => {
+      if (!item || typeof item.id !== 'string') return;
+      social_queue.push(item);
+    });
+  } catch (_error) {
+    social_queue.length = 0;
+  }
+};
+
+const upsert_queue_item = (item) => {
+  const index = social_queue.findIndex((entry) => entry.id === item.id);
+  if (index >= 0) social_queue[index] = item;
+  else social_queue.push(item);
+  save_social_queue();
+  render_publish_queue();
+};
+
+const queue_posts_for_user = (user_id) => social_queue
+  .filter((item) => item.kind === 'post' && item.payload && item.payload.user_id === user_id)
+  .sort(queue_sort);
+
+const set_field_error = (kind, message) => {
+  const input = profile_field_inputs[kind];
+  const error = document.getElementById(`${kind}_field_error`);
+  if (input) {
+    input.setAttribute('aria-invalid', message ? 'true' : 'false');
+    input.setAttribute('aria-describedby', `${kind}_field_error`);
+  }
+  if (error) {
+    error.textContent = message || '';
+  }
+};
+
+const validate_profile_value = (kind, value) => {
+  if (kind === 'username') {
+    if (!value || value.length > 32 || value.includes('\n')) return 'username must be 1..32 chars with no newlines';
+    return '';
+  }
+  if (kind === 'description' || kind === 'interests') {
+    return value.length > 1024 ? `${kind} must be <= 1024 chars` : '';
+  }
+  if (kind === 'avatar' || kind === 'banner') {
+    if (!value) return '';
+    const lower = value.toLowerCase();
+    if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('data:image/')) return '';
+    return `${kind} must use http(s) or data:image/*`;
+  }
+  return '';
+};
+
+const process_queue_item = async (item) => {
+  item.state = 'pending';
+  item.error = null;
+  upsert_queue_item(item);
+  const result = await publish_social_event(item.kind, item.payload);
+  if (result) {
+    item.state = 'confirmed';
+    item.confirmed_at_ms = Date.now();
+    upsert_queue_item(item);
+    return true;
+  }
+  item.state = 'failed';
+  item.error = social_status ? social_status.textContent : 'publish failed';
+  upsert_queue_item(item);
+  return false;
+};
+
+const process_queue_sequential = async (items) => {
+  for (const item of items) {
+    const ok = await process_queue_item(item);
+    if (!ok) {
+      set_social_status('publish failed; remaining queued items were not sent (deterministic stop-on-failure)');
+      return false;
+    }
+  }
+  return true;
+};
+
+const retry_publish_queue_item = async (id) => {
+  const item = social_queue.find((entry) => entry.id === id);
+  if (!item) return;
+  await process_queue_item(item);
+  render_profile(latest_profile_view || { user_id: local_user_id, latest_posts: [] });
+  render_home_feed(latest_feed_body || { items: [] });
 };
 
 const get_social_api_base = () => {
@@ -299,8 +449,26 @@ const fetch_profile_view = async () => {
 };
 
 const render_home_feed = (feed_body) => {
+  latest_feed_body = feed_body;
   clear_children(home_feed);
   const items = Array.isArray(feed_body.items) ? feed_body.items : [];
+  const local_posts = queue_posts_for_user(local_user_id);
+  local_posts.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'feed_entry';
+    row.textContent = `[${item.state}] ${item.payload.value || item.payload.text || ''}`;
+    if (item.state === 'failed') {
+      const retry_btn = document.createElement('button');
+      retry_btn.type = 'button';
+      retry_btn.dataset.test = 'publish-retry';
+      retry_btn.textContent = 'Retry publish';
+      retry_btn.addEventListener('click', () => {
+        void retry_publish_queue_item(item.id);
+      });
+      row.appendChild(retry_btn);
+    }
+    home_feed.appendChild(row);
+  });
   items.forEach((item) => {
     const row = document.createElement('div');
     row.className = 'feed_entry';
@@ -356,13 +524,38 @@ const submit_profile_updates = async () => {
     ['banner', profile_banner_input ? profile_banner_input.value.trim() : ''],
     ['interests', profile_interests_input ? profile_interests_input.value.trim() : ''],
   ];
-  for (const [kind, value] of updates) {
-    if (!value) {
-      continue;
+  const current_profile = latest_profile_view || {};
+  let first_invalid = null;
+  const changed_items = [];
+  updates.forEach(([kind, value]) => {
+    const error = validate_profile_value(kind, value);
+    set_field_error(kind, error);
+    if (error && !first_invalid) {
+      first_invalid = profile_field_inputs[kind];
     }
-    await publish_social_event(kind, { value });
+    if (!error && String(current_profile[kind] || '') !== value) {
+      changed_items.push({
+        id: next_queue_id(),
+        kind,
+        payload: { value },
+        state: 'pending',
+        error: null,
+        started_at_ms: Date.now(),
+        confirmed_at_ms: null,
+      });
+    }
+  });
+  if (first_invalid) {
+    first_invalid.focus();
+    set_social_status('profile validation failed');
+    return;
   }
-  set_social_status('profile update attempted');
+  if (!changed_items.length) {
+    set_social_status('no profile changes');
+    return;
+  }
+  await process_queue_sequential(changed_items);
+  set_social_status('profile updates processed');
   void fetch_profile_view();
 };
 
@@ -372,10 +565,22 @@ const post_bulletin = async () => {
     set_social_status('enter bulletin text');
     return;
   }
-  await publish_social_event('post', { value });
-  set_social_status('bulletin publish attempted');
-  void fetch_profile_view();
-  void fetch_home_feed();
+  const item = {
+    id: next_queue_id(),
+    kind: 'post',
+    payload: { value, user_id: local_user_id },
+    state: 'pending',
+    error: null,
+    started_at_ms: Date.now(),
+    confirmed_at_ms: null,
+  };
+  upsert_queue_item(item);
+  render_profile(latest_profile_view || { user_id: local_user_id, latest_posts: [] });
+  render_home_feed(latest_feed_body || { items: [] });
+  await process_queue_item(item);
+  render_profile(latest_profile_view || { user_id: local_user_id, latest_posts: [] });
+  render_home_feed(latest_feed_body || { items: [] });
+  set_social_status(`bulletin publish ${item.state}`);
 };
 
 const toggle_follow = async () => {
@@ -437,3 +642,6 @@ if (profile_message_btn) {
     void start_dm_with_peer(viewed_user_id, (latest_profile_view && latest_profile_view.username) || viewed_user_id);
   });
 }
+
+load_social_queue();
+render_publish_queue();

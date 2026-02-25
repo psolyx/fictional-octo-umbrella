@@ -27,6 +27,7 @@ This static web client is a protocol/interop harness for gateway v1 (WS flows, r
 - Only capture once the response is `HTTP/1.0 200 OK` (or `HTTP/1.1 200 OK`).
 - For browser-container captures, prefer an alternate local port (for example `8765`) and `127.0.0.1` URL forms to avoid forwarded-host rewrites that can produce false 404 pages.
 - If automation shows **"Not found" in the top-left on a blank page**, treat it as a serving-path mismatch and re-run the capture against `http://127.0.0.1:8765/index.html` after confirming `curl -I` returns `200`.
+- Known-good screenshot workflow (copy/paste): `python -m http.server 8765 --directory clients/web` then `curl -I http://127.0.0.1:8765/index.html` (expect `200`) before opening the page in browser automation.
 3. Enter the gateway WebSocket URL (e.g. `ws://localhost:8787/v1/ws`).
 4. Use **Start session** with an `auth_token` (and optional `device_id`/`device_credential`) to begin a session, or **Resume session** with a stored `resume_token`.
 5. Subscribe to a conversation with **Subscribe**, optionally providing `from_seq` to replay missed events, acknowledge delivery with **Ack**, and send ciphertext with **Send ciphertext**.

@@ -201,7 +201,7 @@ def publish_profile_field(base_url: str, *, identity: IdentityRecord, kind: str,
 
 
 def publish_post(base_url: str, *, identity: IdentityRecord, text: str) -> dict:
-    return publish_social_event(base_url, identity=identity, kind="post", payload={"text": text})
+    return publish_social_event(base_url, identity=identity, kind="post", payload={"value": text})
 
 
 def publish_follow(
