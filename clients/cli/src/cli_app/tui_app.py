@@ -240,7 +240,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | t: harness | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -252,6 +252,8 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     for idx, conv in enumerate(render.dm_conversations):
         attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
         label = conv.get("label", conv.get("name", ""))
+        if str(conv.get("pinned", "0")) == "1":
+            label = f"📌 {label}"
         presence_status = conv.get("presence_status", "")
         unread_count = int(conv.get("unread_count", "0") or "0")
         if unread_count > 0:
@@ -1440,12 +1442,14 @@ def _refresh_conversations(
         _append_system_message(model, "Conversation refresh returned invalid payload.")
         return
     added = 0
+    ordered_conv_ids: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         conv_id = str(item.get("conv_id", "")).strip()
         if not conv_id:
             continue
+        ordered_conv_ids.append(conv_id)
         members = item.get("members") if isinstance(item.get("members"), list) else []
         members = [member for member in members if isinstance(member, str)]
         member_count = int(item.get("member_count") or len(members) or 0)
@@ -1457,7 +1461,10 @@ def _refresh_conversations(
                     break
             if not peer_user_id and len(members) == 2:
                 peer_user_id = members[0]
-        if peer_user_id:
+        server_display_name = str(item.get("display_name", "")).strip()
+        if server_display_name:
+            name = server_display_name
+        elif peer_user_id:
             name = f"dm {_short_user_label(peer_user_id)}"
         else:
             name = f"room {conv_id[:8]} ({member_count})"
@@ -1489,12 +1496,20 @@ def _refresh_conversations(
             next_seq=local_next_seq,
         )
         conversation["label"] = name
+        conversation["server_title"] = str(item.get("title") or "")
+        conversation["server_label"] = str(item.get("label") or "")
+        conversation["pinned"] = "1" if bool(item.get("pinned")) else "0"
+        conversation["pinned_at_ms"] = str(item.get("pinned_at_ms") or 0)
+        conversation["role"] = str(item.get("role") or "member")
         conversation["server_earliest_seq"] = str(earliest_seq) if earliest_seq is not None else ""
         conversation["server_latest_seq"] = str(latest_seq) if latest_seq is not None else ""
         conversation["server_latest_ts_ms"] = str(latest_ts_ms) if latest_ts_ms is not None else ""
         conversation["unread_count"] = str(unread_count)
         if not existed:
             added += 1
+    if ordered_conv_ids:
+        order_index = {conv_id: idx for idx, conv_id in enumerate(ordered_conv_ids)}
+        model.dm_conversations.sort(key=lambda conv: (order_index.get(str(conv.get("conv_id", "")), len(order_index)), str(conv.get("conv_id", ""))))
     _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
 
 
@@ -1540,6 +1555,31 @@ def _mark_selected_conversation_read(
         conversation["unread_count"] = str(unread_value)
     _append_system_message(model, f"mark_read {conv_id} ok unread={unread_value}")
     return conv_id
+
+
+def _toggle_selected_conversation_pinned(model: TuiModel, session: SessionState | None) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    conv_id = model.get_selected_conv_id().strip()
+    if not conv_id:
+        _append_system_message(model, "Selected conversation has no conv_id.")
+        return
+    conversation = model.find_conversation(conv_id) or {}
+    currently_pinned = str(conversation.get("pinned", "0")) == "1"
+    try:
+        payload = gateway_client.conversations_set_pinned(
+            session.base_url,
+            session.session_token,
+            conv_id,
+            not currently_pinned,
+        )
+    except urllib.error.HTTPError as exc:
+        _append_system_message(model, f"pin failed: {_read_http_error_code(exc)}")
+        return
+    conversation["pinned"] = "1" if bool(payload.get("pinned")) else "0"
+    conversation["pinned_at_ms"] = str(payload.get("pinned_at_ms") or 0)
+    _append_system_message(model, f"pin {'on' if payload.get('pinned') else 'off'} for {conv_id}")
 
 
 def _send_dm_message(
@@ -1894,6 +1934,40 @@ def _submit_room_modal(
         model.focus_area = "conversations"
         model.ensure_conversation(conv_id=conv_id, name=name, state_dir=state_dir, peer_user_id="", next_seq=1)
         _append_system_message(model, f"room create ok conv_id={conv_id}")
+        return "conv_refresh"
+
+    if action_name in {"conv_set_label", "conv_set_title"}:
+        conv_id = model.get_selected_conv_id().strip()
+        if not conv_id:
+            model.room_modal_error_line = "ERR_ROOM_MODAL: conv_id required."
+            return None
+        if session is None:
+            model.room_modal_error_line = "ERR_ROOM_MODAL: No active session. Press r to resume."
+            return None
+        value_key = "label" if action_name == "conv_set_label" else "title"
+        value = fields.get(value_key, "").strip()
+        if len(value) > 64:
+            model.room_modal_error_line = f"ERR_ROOM_MODAL: {value_key} too long (max 64)."
+            return None
+        try:
+            if action_name == "conv_set_label":
+                gateway_client.conversations_set_label(session.base_url, session.session_token, conv_id, value)
+                _append_system_message(model, f"Conversation label updated for {conv_id}.")
+            else:
+                role = str((model.find_conversation(conv_id) or {}).get("role", "member"))
+                if role not in {"owner", "admin"}:
+                    _append_system_message(model, "forbidden: room title requires owner/admin role")
+                    return None
+                gateway_client.conversations_set_title(session.base_url, session.session_token, conv_id, value)
+                _append_system_message(model, f"Room title updated for {conv_id}.")
+        except urllib.error.HTTPError as exc:
+            model.room_modal_error_line = f"ERR_ROOM_MODAL: {_read_http_error_code(exc)}"
+            return None
+        model.room_modal_active = False
+        model.room_modal_action = ""
+        model.room_modal_field_order = []
+        model.room_modal_active_field = 0
+        model.focus_area = "conversations"
         return "conv_refresh"
 
     conv_id = model.get_selected_conv_id().strip()
@@ -2558,6 +2632,11 @@ def main() -> int:
                     force=True,
                     last_marked_conv_id=last_marked_conv_id,
                 )
+            if action == "conv_toggle_pinned":
+                _toggle_selected_conversation_pinned(model, session_state)
+                _refresh_conversations(model, session_state)
+            if action == "conv_set_title_forbidden":
+                _append_system_message(model, "forbidden: room title requires owner/admin role")
             if action == "social_toggle":
                 if model.social_active:
                     _set_social_status(model, "Social panel active.")

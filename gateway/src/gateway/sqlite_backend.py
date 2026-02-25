@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -85,7 +85,11 @@ class SQLiteBackend:
             self._migrate_v9_to_v10()
             user_version = 10
 
-        if user_version != 10:
+        if user_version == 10:
+            self._migrate_v10_to_v11()
+            user_version = 11
+
+        if user_version != 11:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -291,3 +295,45 @@ class SQLiteBackend:
             """
         )
         self._conn.execute("PRAGMA user_version = 10")
+
+    def _migrate_v10_to_v11(self) -> None:
+        existing_tables = {
+            row[0]
+            for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "conversations" not in existing_tables:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conv_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    home_gateway TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "title" not in columns:
+            self._conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_user_meta (
+                conv_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                pinned_at_ms INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (conv_id, user_id),
+                FOREIGN KEY (conv_id) REFERENCES conversations(conv_id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS conversation_user_meta_user_pin_idx
+            ON conversation_user_meta (user_id, pinned DESC, pinned_at_ms DESC, conv_id ASC)
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 11")

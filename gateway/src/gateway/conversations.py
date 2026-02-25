@@ -13,6 +13,22 @@ INVITES_PER_MIN = 60
 REMOVES_PER_MIN = 60
 MAX_INLINE_MEMBERS = 20
 ROLE_RANK = {"owner": 0, "admin": 1, "member": 2}
+MAX_CONVERSATION_TITLE_LEN = 64
+MAX_CONVERSATION_LABEL_LEN = 64
+
+
+def _normalize_title(title: str) -> str:
+    collapsed = " ".join(title.strip().split())
+    if len(collapsed) > MAX_CONVERSATION_TITLE_LEN:
+        raise ValueError("title too long")
+    return collapsed
+
+
+def _normalize_label(label: str) -> str:
+    normalized = label.strip()
+    if len(normalized) > MAX_CONVERSATION_LABEL_LEN:
+        raise ValueError("label too long")
+    return normalized
 
 
 @dataclass
@@ -21,6 +37,7 @@ class Conversation:
     owner_user_id: str
     created_at_ms: int
     home_gateway: str = ""
+    title: str = ""
 
 
 class InMemoryConversationStore:
@@ -29,6 +46,7 @@ class InMemoryConversationStore:
         self._members: Dict[str, Dict[str, str]] = {}
         self._bans: Dict[str, Dict[str, dict[str, int | str]]] = {}
         self._conversation_reads: Dict[tuple[str, str], tuple[int, int]] = {}
+        self._conversation_user_meta: Dict[tuple[str, str], dict[str, int | str | bool]] = {}
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
         self._remove_limits = FixedWindowRateLimiter(REMOVES_PER_MIN)
 
@@ -44,6 +62,7 @@ class InMemoryConversationStore:
             owner_user_id=owner_user_id,
             created_at_ms=_now_ms(),
             home_gateway=home_gateway,
+            title="",
         )
         self._conversations[conv_id] = conversation
         roster = {user_id: "member" for user_id in member_set}
@@ -170,12 +189,60 @@ class InMemoryConversationStore:
                 "created_at_ms": conversation.created_at_ms,
                 "home_gateway": conversation.home_gateway,
                 "member_count": len(roster),
+                "title": conversation.title,
             }
+            user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+            item["label"] = str(user_meta.get("label", ""))
+            item["pinned"] = bool(user_meta.get("pinned", False))
+            item["pinned_at_ms"] = int(user_meta.get("pinned_at_ms", 0))
             if len(roster) <= MAX_INLINE_MEMBERS:
                 item["members"] = sorted(roster.keys())
             items.append(item)
-        items.sort(key=lambda row: (int(row["created_at_ms"]), str(row["conv_id"])))
+        items.sort(
+            key=lambda row: (
+                not bool(row["pinned"]),
+                -int(row["pinned_at_ms"]),
+                int(row["created_at_ms"]),
+                str(row["conv_id"]),
+            )
+        )
         return items
+
+    def set_title(self, conv_id: str, actor_user_id: str, title: str) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        conversation.title = _normalize_title(title)
+
+    def get_title(self, conv_id: str) -> str:
+        conversation = self._require_conversation(conv_id)
+        return conversation.title
+
+    def set_label(self, conv_id: str, user_id: str, label: str) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        normalized = _normalize_label(label)
+        user_meta = self._conversation_user_meta.setdefault((conv_id, user_id), {})
+        user_meta["label"] = normalized
+        user_meta.setdefault("pinned", False)
+        user_meta.setdefault("pinned_at_ms", 0)
+        user_meta["updated_at_ms"] = _now_ms()
+
+    def get_label(self, conv_id: str, user_id: str) -> str:
+        user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+        return str(user_meta.get("label", ""))
+
+    def set_pinned(self, conv_id: str, user_id: str, pinned: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        user_meta = self._conversation_user_meta.setdefault((conv_id, user_id), {})
+        user_meta.setdefault("label", "")
+        user_meta["pinned"] = bool(pinned)
+        user_meta["pinned_at_ms"] = int(now_ms) if pinned else 0
+        user_meta["updated_at_ms"] = int(now_ms)
+
+    def get_pinned(self, conv_id: str, user_id: str) -> tuple[bool, int]:
+        user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+        return bool(user_meta.get("pinned", False)), int(user_meta.get("pinned_at_ms", 0))
 
     def list_members(self, conv_id: str) -> list[dict[str, str]]:
         conversation = self._require_conversation(conv_id)
@@ -520,7 +587,11 @@ class SQLiteConversationStore:
                     c.conv_id,
                     c.created_at_ms,
                     c.home_gateway,
+                    c.title,
                     cm.role,
+                    COALESCE(cum.label, '') AS label,
+                    COALESCE(cum.pinned, 0) AS pinned,
+                    COALESCE(cum.pinned_at_ms, 0) AS pinned_at_ms,
                     (
                         SELECT COUNT(*)
                         FROM conversation_members cm_count
@@ -528,8 +599,13 @@ class SQLiteConversationStore:
                     ) AS member_count
                 FROM conversations c
                 JOIN conversation_members cm ON cm.conv_id = c.conv_id
+                LEFT JOIN conversation_user_meta cum
+                    ON cum.conv_id = c.conv_id AND cum.user_id = cm.user_id
                 WHERE cm.user_id = ?
-                ORDER BY c.created_at_ms ASC, c.conv_id ASC
+                ORDER BY COALESCE(cum.pinned, 0) DESC,
+                    COALESCE(cum.pinned_at_ms, 0) DESC,
+                    c.created_at_ms ASC,
+                    c.conv_id ASC
                 """,
                 (user_id,),
             ).fetchall()
@@ -563,12 +639,91 @@ class SQLiteConversationStore:
                 "created_at_ms": int(row["created_at_ms"]),
                 "home_gateway": str(row["home_gateway"]),
                 "member_count": int(row["member_count"]),
+                "title": str(row["title"]),
+                "label": str(row["label"]),
+                "pinned": bool(int(row["pinned"])),
+                "pinned_at_ms": int(row["pinned_at_ms"]),
             }
             members = members_by_conv.get(conv_id)
             if members is not None:
                 item["members"] = members
             items.append(item)
         return items
+
+    def set_title(self, conv_id: str, actor_user_id: str, title: str) -> None:
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        normalized = _normalize_title(title)
+        with self._backend.lock:
+            self._backend.connection.execute(
+                "UPDATE conversations SET title=? WHERE conv_id=?",
+                (normalized, conv_id),
+            )
+
+    def get_title(self, conv_id: str) -> str:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT title FROM conversations WHERE conv_id=?",
+                (conv_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("unknown conversation")
+        return str(row[0])
+
+    def set_label(self, conv_id: str, user_id: str, label: str) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        normalized = _normalize_label(label)
+        now_ms = _now_ms()
+        with self._backend.lock:
+            self._backend.connection.execute(
+                """
+                INSERT INTO conversation_user_meta (conv_id, user_id, label, pinned, pinned_at_ms, updated_at_ms)
+                VALUES (?, ?, ?, 0, 0, ?)
+                ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                    label=excluded.label,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (conv_id, user_id, normalized, now_ms),
+            )
+
+    def get_label(self, conv_id: str, user_id: str) -> str:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT label FROM conversation_user_meta WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        if row is None:
+            return ""
+        return str(row[0])
+
+    def set_pinned(self, conv_id: str, user_id: str, pinned: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        normalized_pinned = 1 if pinned else 0
+        pinned_at_ms = int(now_ms) if pinned else 0
+        with self._backend.lock:
+            self._backend.connection.execute(
+                """
+                INSERT INTO conversation_user_meta (conv_id, user_id, label, pinned, pinned_at_ms, updated_at_ms)
+                VALUES (?, ?, '', ?, ?, ?)
+                ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                    pinned=excluded.pinned,
+                    pinned_at_ms=excluded.pinned_at_ms,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (conv_id, user_id, normalized_pinned, pinned_at_ms, int(now_ms)),
+            )
+
+    def get_pinned(self, conv_id: str, user_id: str) -> tuple[bool, int]:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT pinned, pinned_at_ms FROM conversation_user_meta WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        if row is None:
+            return False, 0
+        return bool(int(row[0])), int(row[1])
 
     def list_members(self, conv_id: str) -> list[dict[str, str]]:
         with self._backend.lock:

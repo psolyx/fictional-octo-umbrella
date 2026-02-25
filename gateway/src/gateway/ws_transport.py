@@ -1001,6 +1001,19 @@ async def handle_conversations_list(request: web.Request) -> web.Response:
         enriched["latest_ts_ms"] = latest_ts_ms
         enriched["last_read_seq"] = last_read_seq
         enriched["unread_count"] = unread_count
+        label = str(enriched.get("label", "")).strip()
+        title = str(enriched.get("title", "")).strip()
+        members = enriched.get("members")
+        display_name = conv_id
+        if label:
+            display_name = label
+        elif title:
+            display_name = title
+        elif int(enriched.get("member_count") or 0) == 2 and isinstance(members, list):
+            other_members = [member for member in members if isinstance(member, str) and member != session.user_id]
+            if len(other_members) == 1:
+                display_name = f"DM with {other_members[0]}"
+        enriched["display_name"] = display_name
         enriched_items.append(enriched)
     return web.json_response({"items": enriched_items})
 
@@ -1050,6 +1063,84 @@ async def handle_conversations_mark_read(request: web.Request) -> web.Response:
             "unread_count": unread_count,
         }
     )
+
+
+async def handle_conversations_title(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    title = body.get("title")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if not isinstance(title, str):
+        return _invalid_request("title must be a string")
+    if len(title.strip()) > 64:
+        return _invalid_request("title too long")
+    try:
+        runtime.conversations.set_title(conv_id, session.user_id, title)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError:
+        return _forbidden("forbidden")
+    return web.json_response({"status": "ok", "conv_id": conv_id, "title": runtime.conversations.get_title(conv_id)})
+
+
+async def handle_conversations_label(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    label = body.get("label")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if not isinstance(label, str):
+        return _invalid_request("label must be a string")
+    if len(label.strip()) > 64:
+        return _invalid_request("label too long")
+    try:
+        runtime.conversations.set_label(conv_id, session.user_id, label)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError as exc:
+        return _invalid_request(str(exc))
+    return web.json_response({"status": "ok", "conv_id": conv_id, "label": runtime.conversations.get_label(conv_id, session.user_id)})
+
+
+async def handle_conversations_pin(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    pinned = body.get("pinned")
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if not isinstance(pinned, bool):
+        return _invalid_request("pinned must be a boolean")
+    try:
+        runtime.conversations.set_pinned(conv_id, session.user_id, pinned, runtime.now_func())
+    except PermissionError:
+        return _forbidden("forbidden")
+    pinned_value, pinned_at_ms = runtime.conversations.get_pinned(conv_id, session.user_id)
+    return web.json_response({"status": "ok", "conv_id": conv_id, "pinned": pinned_value, "pinned_at_ms": pinned_at_ms})
 
 
 async def handle_room_invite(request: web.Request) -> web.Response:
@@ -1602,6 +1693,9 @@ def create_app(
     app.router.add_post("/v1/dms/create", handle_dms_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
     app.router.add_post("/v1/conversations/mark_read", handle_conversations_mark_read)
+    app.router.add_post("/v1/conversations/title", handle_conversations_title)
+    app.router.add_post("/v1/conversations/label", handle_conversations_label)
+    app.router.add_post("/v1/conversations/pin", handle_conversations_pin)
     app.router.add_post("/v1/rooms/invite", handle_room_invite)
     app.router.add_post("/v1/rooms/remove", handle_room_remove)
     app.router.add_post("/v1/rooms/promote", handle_room_promote)

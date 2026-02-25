@@ -659,6 +659,10 @@ class TuiModel:
             conv_id = f"conv_{uuid.uuid4().hex}"
             self.room_modal_field_order = list(ROOM_CREATE_FIELD_ORDER)
             self.room_modal_fields = {"name": "", "members": "", "conv_id": conv_id, "state_dir": ""}
+        elif action in {"conv_set_label", "conv_set_title"}:
+            field_name = "label" if action == "conv_set_label" else "title"
+            self.room_modal_field_order = [field_name]
+            self.room_modal_fields = {field_name: ""}
         else:
             self.room_modal_field_order = list(ROOM_MEMBERS_FIELD_ORDER)
             self.room_modal_fields = {"members": ""}
@@ -704,7 +708,7 @@ class TuiModel:
 
         if key == "q":
             return "quit"
-        if key == "t":
+        if key == "t" and not (self.mode == MODE_DM_CLIENT and self.focus_area == "conversations"):
             self.mode = MODE_HARNESS if self.mode == MODE_DM_CLIENT else MODE_DM_CLIENT
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
             self.new_dm_active = False
@@ -1029,6 +1033,17 @@ class TuiModel:
                 return "conv_next_unread"
             if key == "CHAR" and char in {"R"}:
                 return "retry_failed_send"
+            if key == "CHAR" and char in {"n", "N"}:
+                self._open_room_modal("conv_set_label")
+                return None
+            if key == "CHAR" and char in {"t"}:
+                selected_role = str(self.get_selected_conv().get("role", "member"))
+                if selected_role not in {"owner", "admin"}:
+                    return "conv_set_title_forbidden"
+                self._open_room_modal("conv_set_title")
+                return None
+            if key == "CHAR" and char in {"p", "P"}:
+                return "conv_toggle_pinned"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()

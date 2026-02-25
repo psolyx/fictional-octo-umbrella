@@ -221,5 +221,75 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clamped_item["unread_count"], 2)
 
 
+    async def test_conversation_naming_pinning_and_permissions(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        bob_token = await self._session("u_bob", "d_bob")
+        eve_token = await self._session("u_eve", "d_eve")
+
+        await self._create_room(alice_token, "conv_named_a", ["u_bob"])
+        await self._create_room(alice_token, "conv_named_b", ["u_bob"])
+
+        set_title = await self.client.post(
+            "/v1/conversations/title",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"conv_id": "conv_named_a", "title": "  Team   Room  "},
+        )
+        self.assertEqual(set_title.status, 200)
+        self.assertEqual((await set_title.json())["title"], "Team Room")
+
+        bob_title = await self.client.post(
+            "/v1/conversations/title",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"conv_id": "conv_named_a", "title": "Nope"},
+        )
+        self.assertEqual(bob_title.status, 403)
+
+        set_label = await self.client.post(
+            "/v1/conversations/label",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"conv_id": "conv_named_a", "label": "Private Name"},
+        )
+        self.assertEqual(set_label.status, 200)
+
+        pin_b = await self.client.post(
+            "/v1/conversations/pin",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"conv_id": "conv_named_b", "pinned": True},
+        )
+        self.assertEqual(pin_b.status, 200)
+
+        bob_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        self.assertEqual(bob_list.status, 200)
+        bob_items = (await bob_list.json())["items"]
+        self.assertEqual([item["conv_id"] for item in bob_items], ["conv_named_b", "conv_named_a"])
+        by_conv = {item["conv_id"]: item for item in bob_items}
+        self.assertEqual(by_conv["conv_named_a"]["display_name"], "Private Name")
+        self.assertEqual(by_conv["conv_named_a"]["title"], "Team Room")
+        self.assertTrue(by_conv["conv_named_b"]["pinned"])
+        self.assertGreaterEqual(by_conv["conv_named_b"]["pinned_at_ms"], 1)
+
+        alice_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(alice_list.status, 200)
+        alice_conv_a = next(item for item in (await alice_list.json())["items"] if item["conv_id"] == "conv_named_a")
+        self.assertEqual(alice_conv_a["display_name"], "Team Room")
+
+        for path, payload in (
+            ("/v1/conversations/title", {"conv_id": "conv_named_a", "title": "x"}),
+            ("/v1/conversations/label", {"conv_id": "conv_named_a", "label": "x"}),
+            ("/v1/conversations/pin", {"conv_id": "conv_named_a", "pinned": True}),
+        ):
+            response = await self.client.post(
+                path,
+                headers={"Authorization": f"Bearer {eve_token}"},
+                json=payload,
+            )
+            self.assertEqual(response.status, 403)
+
 if __name__ == "__main__":
     unittest.main()
