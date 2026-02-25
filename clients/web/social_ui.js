@@ -11,6 +11,9 @@ const profile_refresh_btn = document.getElementById('profile_refresh_btn');
 const feed_refresh_btn = document.getElementById('feed_refresh_btn');
 const follow_toggle_btn = document.getElementById('follow_toggle_btn');
 const profile_message_btn = document.getElementById('profile_message_btn');
+const profile_block_toggle_btn = document.getElementById('profile_block_toggle_btn');
+const profile_block_status = document.getElementById('profile_block_status');
+const dm_block_banner = document.getElementById('dm_block_banner');
 
 const social_prev_hash_input = document.getElementById('social_prev_hash');
 const social_kind_input = document.getElementById('social_kind');
@@ -49,6 +52,7 @@ const publish_queue_storage_key = 'social_publish_queue_v1';
 const social_queue = [];
 let social_queue_id = 0;
 const prefer_client_generated_dm_conv_id = false;
+const blocked_user_ids = new Set();
 
 const profile_field_inputs = {
   username: profile_username_input,
@@ -65,6 +69,100 @@ const set_social_status = (text) => {
   if (live_status) {
     live_status.textContent = text;
   }
+};
+
+const is_blocked_peer = (user_id) => !!user_id && blocked_user_ids.has(user_id);
+
+const render_block_controls = () => {
+  const is_peer_profile = !!viewed_user_id && viewed_user_id !== local_user_id;
+  const blocked = is_blocked_peer(viewed_user_id);
+  if (profile_block_toggle_btn) {
+    profile_block_toggle_btn.style.display = is_peer_profile ? '' : 'none';
+    profile_block_toggle_btn.textContent = blocked ? 'Unblock' : 'Block';
+    profile_block_toggle_btn.disabled = !social_session_token || !is_peer_profile;
+    profile_block_toggle_btn.dataset.test = 'block-toggle';
+  }
+  if (profile_block_status) {
+    profile_block_status.textContent = blocked && is_peer_profile ? 'Blocked' : '';
+  }
+  if (dm_block_banner) {
+    dm_block_banner.hidden = !blocked;
+    dm_block_banner.textContent = blocked ? `Blocked: ${viewed_user_id}` : '';
+  }
+};
+
+const apply_blocked_dm_state = () => {
+  const blocked = is_blocked_peer(viewed_user_id);
+  if (profile_message_btn) {
+    profile_message_btn.disabled = profile_message_btn.disabled || blocked;
+    profile_message_btn.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+    if (blocked) {
+      profile_message_btn.title = 'Unblock this user to create/send DMs';
+    } else {
+      profile_message_btn.removeAttribute('title');
+    }
+  }
+  const send_btn = document.getElementById('send_btn');
+  const ciphertext_input = document.getElementById('ciphertext_input');
+  const compose_error = document.getElementById('compose_error');
+  if (send_btn) {
+    send_btn.disabled = blocked;
+    send_btn.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+  }
+  if (ciphertext_input) {
+    ciphertext_input.disabled = blocked;
+    ciphertext_input.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+  }
+  if (compose_error && blocked) {
+    compose_error.hidden = false;
+    compose_error.textContent = 'Cannot send messages while this peer is blocked.';
+  }
+};
+
+const fetch_blocklist = async () => {
+  if (!social_session_token || !social_http_base_url) return;
+  const response = await fetch(`${get_social_api_base()}/v1/presence/blocklist`, {
+    headers: { Authorization: `Bearer ${social_session_token}` },
+  });
+  if (!response.ok) return;
+  const payload = await response.json();
+  blocked_user_ids.clear();
+  const blocked = payload && Array.isArray(payload.blocked) ? payload.blocked : [];
+  blocked.forEach((user_id) => {
+    if (typeof user_id === 'string' && user_id) blocked_user_ids.add(user_id);
+  });
+  render_block_controls();
+  apply_blocked_dm_state();
+};
+
+const toggle_block_for_viewed_user = async () => {
+  if (!viewed_user_id || viewed_user_id === local_user_id) {
+    set_social_status('select another profile to block/unblock');
+    return;
+  }
+  if (!social_session_token) {
+    set_social_status('block requires gateway session');
+    return;
+  }
+  const blocked = is_blocked_peer(viewed_user_id);
+  const path = blocked ? '/v1/presence/unblock' : '/v1/presence/block';
+  const response = await fetch(`${get_social_api_base()}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${social_session_token}`,
+    },
+    body: JSON.stringify({ contacts: [viewed_user_id] }),
+  });
+  if (!response.ok) {
+    set_social_status(`${blocked ? 'unblock' : 'block'} failed (${response.status})`);
+    return;
+  }
+  if (blocked) blocked_user_ids.delete(viewed_user_id);
+  else blocked_user_ids.add(viewed_user_id);
+  render_block_controls();
+  apply_blocked_dm_state();
+  set_social_status(blocked ? 'unblocked user' : 'blocked user');
 };
 
 const next_queue_id = () => {
@@ -305,7 +403,11 @@ const publish_social_event = async (kind, payload, prev_hash = '') => {
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    set_social_status(`publish failed (${response.status})`);
+    if (response.status === 429) {
+      set_social_status('rate_limited: publish failed (retry available)');
+    } else {
+      set_social_status(`publish failed (${response.status})`);
+    }
     return null;
   }
   const result = await response.json();
@@ -377,9 +479,11 @@ const render_profile = (profile_body) => {
   }
   if (profile_message_btn) {
     const is_peer_profile = !!viewed_user_id && viewed_user_id !== local_user_id;
-    profile_message_btn.disabled = !(is_peer_profile && !!social_session_token);
+    profile_message_btn.disabled = !(is_peer_profile && !!social_session_token) || is_blocked_peer(viewed_user_id);
     profile_message_btn.style.display = is_peer_profile ? '' : 'none';
   }
+  render_block_controls();
+  apply_blocked_dm_state();
 };
 
 const generate_dm_conv_id_fallback = () => {
@@ -412,7 +516,17 @@ const start_dm_with_peer = async (peer_user_id, peer_display_name = '') => {
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    set_social_status(`message failed (${response.status})`);
+    if (response.status === 429) {
+      set_social_status('rate_limited: message failed (retry later)');
+    } else if (response.status === 403) {
+      set_social_status('blocked');
+      if (dm_block_banner) {
+        dm_block_banner.hidden = false;
+        dm_block_banner.textContent = 'Blocked by blocklist policy.';
+      }
+    } else {
+      set_social_status(`message failed (${response.status})`);
+    }
     return;
   }
   const body = await response.json();
@@ -628,6 +742,7 @@ window.addEventListener('gateway.session.ready', (event) => {
   if (social_user_id_input && !social_user_id_input.value) {
     social_user_id_input.value = local_user_id;
   }
+  void fetch_blocklist();
 });
 
 if (social_fetch_btn) social_fetch_btn.addEventListener('click', () => void fetch_social_events());
@@ -640,6 +755,11 @@ if (follow_toggle_btn) follow_toggle_btn.addEventListener('click', () => void to
 if (profile_message_btn) {
   profile_message_btn.addEventListener('click', () => {
     void start_dm_with_peer(viewed_user_id, (latest_profile_view && latest_profile_view.username) || viewed_user_id);
+  });
+}
+if (profile_block_toggle_btn) {
+  profile_block_toggle_btn.addEventListener('click', () => {
+    void toggle_block_for_viewed_user();
   });
 }
 

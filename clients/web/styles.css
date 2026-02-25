@@ -152,3 +152,11 @@ pre {
 #social_publish_queue [data-test="publish-queue-row"] { border-top: 1px solid #ddd; padding: 4px 0; }
 #social_publish_queue button { margin-left: 8px; }
 
+
+.blocked-banner {
+  border: 1px solid #b35a00;
+  background: #fff5eb;
+  color: #7a2f00;
+  padding: 8px;
+  margin-bottom: 8px;
+}

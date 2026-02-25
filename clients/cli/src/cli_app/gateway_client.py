@@ -173,6 +173,39 @@ def conversations_list(base_url: str, session_token: str) -> Dict[str, object]:
     with urllib.request.urlopen(request) as response:
         raw = response.read().decode("utf-8")
     return json.loads(raw) if raw else {}
+
+
+def presence_blocklist(base_url: str, session_token: str) -> list[str]:
+    request = urllib.request.Request(
+        _build_url(base_url, "/v1/presence/blocklist"),
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    payload = json.loads(raw) if raw else {}
+    blocked = payload.get("blocked") if isinstance(payload, dict) else []
+    return [entry for entry in blocked if isinstance(entry, str)]
+
+
+def presence_block(base_url: str, session_token: str, contacts: list[str]) -> Dict[str, object]:
+    payload: Dict[str, object] = {"contacts": contacts}
+    return _post_json(
+        _build_url(base_url, "/v1/presence/block"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def presence_unblock(base_url: str, session_token: str, contacts: list[str]) -> Dict[str, object]:
+    payload: Dict[str, object] = {"contacts": contacts}
+    return _post_json(
+        _build_url(base_url, "/v1/presence/unblock"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def room_create(
     base_url: str,
     session_token: str,

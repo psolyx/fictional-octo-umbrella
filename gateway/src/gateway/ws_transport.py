@@ -40,6 +40,11 @@ from .sqlite_sessions import Session, SQLiteSessionStore, _now_ms
 
 
 _KEYPACKAGE_FETCH_LIMIT_PER_MIN = 60
+_CONV_SENDS_PER_MIN_DEFAULT = 120
+_SOCIAL_PUBLISHES_PER_MIN_DEFAULT = 30
+_DMS_CREATES_PER_MIN_DEFAULT = 30
+_MAX_ENV_B64_LEN_DEFAULT = 262_144
+_MAX_SOCIAL_EVENT_BYTES_DEFAULT = 65_536
 
 
 class WsConfig(TypedDict):
@@ -124,12 +129,17 @@ class Runtime:
         backend: SQLiteBackend | None = None,
         presence: Presence,
         keypackage_fetch_limiter: FixedWindowRateLimiter,
+        conv_send_limiter: FixedWindowRateLimiter,
+        social_publish_limiter: FixedWindowRateLimiter,
+        dms_create_limiter: FixedWindowRateLimiter,
         now_func: Callable[[], int] = _now_ms,
         conversations,
         gateway_id: str,
         gateway_public_url: str,
         gateway_directory: dict[str, str],
         social,
+        max_env_b64_len: int,
+        max_social_event_bytes: int,
         retention_policy: RetentionPolicy | None = None,
     ) -> None:
         self.log = log
@@ -140,12 +150,17 @@ class Runtime:
         self.backend = backend
         self.presence = presence
         self.keypackage_fetch_limiter = keypackage_fetch_limiter
+        self.conv_send_limiter = conv_send_limiter
+        self.social_publish_limiter = social_publish_limiter
+        self.dms_create_limiter = dms_create_limiter
         self.now_func = now_func
         self.conversations = conversations
         self.gateway_id = gateway_id
         self.gateway_public_url = gateway_public_url
         self.gateway_directory = gateway_directory
         self.social = social
+        self.max_env_b64_len = max_env_b64_len
+        self.max_social_event_bytes = max_social_event_bytes
         self.retention_policy = retention_policy
         self.retention_task: asyncio.Task[None] | None = None
 
@@ -305,8 +320,20 @@ def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any])
     ts = body.get("ts") or _now_ms()
     if not conv_id or not msg_id or env is None:
         return None, None, ("invalid_request", "conv_id, msg_id, env required")
+    if not isinstance(env, str):
+        return None, None, ("invalid_request", "conv_id, msg_id, env required")
+    if len(env) > runtime.max_env_b64_len:
+        return None, None, ("invalid_request", "env too large")
     if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
         return None, None, ("forbidden", "not a member")
+    now_ms = runtime.now_func()
+    rate_key = f"{session.user_id}:{conv_id}"
+    if not runtime.conv_send_limiter.allow(rate_key, now_ms):
+        return None, None, ("rate_limited", "conversation sends rate limit exceeded")
+    members = runtime.conversations.list_members(conv_id)
+    member_user_ids = [member.get("user_id") for member in members if isinstance(member, dict)]
+    if len(member_user_ids) == 2 and runtime.presence.is_blocked(str(member_user_ids[0]), str(member_user_ids[1])):
+        return None, None, ("forbidden", "blocked")
     seq, event, created = runtime.log.append(conv_id, msg_id, env, session.device_id, ts)
     if created:
         _opportunistic_prune(runtime, conv_id)
@@ -643,6 +670,14 @@ async def handle_presence_status(request: web.Request) -> web.Response:
     return _no_store_response({"statuses": statuses})
 
 
+async def handle_presence_blocklist(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _with_no_store(_unauthorized())
+    return _no_store_response({"blocked": runtime.presence.list_blocked(session.user_id)})
+
+
 async def handle_inbox(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -665,6 +700,8 @@ async def handle_inbox(request: web.Request) -> web.Response:
             code, message = error
             if code == "forbidden":
                 return _forbidden(message)
+            if code == "rate_limited":
+                return _rate_limited(message)
             return _invalid_request(message)
         assert seq is not None
         return web.json_response({"status": "ok", "seq": seq, **_routing_metadata(runtime, frame_body.get("conv_id"))})
@@ -890,6 +927,11 @@ async def handle_dms_create(request: web.Request) -> web.Response:
     peer_user_id = peer_user_id.strip()
     if peer_user_id == session.user_id:
         return _invalid_request("peer_user_id must not equal self")
+    if runtime.presence.is_blocked(session.user_id, peer_user_id):
+        return _forbidden("blocked")
+    now_ms = runtime.now_func()
+    if not runtime.dms_create_limiter.allow(session.user_id, now_ms):
+        return _rate_limited("dm create rate limit exceeded")
 
     conv_id_raw = body.get("conv_id")
     if conv_id_raw is None or conv_id_raw == "":
@@ -950,6 +992,9 @@ async def handle_room_invite(request: web.Request) -> web.Response:
         return _invalid_request("conv_id required")
     if members is None:
         return _invalid_request("members must be a list of user_ids")
+    for member in members:
+        if runtime.presence.is_blocked(session.user_id, member):
+            return _forbidden("blocked")
     try:
         runtime.conversations.invite(conv_id, session.user_id, members)
     except PermissionError:
@@ -1085,6 +1130,26 @@ async def handle_social_publish(request: web.Request) -> web.Response:
         return _invalid_request("payload must be a JSON object")
     if not isinstance(sig_b64, str) or not sig_b64:
         return _invalid_request("sig_b64 required")
+    now_ms = runtime.now_func()
+    if not runtime.social_publish_limiter.allow(session.user_id, now_ms):
+        return _with_no_store(_rate_limited("social publish rate limit exceeded"))
+    try:
+        canonical_event_bytes = json.dumps(
+            {
+                "user_id": session.user_id,
+                "prev_hash": prev_hash,
+                "ts_ms": ts_ms,
+                "kind": kind,
+                "payload": payload,
+                "sig_b64": sig_b64,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except TypeError:
+        return _invalid_request("payload must be JSON-serializable")
+    if len(canonical_event_bytes) > runtime.max_social_event_bytes:
+        return _invalid_request("social event too large")
 
     try:
         event = runtime.social.append(
@@ -1328,6 +1393,16 @@ def create_app(
     presence = presence or Presence()
     hub = SubscriptionHub()
     fetch_limiter = FixedWindowRateLimiter(keypackage_fetch_limit_per_min)
+    conv_send_limit = int(os.environ.get("GATEWAY_CONV_SENDS_PER_MIN", _CONV_SENDS_PER_MIN_DEFAULT))
+    social_publish_limit = int(os.environ.get("GATEWAY_SOCIAL_PUBLISHES_PER_MIN", _SOCIAL_PUBLISHES_PER_MIN_DEFAULT))
+    dms_create_limit = int(os.environ.get("GATEWAY_DMS_CREATES_PER_MIN", _DMS_CREATES_PER_MIN_DEFAULT))
+    max_env_b64_len = int(os.environ.get("GATEWAY_MAX_ENV_B64_LEN", _MAX_ENV_B64_LEN_DEFAULT))
+    max_social_event_bytes = int(
+        os.environ.get("GATEWAY_MAX_SOCIAL_EVENT_BYTES", _MAX_SOCIAL_EVENT_BYTES_DEFAULT)
+    )
+    conv_send_limiter = FixedWindowRateLimiter(conv_send_limit)
+    social_publish_limiter = FixedWindowRateLimiter(social_publish_limit)
+    dms_create_limiter = FixedWindowRateLimiter(dms_create_limit)
     resolved_gateway_id = gateway_id or os.environ.get("GATEWAY_ID") or "gw_local"
     resolved_gateway_public_url = gateway_public_url or os.environ.get("GATEWAY_PUBLIC_URL") or "http://localhost"
     gateway_directory = _load_gateway_directory(
@@ -1342,12 +1417,17 @@ def create_app(
         backend=backend,
         presence=presence,
         keypackage_fetch_limiter=fetch_limiter,
+        conv_send_limiter=conv_send_limiter,
+        social_publish_limiter=social_publish_limiter,
+        dms_create_limiter=dms_create_limiter,
         now_func=keypackage_now_func,
         conversations=conversations,
         gateway_id=resolved_gateway_id,
         gateway_public_url=resolved_gateway_public_url,
         gateway_directory=gateway_directory,
         social=social,
+        max_env_b64_len=max_env_b64_len,
+        max_social_event_bytes=max_social_event_bytes,
         retention_policy=retention_policy,
     )
     app = web.Application()
@@ -1372,6 +1452,7 @@ def create_app(
     app.router.add_post("/v1/presence/block", handle_presence_block)
     app.router.add_post("/v1/presence/unblock", handle_presence_unblock)
     app.router.add_post("/v1/presence/status", handle_presence_status)
+    app.router.add_get("/v1/presence/blocklist", handle_presence_blocklist)
     app.router.add_post("/v1/rooms/create", handle_room_create)
     app.router.add_post("/v1/dms/create", handle_dms_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
