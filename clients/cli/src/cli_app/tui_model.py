@@ -725,6 +725,8 @@ class TuiModel:
                 if self.social_view_mode == "feed":
                     return "social_feed_refresh"
                 return "social_refresh"
+            if self.mode == MODE_DM_CLIENT and self.focus_area in {"conversations", "transcript", "compose"}:
+                return "conv_mark_read"
             return "resume"
         if key == "CTRL_P" and self.mode == MODE_DM_CLIENT and not self.new_dm_active:
             if self.social_active:

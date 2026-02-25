@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -81,7 +81,11 @@ class SQLiteBackend:
             self._migrate_v8_to_v9()
             user_version = 9
 
-        if user_version != 9:
+        if user_version == 9:
+            self._migrate_v9_to_v10()
+            user_version = 10
+
+        if user_version != 10:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -272,3 +276,18 @@ class SQLiteBackend:
             "CREATE INDEX IF NOT EXISTS conversation_bans_conv_user_idx ON conversation_bans (conv_id, user_id)"
         )
         self._conn.execute("PRAGMA user_version = 9")
+
+    def _migrate_v9_to_v10(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_reads (
+                conv_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                last_read_seq INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (conv_id, user_id),
+                FOREIGN KEY (conv_id) REFERENCES conversations(conv_id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._conn.execute("PRAGMA user_version = 10")

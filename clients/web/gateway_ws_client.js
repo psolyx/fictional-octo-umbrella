@@ -647,6 +647,55 @@
     return value;
   };
 
+  const response_error_label = (response, payload) => {
+    if (response && response.status === 403) {
+      return 'forbidden';
+    }
+    if (response && response.status === 429) {
+      return 'rate_limited';
+    }
+    if (payload && payload.code === 'invalid_request') {
+      return 'invalid_request';
+    }
+    return response ? `http_${response.status}` : 'request_failed';
+  };
+
+  const post_conversations_json = async (path, payload) => {
+    if (!conversations_http_base_url || !conversations_session_token) {
+      throw new Error('session required');
+    }
+    const response = await fetch(`${conversations_http_base_url}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${conversations_session_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload || {}),
+    });
+    const payload_text = await response.text();
+    let body = {};
+    try {
+      body = payload_text ? JSON.parse(payload_text) : {};
+    } catch (error) {
+      body = {};
+    }
+    if (!response.ok) {
+      throw new Error(response_error_label(response, body));
+    }
+    return body;
+  };
+
+  const mark_conversation_read = async (conv_id, to_seq = null) => {
+    if (typeof conv_id !== 'string' || !conv_id) {
+      return null;
+    }
+    const payload = { conv_id };
+    if (Number.isInteger(to_seq)) {
+      payload.to_seq = to_seq;
+    }
+    return post_conversations_json('/v1/conversations/mark_read', payload);
+  };
+
   const render_conversations = async (items) => {
     if (!conversations_list) {
       return;
@@ -663,12 +712,14 @@
       if (!item || typeof item !== 'object' || typeof item.conv_id !== 'string') {
         continue;
       }
-      const cursor_next_seq = (await read_cursor(item.conv_id)) ?? 1;
-      const acked_seq = cursor_next_seq - 1;
       const latest_seq = to_optional_int(item.latest_seq);
       const earliest_seq = to_optional_int(item.earliest_seq);
       const latest_ts_ms = to_optional_int(item.latest_ts_ms);
-      const unread_count = latest_seq === null ? 0 : Math.max(0, latest_seq - acked_seq);
+      const unread_count = Number.isInteger(item.unread_count)
+        ? Math.max(0, item.unread_count)
+        : 0;
+      const last_read_seq = Number.isInteger(item.last_read_seq) ? item.last_read_seq : null;
+      const cursor_next_seq = Math.max(1, (last_read_seq === null ? 0 : last_read_seq) + 1);
       const pruned = earliest_seq !== null && cursor_next_seq < earliest_seq;
       computed_items.push({ ...item, unread_count, pruned, cursor_next_seq, earliest_seq, latest_ts_ms });
     }
@@ -704,6 +755,15 @@
         })
       );
       subscribe_btn.click();
+      mark_conversation_read(item.conv_id)
+        .then((response_payload) => {
+          const unread_count = Number.isInteger(response_payload.unread_count) ? response_payload.unread_count : 0;
+          set_conversations_status(`status: mark_read ok unread=${unread_count}`);
+          return refresh_conversations();
+        })
+        .catch((error) => {
+          set_conversations_status(`status: mark_read ${error.message || 'request_failed'}`);
+        });
     };
 
     computed_items.forEach((item, index) => {

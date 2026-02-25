@@ -487,7 +487,9 @@ Semantics match WS frames.
         "members": ["u_01F...", "u_02F..."],
         "earliest_seq": 4,
         "latest_seq": 27,
-        "latest_ts_ms": 1766793920456
+        "latest_ts_ms": 1766793920456,
+        "last_read_seq": 26,
+        "unread_count": 1
       }
     ]
   }
@@ -498,12 +500,39 @@ Semantics match WS frames.
   - `member_count` MUST always be present.
   - `members` SHOULD be included only when `member_count <= 20`; for larger rooms it MAY be omitted to keep responses bounded.
   - `earliest_seq`, `latest_seq`, and `latest_ts_ms` describe the currently retained conversation log bounds.
+  - `last_read_seq` reports the authenticated member's retained read pointer for the conversation (`null` when unset).
+  - `unread_count` reports deterministic unread messages as `max(0, latest_seq - max(last_read_seq, earliest_seq - 1, 0))`; when `latest_seq` is `null`, unread is `0`.
   - If a conversation has no retained log events, `earliest_seq`, `latest_seq`, and `latest_ts_ms` MUST be `null`.
   - `earliest_seq` MUST be the minimum retained `seq` (after retention pruning).
   - `latest_seq` MUST be the maximum retained `seq`.
   - `latest_ts_ms` MUST equal the `ts_ms` of the event at `latest_seq`.
 
-### 8.1b DM create alias
+### 8.1b Mark conversation read
+- Endpoint: `POST /v1/conversations/mark_read` (HTTP, authenticated as above).
+- Body:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "to_seq": 27
+  }
+  ```
+  - `to_seq` is optional. If omitted, the server marks read through the current retained `latest_seq` (or `0` when no events are retained).
+- Response:
+  ```json
+  {
+    "status": "ok",
+    "conv_id": "c_7N7...",
+    "last_read_seq": 27,
+    "unread_count": 0
+  }
+  ```
+- Semantics:
+  - Membership is required. Non-members and unknown conversations MUST both return `403 forbidden`.
+  - Marking read MUST be monotonic per (`conv_id`, `user_id`): `last_read_seq` MUST NOT decrease.
+  - The effective minimum mark is clamped to `earliest_seq - 1` when retention has pruned older events.
+  - `unread_count` MUST be deterministic and never negative.
+
+### 8.1c DM create alias
 - Endpoint: `POST /v1/dms/create` (HTTP, authenticated via `Authorization: Bearer {session_token}`).
 - Body:
   ```json

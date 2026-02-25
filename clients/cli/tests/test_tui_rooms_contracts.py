@@ -24,6 +24,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"+"}',
             'char in {"-"}',
             'char in {"m", "M"}',
+            'return "conv_mark_read"',
             'return f"{self.room_modal_action}_submit"',
             'self._open_room_modal("room_create")',
             'self._open_room_modal("room_invite")',
@@ -48,6 +49,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_unban(',
             'def rooms_bans(',
             'def rooms_members(',
+            'def conversations_mark_read(',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_client)
@@ -61,9 +63,11 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_unban',
             'gateway_client.rooms_bans',
             'gateway_client.rooms_members',
+            'gateway_client.conversations_mark_read',
             'Room roster',
             'Room bans',
             'Add selected to modal members',
+            'mark_read',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.tui_app)
@@ -85,6 +89,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('if key == "?"', self.tui_model)
         self.assertIn('"Keybindings"', self.tui_app)
         self.assertIn('"Press Esc to close (or q)"', self.tui_app)
+        self.assertIn('r mark read', self.tui_app)
 
     def test_tui_presence_room_markers(self):
         for marker in (

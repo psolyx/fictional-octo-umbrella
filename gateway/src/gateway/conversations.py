@@ -28,6 +28,7 @@ class InMemoryConversationStore:
         self._conversations: Dict[str, Conversation] = {}
         self._members: Dict[str, Dict[str, str]] = {}
         self._bans: Dict[str, Dict[str, dict[str, int | str]]] = {}
+        self._conversation_reads: Dict[tuple[str, str], tuple[int, int]] = {}
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
         self._remove_limits = FixedWindowRateLimiter(REMOVES_PER_MIN)
 
@@ -185,6 +186,37 @@ class InMemoryConversationStore:
         ]
         members.sort(key=lambda item: (ROLE_RANK.get(item["role"], 999), item["user_id"]))
         return members
+
+    def get_last_read_seq(self, conv_id: str, user_id: str) -> int | None:
+        read_state = self._conversation_reads.get((conv_id, user_id))
+        if read_state is None:
+            return None
+        return int(read_state[0])
+
+    def set_last_read_seq(self, conv_id: str, user_id: str, last_read_seq: int) -> None:
+        self._conversation_reads[(conv_id, user_id)] = (int(last_read_seq), _now_ms())
+
+    def mark_read(
+        self,
+        conv_id: str,
+        user_id: str,
+        *,
+        to_seq: int | None,
+        now_ms: int,
+        latest_seq: int | None,
+        earliest_seq: int | None,
+    ) -> int:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        min_allowed = max((earliest_seq - 1) if earliest_seq is not None else 0, 0)
+        max_allowed = latest_seq if latest_seq is not None else min_allowed
+        target_seq = max_allowed if to_seq is None else int(to_seq)
+        clamped_target = max(min_allowed, min(target_seq, max_allowed))
+        existing = self.get_last_read_seq(conv_id, user_id)
+        if existing is not None:
+            clamped_target = max(clamped_target, int(existing))
+        self._conversation_reads[(conv_id, user_id)] = (clamped_target, int(now_ms))
+        return clamped_target
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         conversation = self._conversations.get(conv_id)
@@ -556,6 +588,80 @@ class SQLiteConversationStore:
         ]
         members.sort(key=lambda item: (ROLE_RANK.get(item["role"], 999), item["user_id"]))
         return members
+
+    def get_last_read_seq(self, conv_id: str, user_id: str) -> int | None:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT last_read_seq FROM conversation_reads WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row[0])
+
+    def set_last_read_seq(self, conv_id: str, user_id: str, last_read_seq: int) -> None:
+        with self._backend.lock:
+            self._backend.connection.execute(
+                """
+                INSERT INTO conversation_reads (conv_id, user_id, last_read_seq, updated_at_ms)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                    last_read_seq=excluded.last_read_seq,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (conv_id, user_id, int(last_read_seq), _now_ms()),
+            )
+
+    def mark_read(
+        self,
+        conv_id: str,
+        user_id: str,
+        *,
+        to_seq: int | None,
+        now_ms: int,
+        latest_seq: int | None,
+        earliest_seq: int | None,
+    ) -> int:
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                member_row = cursor.execute(
+                    "SELECT 1 FROM conversation_members WHERE conv_id=? AND user_id=?",
+                    (conv_id, user_id),
+                ).fetchone()
+                if member_row is None:
+                    conn.rollback()
+                    raise PermissionError("forbidden")
+                existing_row = cursor.execute(
+                    "SELECT last_read_seq FROM conversation_reads WHERE conv_id=? AND user_id=?",
+                    (conv_id, user_id),
+                ).fetchone()
+                existing = int(existing_row[0]) if existing_row is not None else None
+                min_allowed = max((earliest_seq - 1) if earliest_seq is not None else 0, 0)
+                max_allowed = latest_seq if latest_seq is not None else min_allowed
+                target_seq = max_allowed if to_seq is None else int(to_seq)
+                clamped_target = max(min_allowed, min(target_seq, max_allowed))
+                if existing is not None:
+                    clamped_target = max(clamped_target, existing)
+                cursor.execute(
+                    """
+                    INSERT INTO conversation_reads (conv_id, user_id, last_read_seq, updated_at_ms)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                        last_read_seq=excluded.last_read_seq,
+                        updated_at_ms=excluded.updated_at_ms
+                    """,
+                    (conv_id, user_id, clamped_target, int(now_ms)),
+                )
+                conn.commit()
+                return clamped_target
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
 
     def _require_conversation(self, conv_id: str) -> Conversation:
         with self._backend.lock:
