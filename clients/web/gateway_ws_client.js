@@ -53,16 +53,20 @@
   let conversations_refresh_btn = null;
   let conversations_list = null;
   let conversations_status = null;
+  let conversations_show_archived_toggle = null;
   let conversation_label_input = null;
   let conversation_label_save_btn = null;
   let conversation_label_error = null;
   let conversation_pinned_toggle = null;
+  let conversation_muted_toggle = null;
+  let conversation_archived_toggle = null;
   let conversation_title_input = null;
   let conversation_title_save_btn = null;
   let conversation_title_error = null;
   let conversations_session_token = '';
   let conversations_http_base_url = '';
   let conversations_user_id = '';
+  let conversations_show_archived = false;
   let presence_map_by_user_id = {};
   let presence_watched_contacts = new Set();
   let presence_known_dm_peers = new Set();
@@ -96,10 +100,13 @@
   conversations_refresh_btn = document.getElementById('conversations_refresh_btn');
   conversations_list = document.getElementById('conversations_list');
   conversations_status = document.getElementById('conversations_status');
+  conversations_show_archived_toggle = document.getElementById('conversations_show_archived_toggle');
   conversation_label_input = document.getElementById('conversation_label_input');
   conversation_label_save_btn = document.getElementById('conversation_label_save_btn');
   conversation_label_error = document.getElementById('conversation_label_error');
   conversation_pinned_toggle = document.getElementById('conversation_pinned_toggle');
+  conversation_muted_toggle = document.getElementById('conversation_muted_toggle');
+  conversation_archived_toggle = document.getElementById('conversation_archived_toggle');
   conversation_title_input = document.getElementById('conversation_title_input');
   conversation_title_save_btn = document.getElementById('conversation_title_save_btn');
   conversation_title_error = document.getElementById('conversation_title_error');
@@ -714,6 +721,8 @@
   const set_conversation_label = async (conv_id, label) => post_conversations_json('/v1/conversations/label', { conv_id, label });
   const set_conversation_title = async (conv_id, title) => post_conversations_json('/v1/conversations/title', { conv_id, title });
   const set_conversation_pin = async (conv_id, pinned) => post_conversations_json('/v1/conversations/pin', { conv_id, pinned });
+  const set_conversation_muted = async (conv_id, muted) => post_conversations_json('/v1/conversations/mute', { conv_id, muted });
+  const set_conversation_archived = async (conv_id, archived) => post_conversations_json('/v1/conversations/archive', { conv_id, archived });
 
   const sync_conversation_details = (item) => {
     selected_conversation_item = item;
@@ -722,6 +731,12 @@
     }
     if (conversation_pinned_toggle) {
       conversation_pinned_toggle.checked = !!item.pinned;
+    }
+    if (conversation_muted_toggle) {
+      conversation_muted_toggle.checked = !!item.muted;
+    }
+    if (conversation_archived_toggle) {
+      conversation_archived_toggle.checked = !!item.archived;
     }
     const role = typeof item.role === 'string' ? item.role : 'member';
     const can_set_title = role === 'owner' || role === 'admin';
@@ -815,8 +830,18 @@
       if (item.pinned) {
         status_markers.push('📌');
       }
+      if (item.muted) {
+        status_markers.push('🔕');
+      }
+      if (item.archived && conversations_show_archived) {
+        status_markers.push('(archived)');
+      }
       if (item.unread_count > 0) {
-        status_markers.push(`unread=${item.unread_count}`);
+        if (item.muted) {
+          status_markers.push(`unread~${item.unread_count}`);
+        } else {
+          status_markers.push(`unread=${item.unread_count}`);
+        }
       }
       if (item.pruned) {
         status_markers.push('pruned');
@@ -903,7 +928,8 @@
     }
     set_conversations_status('status: loading');
     try {
-      const response = await fetch(`${conversations_http_base_url}/v1/conversations`, {
+      const include_archived_suffix = conversations_show_archived ? '?include_archived=1' : '';
+      const response = await fetch(`${conversations_http_base_url}/v1/conversations${include_archived_suffix}`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${conversations_session_token}`,
@@ -3097,6 +3123,47 @@
         .then(() => refresh_conversations())
         .then(() => set_conversations_status(`status: pinned ${conversation_pinned_toggle.checked ? 'on' : 'off'}`))
         .catch((error) => set_conversations_status(`status: pin ${error.message || 'request_failed'}`));
+    });
+  }
+  if (conversation_muted_toggle) {
+    conversation_muted_toggle.addEventListener('change', () => {
+      if (!selected_conversation_item || !selected_conversation_item.conv_id) {
+        set_conversations_status('status: select a conversation first');
+        conversation_muted_toggle.checked = false;
+        return;
+      }
+      set_conversation_muted(selected_conversation_item.conv_id, !!conversation_muted_toggle.checked)
+        .then(() => refresh_conversations())
+        .then(() => set_conversations_status(`status: muted ${conversation_muted_toggle.checked ? 'on' : 'off'}`))
+        .catch((error) => set_conversations_status(`status: mute ${error.message || 'request_failed'}`));
+    });
+  }
+  if (conversation_archived_toggle) {
+    conversation_archived_toggle.addEventListener('change', () => {
+      if (!selected_conversation_item || !selected_conversation_item.conv_id) {
+        set_conversations_status('status: select a conversation first');
+        conversation_archived_toggle.checked = false;
+        return;
+      }
+      const archived_checked = !!conversation_archived_toggle.checked;
+      set_conversation_archived(selected_conversation_item.conv_id, archived_checked)
+        .then(() => refresh_conversations())
+        .then(() => {
+          if (archived_checked && !conversations_show_archived) {
+            set_conversations_status('status: archived; hidden from list');
+            return;
+          }
+          set_conversations_status(`status: archived ${archived_checked ? 'on' : 'off'}`);
+        })
+        .catch((error) => set_conversations_status(`status: archive ${error.message || 'request_failed'}`));
+    });
+  }
+  if (conversations_show_archived_toggle) {
+    conversations_show_archived_toggle.addEventListener('change', () => {
+      conversations_show_archived = !!conversations_show_archived_toggle.checked;
+      refresh_conversations().catch((err) =>
+        set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
+      );
     });
   }
   if (conversations_refresh_btn) {

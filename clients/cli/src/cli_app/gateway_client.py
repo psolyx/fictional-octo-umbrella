@@ -164,9 +164,10 @@ def keypackages_rotate(
 
 
 
-def conversations_list(base_url: str, session_token: str) -> Dict[str, object]:
+def conversations_list(base_url: str, session_token: str, include_archived: bool = False) -> Dict[str, object]:
+    path = "/v1/conversations?include_archived=1" if include_archived else "/v1/conversations"
     request = urllib.request.Request(
-        _build_url(base_url, "/v1/conversations"),
+        _build_url(base_url, path),
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
@@ -228,6 +229,34 @@ def conversations_set_pinned(
     payload: Dict[str, object] = {"conv_id": conv_id, "pinned": pinned}
     return _post_json(
         _build_url(base_url, "/v1/conversations/pin"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def conversations_set_muted(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    muted: bool,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "muted": muted}
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/mute"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def conversations_set_archived(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    archived: bool,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "archived": archived}
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/archive"),
         payload,
         headers={"Authorization": f"Bearer {session_token}"},
     )

@@ -176,7 +176,7 @@ class InMemoryConversationStore:
     def is_known(self, conv_id: str) -> bool:
         return conv_id in self._conversations
 
-    def list_for_user(self, user_id: str) -> list[dict[str, object]]:
+    def list_for_user(self, user_id: str, *, include_archived: bool = False) -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
         for conv_id, conversation in self._conversations.items():
             roster = self._members.get(conv_id, {})
@@ -192,9 +192,14 @@ class InMemoryConversationStore:
                 "title": conversation.title,
             }
             user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+            archived = bool(user_meta.get("archived", False))
+            if archived and not include_archived:
+                continue
             item["label"] = str(user_meta.get("label", ""))
             item["pinned"] = bool(user_meta.get("pinned", False))
             item["pinned_at_ms"] = int(user_meta.get("pinned_at_ms", 0))
+            item["muted"] = bool(user_meta.get("muted", False))
+            item["archived"] = archived
             if len(roster) <= MAX_INLINE_MEMBERS:
                 item["members"] = sorted(roster.keys())
             items.append(item)
@@ -225,6 +230,8 @@ class InMemoryConversationStore:
         user_meta["label"] = normalized
         user_meta.setdefault("pinned", False)
         user_meta.setdefault("pinned_at_ms", 0)
+        user_meta.setdefault("muted", False)
+        user_meta.setdefault("archived", False)
         user_meta["updated_at_ms"] = _now_ms()
 
     def get_label(self, conv_id: str, user_id: str) -> str:
@@ -236,6 +243,8 @@ class InMemoryConversationStore:
             raise PermissionError("forbidden")
         user_meta = self._conversation_user_meta.setdefault((conv_id, user_id), {})
         user_meta.setdefault("label", "")
+        user_meta.setdefault("muted", False)
+        user_meta.setdefault("archived", False)
         user_meta["pinned"] = bool(pinned)
         user_meta["pinned_at_ms"] = int(now_ms) if pinned else 0
         user_meta["updated_at_ms"] = int(now_ms)
@@ -243,6 +252,36 @@ class InMemoryConversationStore:
     def get_pinned(self, conv_id: str, user_id: str) -> tuple[bool, int]:
         user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
         return bool(user_meta.get("pinned", False)), int(user_meta.get("pinned_at_ms", 0))
+
+    def set_muted(self, conv_id: str, user_id: str, muted: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        user_meta = self._conversation_user_meta.setdefault((conv_id, user_id), {})
+        user_meta.setdefault("label", "")
+        user_meta.setdefault("pinned", False)
+        user_meta.setdefault("pinned_at_ms", 0)
+        user_meta.setdefault("archived", False)
+        user_meta["muted"] = bool(muted)
+        user_meta["updated_at_ms"] = int(now_ms)
+
+    def get_muted(self, conv_id: str, user_id: str) -> bool:
+        user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+        return bool(user_meta.get("muted", False))
+
+    def set_archived(self, conv_id: str, user_id: str, archived: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        user_meta = self._conversation_user_meta.setdefault((conv_id, user_id), {})
+        user_meta.setdefault("label", "")
+        user_meta.setdefault("pinned", False)
+        user_meta.setdefault("pinned_at_ms", 0)
+        user_meta.setdefault("muted", False)
+        user_meta["archived"] = bool(archived)
+        user_meta["updated_at_ms"] = int(now_ms)
+
+    def get_archived(self, conv_id: str, user_id: str) -> bool:
+        user_meta = self._conversation_user_meta.get((conv_id, user_id), {})
+        return bool(user_meta.get("archived", False))
 
     def list_members(self, conv_id: str) -> list[dict[str, str]]:
         conversation = self._require_conversation(conv_id)
@@ -579,7 +618,7 @@ class SQLiteConversationStore:
                 )
         return home_gateway
 
-    def list_for_user(self, user_id: str) -> list[dict[str, object]]:
+    def list_for_user(self, user_id: str, *, include_archived: bool = False) -> list[dict[str, object]]:
         with self._backend.lock:
             rows = self._backend.connection.execute(
                 """
@@ -592,6 +631,8 @@ class SQLiteConversationStore:
                     COALESCE(cum.label, '') AS label,
                     COALESCE(cum.pinned, 0) AS pinned,
                     COALESCE(cum.pinned_at_ms, 0) AS pinned_at_ms,
+                    COALESCE(cum.muted, 0) AS muted,
+                    COALESCE(cum.archived, 0) AS archived,
                     (
                         SELECT COUNT(*)
                         FROM conversation_members cm_count
@@ -602,12 +643,13 @@ class SQLiteConversationStore:
                 LEFT JOIN conversation_user_meta cum
                     ON cum.conv_id = c.conv_id AND cum.user_id = cm.user_id
                 WHERE cm.user_id = ?
+                    AND (? = 1 OR COALESCE(cum.archived, 0) = 0)
                 ORDER BY COALESCE(cum.pinned, 0) DESC,
                     COALESCE(cum.pinned_at_ms, 0) DESC,
                     c.created_at_ms ASC,
                     c.conv_id ASC
                 """,
-                (user_id,),
+                (user_id, 1 if include_archived else 0),
             ).fetchall()
             members_by_conv: dict[str, list[str]] = {}
             small_conv_ids = [
@@ -643,6 +685,8 @@ class SQLiteConversationStore:
                 "label": str(row["label"]),
                 "pinned": bool(int(row["pinned"])),
                 "pinned_at_ms": int(row["pinned_at_ms"]),
+                "muted": bool(int(row["muted"])),
+                "archived": bool(int(row["archived"])),
             }
             members = members_by_conv.get(conv_id)
             if members is not None:
@@ -678,8 +722,10 @@ class SQLiteConversationStore:
         with self._backend.lock:
             self._backend.connection.execute(
                 """
-                INSERT INTO conversation_user_meta (conv_id, user_id, label, pinned, pinned_at_ms, updated_at_ms)
-                VALUES (?, ?, ?, 0, 0, ?)
+                INSERT INTO conversation_user_meta (
+                    conv_id, user_id, label, pinned, pinned_at_ms, muted, archived, updated_at_ms
+                )
+                VALUES (?, ?, ?, 0, 0, 0, 0, ?)
                 ON CONFLICT(conv_id, user_id) DO UPDATE SET
                     label=excluded.label,
                     updated_at_ms=excluded.updated_at_ms
@@ -705,8 +751,10 @@ class SQLiteConversationStore:
         with self._backend.lock:
             self._backend.connection.execute(
                 """
-                INSERT INTO conversation_user_meta (conv_id, user_id, label, pinned, pinned_at_ms, updated_at_ms)
-                VALUES (?, ?, '', ?, ?, ?)
+                INSERT INTO conversation_user_meta (
+                    conv_id, user_id, label, pinned, pinned_at_ms, muted, archived, updated_at_ms
+                )
+                VALUES (?, ?, '', ?, ?, 0, 0, ?)
                 ON CONFLICT(conv_id, user_id) DO UPDATE SET
                     pinned=excluded.pinned,
                     pinned_at_ms=excluded.pinned_at_ms,
@@ -724,6 +772,62 @@ class SQLiteConversationStore:
         if row is None:
             return False, 0
         return bool(int(row[0])), int(row[1])
+
+    def set_muted(self, conv_id: str, user_id: str, muted: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        normalized_muted = 1 if muted else 0
+        with self._backend.lock:
+            self._backend.connection.execute(
+                """
+                INSERT INTO conversation_user_meta (
+                    conv_id, user_id, label, pinned, pinned_at_ms, muted, archived, updated_at_ms
+                )
+                VALUES (?, ?, '', 0, 0, ?, 0, ?)
+                ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                    muted=excluded.muted,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (conv_id, user_id, normalized_muted, int(now_ms)),
+            )
+
+    def get_muted(self, conv_id: str, user_id: str) -> bool:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT muted FROM conversation_user_meta WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        if row is None:
+            return False
+        return bool(int(row[0]))
+
+    def set_archived(self, conv_id: str, user_id: str, archived: bool, now_ms: int) -> None:
+        if not self.is_member(conv_id, user_id):
+            raise PermissionError("forbidden")
+        normalized_archived = 1 if archived else 0
+        with self._backend.lock:
+            self._backend.connection.execute(
+                """
+                INSERT INTO conversation_user_meta (
+                    conv_id, user_id, label, pinned, pinned_at_ms, muted, archived, updated_at_ms
+                )
+                VALUES (?, ?, '', 0, 0, 0, ?, ?)
+                ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                    archived=excluded.archived,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (conv_id, user_id, normalized_archived, int(now_ms)),
+            )
+
+    def get_archived(self, conv_id: str, user_id: str) -> bool:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT archived FROM conversation_user_meta WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        if row is None:
+            return False
+        return bool(int(row[0]))
 
     def list_members(self, conv_id: str) -> list[dict[str, str]]:
         with self._backend.lock:

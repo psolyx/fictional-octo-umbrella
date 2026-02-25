@@ -69,6 +69,7 @@ class RenderState:
     selected_menu: int
     menu_items: List[str]
     dm_conversations: List[Dict[str, str]]
+    show_archived: bool
     selected_conversation: int
     field_order: List[str]
     fields: Dict[str, str]
@@ -263,6 +264,7 @@ class TuiModel:
         self.blocked_user_ids: set[str] = set()
 
         self.presence_active = False
+        self.show_archived = bool(initial_settings.get("show_archived", False))
         self.presence_enabled = True
         self.presence_invisible = False
         self.presence_entries: Dict[str, Dict[str, Any]] = {}
@@ -286,6 +288,7 @@ class TuiModel:
         settings["dm_conversations"] = self.dm_conversations
         settings["dm_selected"] = self.selected_conversation
         settings["tui_mode"] = self.mode
+        settings["show_archived"] = self.show_archived
         persist_settings(settings, self.settings_path)
 
     def _load_conversations(self, initial_settings: Dict[str, Any], defaults: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -334,6 +337,9 @@ class TuiModel:
             "label": str(entry.get("label") or entry.get("name") or fallback_name),
             "last_preview": str(entry.get("last_preview", "")),
             "last_ts_ms": int(entry.get("last_ts_ms", 0) or 0),
+            "pinned": str(entry.get("pinned", "0")),
+            "muted": str(entry.get("muted", "0")),
+            "archived": str(entry.get("archived", "0")),
             "transcript": [
                 {
                     "ts": float(item.get("ts", 0.0)),
@@ -1044,6 +1050,14 @@ class TuiModel:
                 return None
             if key == "CHAR" and char in {"p", "P"}:
                 return "conv_toggle_pinned"
+            if key == "CHAR" and char in {"z"}:
+                return "conv_toggle_muted"
+            if key == "CHAR" and char in {"A"}:
+                return "conv_toggle_archived"
+            if key == "CHAR" and char in {"H"}:
+                self.show_archived = not self.show_archived
+                self._persist()
+                return "conv_toggle_show_archived"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()
@@ -1150,12 +1164,16 @@ class TuiModel:
                     "label": str(conv.get("label", conv.get("name", ""))),
                     "last_preview": str(conv.get("last_preview", "")),
                     "last_ts_ms": str(conv.get("last_ts_ms", "0")),
+                    "pinned": str(conv.get("pinned", "0")),
+                    "muted": str(conv.get("muted", "0")),
+                    "archived": str(conv.get("archived", "0")),
                     "presence_status": str(
                         self.presence_entries.get(str(conv.get("peer_user_id", "")), {}).get("status", "")
                     ),
                 }
                 for conv in self.dm_conversations
             ],
+            show_archived=self.show_archived,
             selected_conversation=self.selected_conversation,
             field_order=list(self.field_order),
             fields=dict(self.fields),

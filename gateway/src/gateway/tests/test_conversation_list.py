@@ -291,5 +291,93 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status, 403)
 
+    async def test_conversation_mute_archive_listing_and_permissions(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        bob_token = await self._session("u_bob", "d_bob")
+        eve_token = await self._session("u_eve", "d_eve")
+
+        await self._create_room(alice_token, "conv_room", ["u_bob"])
+        dm_response = await self.client.post(
+            "/v1/dms/create",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"peer_user_id": "u_bob", "conv_id": "conv_dm"},
+        )
+        self.assertEqual(dm_response.status, 200)
+
+        initial_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        self.assertEqual(initial_list.status, 200)
+        initial_items = (await initial_list.json())["items"]
+        self.assertEqual(sorted(item["conv_id"] for item in initial_items), ["conv_dm", "conv_room"])
+        for item in initial_items:
+            self.assertFalse(item.get("muted"))
+            self.assertFalse(item.get("archived"))
+
+        archive_response = await self.client.post(
+            "/v1/conversations/archive",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"conv_id": "conv_dm", "archived": True},
+        )
+        self.assertEqual(archive_response.status, 200)
+        self.assertTrue((await archive_response.json())["archived"])
+
+        default_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        self.assertEqual(default_list.status, 200)
+        self.assertEqual([item["conv_id"] for item in (await default_list.json())["items"]], ["conv_room"])
+
+        include_archived_list = await self.client.get(
+            "/v1/conversations?include_archived=1",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        self.assertEqual(include_archived_list.status, 200)
+        by_conv_id = {item["conv_id"]: item for item in (await include_archived_list.json())["items"]}
+        self.assertTrue(by_conv_id["conv_dm"]["archived"])
+        self.assertFalse(by_conv_id["conv_room"]["archived"])
+
+        mute_response = await self.client.post(
+            "/v1/conversations/mute",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={"conv_id": "conv_room", "muted": True},
+        )
+        self.assertEqual(mute_response.status, 200)
+        self.assertTrue((await mute_response.json())["muted"])
+
+        refreshed_default = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        refreshed_item = (await refreshed_default.json())["items"][0]
+        self.assertEqual(refreshed_item["conv_id"], "conv_room")
+        self.assertTrue(refreshed_item["muted"])
+        self.assertFalse(refreshed_item["archived"])
+
+        refreshed_include = await self.client.get(
+            "/v1/conversations?include_archived=1",
+            headers={"Authorization": f"Bearer {bob_token}"},
+        )
+        refreshed_by_conv = {item["conv_id"]: item for item in (await refreshed_include.json())["items"]}
+        self.assertTrue(refreshed_by_conv["conv_room"]["muted"])
+        self.assertTrue(refreshed_by_conv["conv_dm"]["archived"])
+
+        for path, payload in (
+            ("/v1/conversations/mute", {"conv_id": "conv_room", "muted": True}),
+            ("/v1/conversations/archive", {"conv_id": "conv_room", "archived": True}),
+            ("/v1/conversations/mute", {"conv_id": "unknown", "muted": True}),
+            ("/v1/conversations/archive", {"conv_id": "unknown", "archived": True}),
+        ):
+            response = await self.client.post(
+                path,
+                headers={"Authorization": f"Bearer {eve_token}"},
+                json=payload,
+            )
+            self.assertEqual(response.status, 403)
+            body = await response.json()
+            self.assertEqual(body.get("code"), "forbidden")
+
 if __name__ == "__main__":
     unittest.main()
