@@ -194,6 +194,16 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("feed-start-dm", self.social_ui)
         self.assertIn("Add Friend", self.social_ui)
         self.assertIn("Remove Friend", self.social_ui)
+        for marker in (
+            "Pending publishes",
+            "social_publish_queue",
+            "publish-queue-row",
+            "publish-retry",
+            "aria-invalid",
+            "field-error",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.social_ui if marker.startswith("publish-") or marker == "social_publish_queue" else self.index_html)
 
     def test_dm_echo_before_apply_gate(self):
         marker = "addEventListener('dm.commit.echoed'"

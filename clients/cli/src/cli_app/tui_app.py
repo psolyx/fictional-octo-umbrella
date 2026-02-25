@@ -24,6 +24,7 @@ from typing import Callable, Dict, Iterable, Optional
 import aiohttp
 
 from cli_app import dm_envelope, gateway_client, gateway_store, social
+from cli_app.social_validate import validate_profile_field
 from cli_app.redact import redact_text
 from cli_app import identity_store, mls_poc
 from cli_app.tui_model import DEFAULT_SETTINGS_FILE, MODE_DM_CLIENT, MODE_HARNESS, TuiModel, load_settings
@@ -60,7 +61,7 @@ def _normalize_key(key: int) -> tuple[str, str | None]:
         return "CTRL_S", None
     if key == 27:
         return "ESC", None
-    if key in (ord("r"), ord("R")):
+    if key == ord("r"):
         return "r", None
     if key in (ord("t"), ord("T")):
         return "t", None
@@ -410,6 +411,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, + promote, - demote",
             "Messages: Enter send, R retry failed",
+            "Social: R retry failed publish",
             "Press Esc to close (or q)",
         ]
         box_width = min(max_x - 4, 88)
@@ -568,8 +570,11 @@ def _format_social_event(entry: Dict[str, object]) -> str:
     kind = str(entry.get("kind", ""))
     payload = entry.get("payload")
     text = ""
-    if isinstance(payload, dict) and "text" in payload:
-        text = str(payload.get("text", ""))
+    if isinstance(payload, dict):
+        if "value" in payload:
+            text = str(payload.get("value", ""))
+        elif "text" in payload:
+            text = str(payload.get("text", ""))
     elif payload is not None:
         try:
             text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -612,6 +617,10 @@ def _build_profile_lines(render: object) -> list[str]:
     for item in latest_posts:
         if isinstance(item, dict):
             lines.append(_format_bulletin_item(item))
+    queue_rows = [row for row in getattr(render, "social_publish_queue", []) if isinstance(row, dict)]
+    lines.append(f"Pending publishes ({len(queue_rows)})")
+    for row in queue_rows:
+        lines.append(f"  - {row.get('state', 'pending')} {row.get('kind', '')}")
     return lines
 
 
@@ -1976,6 +1985,49 @@ def main() -> int:
                 f"Feed sources={len(model.feed_sources)} next_cursor={'yes' if model.feed_cursor else 'none'}",
             )
 
+        def _queue_social_publish(kind: str, payload: dict[str, object]) -> dict[str, object]:
+            item = {
+                "id": f"publish_{len(model.social_publish_queue) + 1}",
+                "kind": kind,
+                "payload": payload,
+                "state": "pending",
+                "error": None,
+                "started_at_ms": int(time.time() * 1000),
+                "confirmed_at_ms": None,
+            }
+            model.social_publish_queue.append(item)
+            return item
+
+        def _process_social_publish(item: dict[str, object]) -> bool:
+            item["state"] = "pending"
+            item["error"] = None
+            try:
+                social.publish_social_event(
+                    _load_social_base_url(model) or "",
+                    identity=model.identity,
+                    kind=str(item.get("kind", "")),
+                    payload=item.get("payload", {}),
+                    prev_hash=model.social_prev_hash,
+                )
+            except Exception as exc:
+                item["state"] = "failed"
+                item["error"] = str(exc)
+                model.social_last_publish_error = str(exc)
+                return False
+            item["state"] = "confirmed"
+            item["confirmed_at_ms"] = int(time.time() * 1000)
+            model.social_last_publish_error = None
+            return True
+
+        def _retry_failed_social_publish() -> None:
+            failed = [row for row in model.social_publish_queue if row.get("state") == "failed"]
+            if not failed:
+                _set_social_status(model, "No failed publish items.")
+                return
+            target = sorted(failed, key=lambda row: (int(row.get("started_at_ms") or 0), str(row.get("id") or "")))[0]
+            ok = _process_social_publish(target)
+            _set_social_status(model, "Retried failed publish." if ok else f"Retry failed: {target.get('error', '')}")
+
         def _publish_social() -> None:
             if model.social_target != "self":
                 _set_social_status(model, "Posting is only available for the self timeline.")
@@ -2009,27 +2061,26 @@ def main() -> int:
             if not text:
                 _set_social_status(model, "Compose text is empty.")
                 return
-            base_url = _load_social_base_url(model)
-            if base_url is None:
-                return
-            _set_social_status(model, "Publishing bulletin...")
-            try:
-                social.publish_post(base_url, identity=model.identity, text=text)
-            except Exception as exc:
-                _set_social_status(model, f"Error: {exc}")
+            item = _queue_social_publish("post", {"value": text})
+            ok = _process_social_publish(item)
+            if not ok:
+                _set_social_status(model, f"Error: {item.get('error', '')}")
                 return
             model.social_compose_text = ""
             model.social_compose_active = False
+            _set_social_status(model, "bulletin publish confirmed")
             _refresh_social_profile()
 
         def _submit_profile_edit() -> None:
-            base_url = _load_social_base_url(model)
-            if base_url is None:
-                return
             profile = model.profile_data if isinstance(model.profile_data, dict) else {}
             changed = []
             for kind in ["username", "description", "avatar", "banner", "interests"]:
                 new_value = model.social_edit_fields.get(kind, "")
+                err = validate_profile_field(kind, new_value)
+                if err:
+                    model.social_last_publish_error = err
+                    _set_social_status(model, f"Validation error {kind}: {err}")
+                    return
                 current_value = str(profile.get(kind, ""))
                 if new_value != current_value:
                     changed.append((kind, new_value))
@@ -2038,10 +2089,10 @@ def main() -> int:
                 _set_social_status(model, "No profile changes.")
                 return
             for kind, value in changed:
-                try:
-                    social.publish_profile_field(base_url, identity=model.identity, kind=kind, value=value)
-                except Exception as exc:
-                    _set_social_status(model, f"Error updating {kind}: {exc}")
+                item = _queue_social_publish(kind, {"value": value})
+                ok = _process_social_publish(item)
+                if not ok:
+                    _set_social_status(model, f"Error updating {kind}: {item.get('error', '')}")
                     return
             model.social_edit_active = False
             _set_social_status(model, f"Updated profile fields: {', '.join(kind for kind, _ in changed)}")
@@ -2376,6 +2427,8 @@ def main() -> int:
                 _follow_toggle(False)
             if action == "social_start_dm":
                 _start_dm_from_social(model, session_state, runtime_state)
+            if action == "social_publish_retry_failed":
+                _retry_failed_social_publish()
                 _ensure_tail_threads()
             if action == "create_dm":
                 new_dm = model.render().new_dm_fields

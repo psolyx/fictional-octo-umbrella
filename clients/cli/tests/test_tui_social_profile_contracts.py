@@ -46,6 +46,18 @@ class TestTuiSocialProfileContracts(unittest.TestCase):
         self.assertIn("from cli_app.tui_app import main as cli_tui_main", self.tui_main)
         self.assertIn("return cli_tui_main()", self.tui_main)
 
+    def test_social_publish_queue_markers(self):
+        for marker in (
+            'social_publish_retry_failed',
+            'Pending publishes',
+            'pending',
+            'confirmed',
+            'failed',
+            'char in {"R"}',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.tui_model if marker in self.tui_model else self.tui_app)
+
 
 if __name__ == "__main__":
     unittest.main()
