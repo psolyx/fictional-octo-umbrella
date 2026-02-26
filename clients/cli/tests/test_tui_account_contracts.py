@@ -16,6 +16,8 @@ class TestTuiAccountContracts(unittest.TestCase):
             "gw_start",
             "gw_resume",
             "logout",
+            "logout_server",
+            "logout_all_devices",
             "identity_import",
             "identity_export",
             "identity_new",
@@ -29,6 +31,8 @@ class TestTuiAccountContracts(unittest.TestCase):
             'elif action == "gw_start"',
             'elif action == "gw_resume"',
             'elif action == "logout"',
+            'elif action == "logout_server"',
+            'elif action == "logout_all_devices"',
             'elif action == "identity_import"',
             'elif action == "identity_export"',
         ):

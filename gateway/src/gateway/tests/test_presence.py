@@ -64,5 +64,74 @@ class PresenceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await blocked_resp.json())['statuses'][0]['status'], 'unavailable')
 
 
+    async def test_session_logout_invalidates_token(self):
+        clock = FakeClock()
+        await self._setup_app(Presence(PresenceConfig(), now_func=clock.now))
+        session = await self._create_session('u_a', 'd1')
+
+        logout_resp = await self.client.post(
+            '/v1/session/logout',
+            headers={'Authorization': f'Bearer {session.session_token}'},
+        )
+        self.assertEqual(logout_resp.status, 200)
+        self.assertEqual(await logout_resp.json(), {'status': 'ok'})
+
+        status_resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': []},
+            headers={'Authorization': f'Bearer {session.session_token}'},
+        )
+        self.assertEqual(status_resp.status, 401)
+
+    async def test_session_logout_all_invalidates_other_sessions_but_keeps_current_by_default(self):
+        clock = FakeClock()
+        await self._setup_app(Presence(PresenceConfig(), now_func=clock.now))
+        session_one = await self._create_session('u_a', 'd1')
+        session_two = await self._create_session('u_a', 'd2')
+
+        logout_all_resp = await self.client.post(
+            '/v1/session/logout_all',
+            json={},
+            headers={'Authorization': f'Bearer {session_one.session_token}'},
+        )
+        self.assertEqual(logout_all_resp.status, 200)
+        payload = await logout_all_resp.json()
+        self.assertEqual(payload.get('status'), 'ok')
+        self.assertTrue(payload.get('kept_current'))
+
+        current_resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': []},
+            headers={'Authorization': f'Bearer {session_one.session_token}'},
+        )
+        self.assertEqual(current_resp.status, 200)
+
+        other_resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': []},
+            headers={'Authorization': f'Bearer {session_two.session_token}'},
+        )
+        self.assertEqual(other_resp.status, 401)
+
+    async def test_session_logout_all_include_self_revokes_current(self):
+        clock = FakeClock()
+        await self._setup_app(Presence(PresenceConfig(), now_func=clock.now))
+        session = await self._create_session('u_a', 'd1')
+
+        logout_all_resp = await self.client.post(
+            '/v1/session/logout_all',
+            json={'include_self': True},
+            headers={'Authorization': f'Bearer {session.session_token}'},
+        )
+        self.assertEqual(logout_all_resp.status, 200)
+
+        status_resp = await self.client.post(
+            '/v1/presence/status',
+            json={'contacts': []},
+            headers={'Authorization': f'Bearer {session.session_token}'},
+        )
+        self.assertEqual(status_resp.status, 401)
+
+
 if __name__ == '__main__':
     unittest.main()

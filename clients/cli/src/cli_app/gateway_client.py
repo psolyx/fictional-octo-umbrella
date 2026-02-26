@@ -95,6 +95,24 @@ def session_resume(base_url: str, resume_token: str) -> Dict[str, str]:
     }
 
 
+
+
+def session_logout(base_url: str, session_token: str) -> Dict[str, object]:
+    return _post_json(
+        _build_url(base_url, "/v1/session/logout"),
+        {},
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def session_logout_all(base_url: str, session_token: str, include_self: bool) -> Dict[str, object]:
+    payload: Dict[str, object] = {"include_self": include_self}
+    return _post_json(
+        _build_url(base_url, "/v1/session/logout_all"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
 def inbox_send(
     base_url: str,
     session_token: str,

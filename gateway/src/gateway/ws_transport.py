@@ -116,6 +116,33 @@ class SessionStore:
         self._by_session.pop(session.session_token, None)
         self._by_resume.pop(session.resume_token, None)
 
+    def invalidate_token(self, session_token: str) -> None:
+        session = self._by_session.pop(session_token, None)
+        if session is None:
+            return
+        self._by_resume.pop(session.resume_token, None)
+
+    def invalidate_all_for_user(self, user_id: str, keep_session_token: str | None = None) -> int:
+        sessions = self.list_for_user(user_id)
+        invalidated = 0
+        for session in sessions:
+            if keep_session_token and session.session_token == keep_session_token:
+                continue
+            self.invalidate(session)
+            invalidated += 1
+        return invalidated
+
+    def list_for_user(self, user_id: str) -> list[Session]:
+        sessions: list[Session] = []
+        for session in list(self._by_session.values()):
+            if session.user_id != user_id:
+                continue
+            if session.expires_at_ms <= _now_ms():
+                self.invalidate(session)
+                continue
+            sessions.append(session)
+        return sorted(sessions, key=lambda row: (row.device_id, row.session_token))
+
 
 class Runtime:
     def __init__(
@@ -274,6 +301,14 @@ def _authenticate_request(request: web.Request) -> Session | None:
         return None
     session_token = auth_header[len("Bearer ") :].strip()
     return runtime.sessions.get_by_session(session_token)
+
+
+def _session_token_from_request(request: web.Request) -> str | None:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    session_token = auth_header[len("Bearer ") :].strip()
+    return session_token or None
 
 
 def _session_ready_body(runtime: Runtime, session: Session) -> dict[str, Any]:
@@ -539,6 +574,51 @@ async def handle_session_resume_http(request: web.Request) -> web.Response:
 
     ready_body = _session_ready_body(runtime, session)
     return _no_store_response(ready_body)
+
+
+async def handle_session_logout(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    session_token = _session_token_from_request(request)
+    if session is None or session_token is None:
+        return _with_no_store(_unauthorized())
+    runtime.sessions.invalidate_token(session_token)
+    return _no_store_response({"status": "ok"})
+
+
+async def handle_session_logout_all(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    session_token = _session_token_from_request(request)
+    if session is None or session_token is None:
+        return _with_no_store(_unauthorized())
+    include_self = False
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return _no_store_response({"code": "invalid_request", "message": "body must be an object"}, status=400)
+    include_self_raw = body.get("include_self", False)
+    if not isinstance(include_self_raw, bool):
+        return _no_store_response(
+            {"code": "invalid_request", "message": "include_self must be a boolean"}, status=400
+        )
+    include_self = include_self_raw
+    keep_session_token = None if include_self else session_token
+    invalidated = runtime.sessions.invalidate_all_for_user(
+        session.user_id,
+        keep_session_token=keep_session_token,
+    )
+    return _no_store_response(
+        {
+            "status": "ok",
+            "invalidated": invalidated,
+            "kept_current": not include_self,
+        }
+    )
 
 
 async def handle_presence_lease(request: web.Request) -> web.Response:
@@ -1809,6 +1889,8 @@ def create_app(
     app.router.add_post("/v1/keypackages/rotate", handle_keypackage_rotate)
     app.router.add_post("/v1/session/start", handle_session_start_http)
     app.router.add_post("/v1/session/resume", handle_session_resume_http)
+    app.router.add_post("/v1/session/logout", handle_session_logout)
+    app.router.add_post("/v1/session/logout_all", handle_session_logout_all)
     app.router.add_post("/v1/inbox", handle_inbox)
     app.router.add_get("/v1/sse", handle_sse)
     app.router.add_post("/v1/presence/lease", handle_presence_lease)

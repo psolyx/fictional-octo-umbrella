@@ -421,7 +421,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     if render.help_overlay_active:
         overlay_lines = [
             "Keybindings",
-            "Account: identity_new / identity_import / identity_export / logout",
+            "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices",
             "Conversations: L refresh, U next unread, r mark read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
@@ -991,6 +991,34 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
             gateway_store.clear_session()
             gateway_store.clear_cursors()
             _write_heading(["gateway_session.json cleared", "gateway_cursors.json cleared"])
+            exit_code, output = 0, []
+        elif action == "logout_server":
+            stored = gateway_store.load_session()
+            heading_lines = ["server logout ok"]
+            if stored is not None:
+                try:
+                    base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+                    gateway_client.session_logout(base_url, stored["session_token"])
+                except Exception:
+                    heading_lines = ["server logout failed (cleared local state)"]
+            gateway_store.clear_session()
+            gateway_store.clear_cursors()
+            heading_lines.extend(["gateway_session.json cleared", "gateway_cursors.json cleared"])
+            _write_heading(heading_lines)
+            exit_code, output = 0, []
+        elif action == "logout_all_devices":
+            stored = gateway_store.load_session()
+            heading_lines = ["server logout all devices ok"]
+            if stored is not None:
+                try:
+                    base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+                    gateway_client.session_logout_all(base_url, stored["session_token"], include_self=True)
+                except Exception:
+                    heading_lines = ["server logout all devices failed (cleared local state)"]
+            gateway_store.clear_session()
+            gateway_store.clear_cursors()
+            heading_lines.extend(["gateway_session.json cleared", "gateway_cursors.json cleared"])
+            _write_heading(heading_lines)
             exit_code, output = 0, []
         elif action == "rotate_device":
             record = model.rotate_device()

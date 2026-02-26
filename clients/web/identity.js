@@ -9,6 +9,7 @@ const account_import_btn = document.getElementById('account_import_btn');
 const account_export_btn = document.getElementById('account_export_btn');
 const account_rotate_device_btn = document.getElementById('account_rotate_device_btn');
 const account_logout_btn = document.getElementById('account_logout_btn');
+const account_logout_all_btn = document.getElementById('account_logout_all_btn');
 
 const bootstrap_token_input = document.getElementById('bootstrap_token');
 const device_id_input = document.getElementById('device_id');
@@ -81,6 +82,60 @@ const save_session = (session_patch) => {
   const updated = { ...current, ...session_patch };
   localStorage.setItem(session_storage_key, JSON.stringify(updated));
   return updated;
+};
+
+const derive_http_base_url = (gateway_url) => {
+  if (typeof gateway_url !== 'string') {
+    return '';
+  }
+  const trimmed = gateway_url.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.startsWith('ws://')) {
+    return `http://${trimmed.slice('ws://'.length).replace(/\/v1\/ws$/, '')}`;
+  }
+  if (trimmed.startsWith('wss://')) {
+    return `https://${trimmed.slice('wss://'.length).replace(/\/v1\/ws$/, '')}`;
+  }
+  return trimmed.replace(/\/v1\/ws$/, '');
+};
+
+const clear_local_session_state = () => {
+  localStorage.removeItem(session_storage_key);
+  if (resume_token_input) resume_token_input.value = '';
+  window.dispatchEvent(new CustomEvent('gateway.session.cleared'));
+};
+
+const post_session_action = async (path, payload = null) => {
+  const session = read_session();
+  const session_token = typeof session.session_token === 'string' ? session.session_token.trim() : '';
+  if (!session_token) {
+    return { ok: true, skipped: true };
+  }
+  const stored_gateway_url = localStorage.getItem(gateway_url_storage_key) || '';
+  const gateway_url = typeof session.gateway_url === 'string' && session.gateway_url.trim()
+    ? session.gateway_url
+    : stored_gateway_url;
+  const http_base_url = derive_http_base_url(gateway_url);
+  if (!http_base_url) {
+    throw new Error('missing gateway URL');
+  }
+  const request = {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${session_token}`,
+      'Content-Type': 'application/json',
+    },
+  };
+  if (payload !== null) {
+    request.body = JSON.stringify(payload);
+  }
+  const response = await fetch(`${http_base_url}${path}`, request);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return { ok: true, skipped: false };
 };
 
 const update_account_status = (prefix = 'ready') => {
@@ -208,10 +263,28 @@ if (account_rotate_device_btn) {
 }
 
 if (account_logout_btn) {
-  account_logout_btn.addEventListener('click', () => {
-    localStorage.removeItem(session_storage_key);
-    if (resume_token_input) resume_token_input.value = '';
-    update_account_status('logged out');
+  account_logout_btn.addEventListener('click', async () => {
+    let status_prefix = 'logged out';
+    try {
+      await post_session_action('/v1/session/logout');
+    } catch (_error) {
+      status_prefix = 'server logout failed (cleared local state)';
+    }
+    clear_local_session_state();
+    update_account_status(status_prefix);
+  });
+}
+
+if (account_logout_all_btn) {
+  account_logout_all_btn.addEventListener('click', async () => {
+    let status_prefix = 'logged out all devices';
+    try {
+      await post_session_action('/v1/session/logout_all', { include_self: true });
+    } catch (_error) {
+      status_prefix = 'server logout-all failed (cleared local state)';
+    }
+    clear_local_session_state();
+    update_account_status(status_prefix);
   });
 }
 

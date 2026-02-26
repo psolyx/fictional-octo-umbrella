@@ -214,6 +214,12 @@ Semantics match WS frames.
   }
   ```
 - `POST /v1/session/resume` accepts `{ "resume_token": "rt_..." }` and returns the same body as `session.ready` on success. On failure it returns `{ "code": "resume_failed", "message": "resume token invalid or expired" }`.
+- `POST /v1/session/logout` requires `Authorization: Bearer <session_token>`. On success it returns `{"status":"ok"}` and invalidates the current session token immediately.
+- `POST /v1/session/logout_all` requires `Authorization: Bearer <session_token>` and accepts optional JSON body `{ "include_self": true|false }` (default `false`).
+  - `include_self=false`: invalidates all other sessions for the authenticated user and keeps the current token valid.
+  - `include_self=true`: invalidates all sessions for the authenticated user, including the current token.
+  - Success response: `{ "status": "ok", "invalidated": <int>, "kept_current": <bool> }`.
+- Session invalidation endpoints MUST NOT echo `session_token` or `resume_token` in responses and MUST include `Cache-Control: no-store`.
 
 ### 4.4 Gateway identity
 - `gateway_id` names the gateway namespace used across routing metadata fields: `conv_home`, `origin_gateway`, `destination_gateway` (reserved hint), `served_by`, and `user_home_gateway`.
