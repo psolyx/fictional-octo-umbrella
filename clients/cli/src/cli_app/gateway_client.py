@@ -486,6 +486,46 @@ def rooms_bans(base_url: str, session_token: str, conv_id: str) -> Dict[str, obj
     return room_bans(base_url, session_token, conv_id)
 
 
+def rooms_mute(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/mute"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def rooms_unmute(
+    base_url: str,
+    session_token: str,
+    conv_id: str,
+    members: list[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"conv_id": conv_id, "members": members}
+    return _post_json(
+        _build_url(base_url, "/v1/rooms/unmute"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
+def rooms_mutes(base_url: str, session_token: str, conv_id: str) -> Dict[str, object]:
+    query = urllib.parse.urlencode({"conv_id": conv_id})
+    request = urllib.request.Request(
+        _build_url(base_url, f"/v1/rooms/mutes?{query}"),
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
 
 def rooms_members(base_url: str, session_token: str, conv_id: str) -> Dict[str, object]:
     query = urllib.parse.urlencode({"conv_id": conv_id})

@@ -381,8 +381,13 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         _render_text(stdscr, compose_top, right_start + 1, render.compose_text, compose_attr)
 
     if render.room_roster_active:
-        overlay_title = "Room bans" if render.room_roster_view == "bans" else "Room roster"
-        overlay_lines = [overlay_title, "A/Enter: Add selected to modal members", "B: toggle roster/bans", "Esc: close"]
+        if render.room_roster_view == "bans":
+            overlay_title = "Room bans"
+        elif render.room_roster_view == "mutes":
+            overlay_title = "Room mutes"
+        else:
+            overlay_title = "Room roster"
+        overlay_lines = [overlay_title, "A/Enter: Add selected to modal members", "B: cycle roster/bans/mutes", "Esc: close"]
         for member in render.room_roster_members:
             overlay_lines.append(
                 f"{member.get('role', '')} {member.get('user_id', '')} {member.get('presence_status', 'unavailable')}"
@@ -419,7 +424,8 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
             "Account: identity_new / identity_import / identity_export / logout",
             "Conversations: L refresh, U next unread, r mark read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
-            "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, + promote, - demote",
+            "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
+            "Roster overlay: B cycles roster/bans/mutes",
             "Messages: Enter send, R retry failed",
             "Social: R retry failed publish",
             "Press Esc to close (or q)",
@@ -1706,6 +1712,19 @@ def _send_dm_message(
             _append_system_message(model, "rate_limited: send failed; retry with R.")
             return
         if exc.code == 403:
+            payload_text = exc.read().decode("utf-8", errors="ignore")
+            payload_json: dict[str, object] = {}
+            try:
+                parsed = json.loads(payload_text) if payload_text else {}
+                if isinstance(parsed, dict):
+                    payload_json = parsed
+            except Exception:
+                payload_json = {}
+            message = str(payload_json.get("message", "forbidden"))
+            if message == "muted":
+                model.mark_outbound_failed(conv_id, msg_id, "muted")
+                _append_system_message(model, "send forbidden (muted)")
+                return
             model.mark_outbound_failed(conv_id, msg_id, "blocked")
             _append_system_message(model, "BLOCKED: send forbidden by gateway policy.")
             return
@@ -1873,6 +1892,8 @@ def _run_room_action(
         "room_demote": gateway_client.rooms_demote,
         "room_ban": gateway_client.rooms_ban,
         "room_unban": gateway_client.rooms_unban,
+        "room_mute": gateway_client.rooms_mute,
+        "room_unmute": gateway_client.rooms_unmute,
     }
     runner = action_map.get(action_name)
     if runner is None:
@@ -1930,6 +1951,34 @@ def _refresh_room_bans(model: TuiModel, session: SessionState | None) -> None:
         if not isinstance(row, dict):
             continue
         normalized.append({"user_id": str(row.get("user_id", "")), "role": "banned"})
+    model.set_room_roster(normalized)
+
+
+def _refresh_room_mutes(model: TuiModel, session: SessionState | None) -> None:
+    conv_id = model.get_selected_conv_id().strip()
+    if session is None:
+        _append_system_message(model, "Room mutes unavailable: no active session.")
+        model.set_room_roster([])
+        return
+    if not conv_id:
+        _append_system_message(model, "Room mutes unavailable: no selected conversation.")
+        model.set_room_roster([])
+        return
+    try:
+        payload = gateway_client.rooms_mutes(session.base_url, session.session_token, conv_id)
+    except urllib.error.HTTPError as exc:
+        payload_text = exc.read().decode("utf-8", errors="ignore")
+        _append_system_message(model, f"room mutes failed http {exc.code}: {payload_text}")
+        model.set_room_roster([])
+        return
+    mutes = payload.get("mutes") if isinstance(payload, dict) else []
+    if not isinstance(mutes, list):
+        mutes = []
+    normalized = []
+    for row in mutes:
+        if not isinstance(row, dict):
+            continue
+        normalized.append({"user_id": str(row.get("user_id", "")), "role": "muted"})
     model.set_room_roster(normalized)
 
 
@@ -2680,10 +2729,22 @@ def main() -> int:
                 model.room_roster_active = not render.room_roster_active
                 if model.room_roster_active:
                     model.focus_area = "room_roster"
+                    model.room_roster_view = "roster"
                     _refresh_room_roster(model, session_state)
                     _auto_watch_from_room_roster()
                 else:
                     model.focus_area = "room_modal" if model.room_modal_active else "conversations"
+            if action == "room_roster_toggle_view":
+                if model.room_roster_view == "roster":
+                    model.room_roster_view = "bans"
+                    _refresh_room_bans(model, session_state)
+                elif model.room_roster_view == "bans":
+                    model.room_roster_view = "mutes"
+                    _refresh_room_mutes(model, session_state)
+                else:
+                    model.room_roster_view = "roster"
+                    _refresh_room_roster(model, session_state)
+                _auto_watch_from_room_roster()
             if action == "room_roster_add_selected":
                 _append_selected_roster_member_to_modal(model)
             if action == "conv_refresh":
@@ -2808,6 +2869,8 @@ def main() -> int:
                 "room_demote_submit",
                 "room_ban_submit",
                 "room_unban_submit",
+                "room_mute_submit",
+                "room_unmute_submit",
             }:
                 follow_up = _submit_room_modal(model, session_state)
                 if follow_up == "conv_refresh":

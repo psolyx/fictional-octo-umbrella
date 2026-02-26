@@ -45,6 +45,7 @@ class InMemoryConversationStore:
         self._conversations: Dict[str, Conversation] = {}
         self._members: Dict[str, Dict[str, str]] = {}
         self._bans: Dict[str, Dict[str, dict[str, int | str]]] = {}
+        self._mutes: Dict[str, Dict[str, dict[str, int | str]]] = {}
         self._conversation_reads: Dict[tuple[str, str], tuple[int, int]] = {}
         self._conversation_user_meta: Dict[tuple[str, str], dict[str, int | str | bool]] = {}
         self._invite_limits = FixedWindowRateLimiter(INVITES_PER_MIN)
@@ -96,6 +97,7 @@ class InMemoryConversationStore:
             if user_id == conversation.owner_user_id:
                 continue
             roster.pop(user_id, None)
+            self._mutes.setdefault(conv_id, {}).pop(user_id, None)
 
     def ban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
         conversation = self._require_conversation(conv_id)
@@ -107,11 +109,52 @@ class InMemoryConversationStore:
             if user_id == conversation.owner_user_id:
                 continue
             roster.pop(user_id, None)
+            self._mutes.setdefault(conv_id, {}).pop(user_id, None)
             bans[user_id] = {
                 "user_id": user_id,
                 "banned_by_user_id": actor_user_id,
                 "banned_at_ms": now_ms,
             }
+
+    def mute_member(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        now_ms = _now_ms()
+        mutes = self._mutes.setdefault(conv_id, {})
+        for user_id in members:
+            if user_id == conversation.owner_user_id:
+                continue
+            mutes[user_id] = {
+                "user_id": user_id,
+                "muted_by_user_id": actor_user_id,
+                "muted_at_ms": now_ms,
+            }
+
+    def unmute_member(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        mutes = self._mutes.setdefault(conv_id, {})
+        for user_id in members:
+            mutes.pop(user_id, None)
+
+    def list_mutes(self, conv_id: str, actor_user_id: str) -> list[dict[str, int | str]]:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        mutes = list(self._mutes.get(conv_id, {}).values())
+        mutes.sort(key=lambda item: (str(item["user_id"]), int(item["muted_at_ms"])))
+        return mutes
+
+    def is_muted_member(self, conv_id: str, user_id: str) -> bool:
+        mutes = self._mutes.get(conv_id)
+        if mutes is None:
+            return False
+        return user_id in mutes
 
     def unban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
         conversation = self._require_conversation(conv_id)
@@ -442,6 +485,10 @@ class SQLiteConversationStore:
                         "DELETE FROM conversation_members WHERE conv_id=? AND user_id=?",
                         (conv_id, member),
                     )
+                    cursor.execute(
+                        "DELETE FROM conversation_mutes WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -466,6 +513,10 @@ class SQLiteConversationStore:
                         (conv_id, member),
                     )
                     cursor.execute(
+                        "DELETE FROM conversation_mutes WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
+                    cursor.execute(
                         """
                         INSERT INTO conversation_bans (conv_id, user_id, banned_by_user_id, banned_at_ms)
                         VALUES (?, ?, ?, ?)
@@ -481,6 +532,91 @@ class SQLiteConversationStore:
                 raise
             finally:
                 cursor.close()
+
+    def mute_member(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        now_ms = _now_ms()
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    if member == conversation.owner_user_id:
+                        continue
+                    cursor.execute(
+                        """
+                        INSERT INTO conversation_mutes (conv_id, user_id, muted_by_user_id, muted_at_ms)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(conv_id, user_id) DO UPDATE SET
+                            muted_by_user_id=excluded.muted_by_user_id,
+                            muted_at_ms=excluded.muted_at_ms
+                        """,
+                        (conv_id, member, actor_user_id, now_ms),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def unmute_member(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        with self._backend.lock:
+            conn = self._backend.connection
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                for member in members:
+                    cursor.execute(
+                        "DELETE FROM conversation_mutes WHERE conv_id=? AND user_id=?",
+                        (conv_id, member),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def list_mutes(self, conv_id: str, actor_user_id: str) -> list[dict[str, int | str]]:
+        if conv_id.startswith("dm_"):
+            raise ValueError("not a room")
+        conversation = self._require_conversation(conv_id)
+        self._require_admin(conversation, actor_user_id)
+        with self._backend.lock:
+            rows = self._backend.connection.execute(
+                """
+                SELECT user_id, muted_by_user_id, muted_at_ms
+                FROM conversation_mutes
+                WHERE conv_id=?
+                ORDER BY user_id ASC, muted_at_ms ASC
+                """,
+                (conv_id,),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(row["user_id"]),
+                "muted_by_user_id": str(row["muted_by_user_id"]),
+                "muted_at_ms": int(row["muted_at_ms"]),
+            }
+            for row in rows
+        ]
+
+    def is_muted_member(self, conv_id: str, user_id: str) -> bool:
+        with self._backend.lock:
+            row = self._backend.connection.execute(
+                "SELECT 1 FROM conversation_mutes WHERE conv_id=? AND user_id=?",
+                (conv_id, user_id),
+            ).fetchone()
+        return row is not None
 
     def unban(self, conv_id: str, actor_user_id: str, members: Iterable[str]) -> None:
         conversation = self._require_conversation(conv_id)

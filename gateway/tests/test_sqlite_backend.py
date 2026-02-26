@@ -56,7 +56,7 @@ class SQLiteBackendTests(unittest.TestCase):
 
     def test_schema_version_and_home_gateway_defaulting(self):
         user_version = self.backend.connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(user_version, 12)
+        self.assertEqual(user_version, 13)
 
         columns = {
             row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversations)").fetchall()
@@ -70,6 +70,7 @@ class SQLiteBackendTests(unittest.TestCase):
         self.assertIn("conversation_bans", ban_tables)
         self.assertIn("conversation_reads", ban_tables)
         self.assertIn("conversation_user_meta", ban_tables)
+        self.assertIn("conversation_mutes", ban_tables)
         user_meta_columns = {
             row[1] for row in self.backend.connection.execute("PRAGMA table_info(conversation_user_meta)").fetchall()
         }

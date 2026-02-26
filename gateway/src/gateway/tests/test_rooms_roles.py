@@ -53,6 +53,16 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
             params={"conv_id": conv_id},
         )
 
+    async def _rooms_mutes(self, token: str | None, conv_id: str):
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        return await self.client.get(
+            "/v1/rooms/mutes",
+            headers=headers,
+            params={"conv_id": conv_id},
+        )
+
     async def _dms_create(self, token: str | None, peer_user_id: str, conv_id: str | None = None):
         headers = {}
         if token is not None:
@@ -237,6 +247,64 @@ class RoomsRolesTests(unittest.IsolatedAsyncioTestCase):
 
         rebanned_bob_bans = await self._rooms_bans(bob_token, "conv_ban")
         self.assertEqual(rebanned_bob_bans.status, 403)
+
+    async def test_room_mute_unmute_enforces_send_and_admin_visibility(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        bob_token = await self._session("u_bob", "d_bob")
+        charlie_token = await self._session("u_charlie", "d_charlie")
+
+        create_response = await self._rooms_post(alice_token, "/v1/rooms/create", "conv_mute", ["u_bob", "u_charlie"])
+        self.assertEqual(create_response.status, 200)
+
+        mute_response = await self._rooms_post(alice_token, "/v1/rooms/mute", "conv_mute", ["u_bob"])
+        self.assertEqual(mute_response.status, 200)
+
+        bob_send = await self.client.post(
+            "/v1/inbox",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={
+                "v": 1,
+                "t": "conv.send",
+                "body": {"conv_id": "conv_mute", "msg_id": "msg_1", "env": "YQ=="},
+            },
+        )
+        self.assertEqual(bob_send.status, 403)
+        bob_payload = await bob_send.json()
+        self.assertEqual(bob_payload.get("code"), "forbidden")
+        self.assertEqual(bob_payload.get("message"), "muted")
+
+        owner_mutes = await self._rooms_mutes(alice_token, "conv_mute")
+        self.assertEqual(owner_mutes.status, 200)
+        owner_payload = await owner_mutes.json()
+        self.assertEqual([row.get("user_id") for row in owner_payload.get("mutes", [])], ["u_bob"])
+
+        member_mutes = await self._rooms_mutes(charlie_token, "conv_mute")
+        self.assertEqual(member_mutes.status, 403)
+
+        unmute_response = await self._rooms_post(alice_token, "/v1/rooms/unmute", "conv_mute", ["u_bob"])
+        self.assertEqual(unmute_response.status, 200)
+
+        bob_send_after = await self.client.post(
+            "/v1/inbox",
+            headers={"Authorization": f"Bearer {bob_token}"},
+            json={
+                "v": 1,
+                "t": "conv.send",
+                "body": {"conv_id": "conv_mute", "msg_id": "msg_2", "env": "YQ=="},
+            },
+        )
+        self.assertEqual(bob_send_after.status, 200)
+
+    async def test_room_mute_rejects_dm_conv_id(self):
+        alice_token = await self._session("u_alice", "d_alice")
+        create_dm = await self._dms_create(alice_token, "u_bob")
+        self.assertEqual(create_dm.status, 200)
+        dm_conv_id = str((await create_dm.json()).get("conv_id"))
+        mute_response = await self._rooms_post(alice_token, "/v1/rooms/mute", dm_conv_id, ["u_bob"])
+        self.assertEqual(mute_response.status, 400)
+        mute_payload = await mute_response.json()
+        self.assertEqual(mute_payload.get("code"), "invalid_request")
+        self.assertEqual(mute_payload.get("message"), "not a room")
 
 
 if __name__ == "__main__":

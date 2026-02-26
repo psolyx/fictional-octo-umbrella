@@ -21,6 +21,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"K"}',
             'char in {"b"}',
             'char in {"u"}',
+            'char in {"x"}',
+            'char in {"X"}',
             'char in {"+"}',
             'char in {"-"}',
             'char in {"m", "M"}',
@@ -37,6 +39,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'self._open_room_modal("room_remove")',
             'self._open_room_modal("room_ban")',
             'self._open_room_modal("room_unban")',
+            'self._open_room_modal("room_mute")',
+            'self._open_room_modal("room_unmute")',
             'self._open_room_modal("room_promote")',
             'self._open_room_modal("room_demote")',
         ):
@@ -54,6 +58,9 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_ban(',
             'def rooms_unban(',
             'def rooms_bans(',
+            'def rooms_mute(',
+            'def rooms_unmute(',
+            'def rooms_mutes(',
             'def rooms_members(',
             'def conversations_mark_read(',
             'def conversations_set_title(',
@@ -72,8 +79,12 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_demote',
             'gateway_client.rooms_ban',
             'gateway_client.rooms_unban',
+            'gateway_client.rooms_mute',
+            'gateway_client.rooms_unmute',
             'gateway_client.rooms_bans',
+            'gateway_client.rooms_mutes',
             'gateway_client.rooms_members',
+            'room_roster_toggle_view',
             'gateway_client.conversations_mark_read',
             'gateway_client.conversations_set_title',
             'gateway_client.conversations_set_label',
@@ -82,6 +93,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.conversations_set_archived',
             'Room roster',
             'Room bans',
+            'Room mutes',
             'Add selected to modal members',
             'mark_read',
             'conv_toggle_pinned',
@@ -111,6 +123,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('"Press Esc to close (or q)"', self.tui_app)
         self.assertIn('r mark read', self.tui_app)
         self.assertIn('z mute/unmute', self.tui_app)
+        self.assertIn('x mute member', self.tui_app)
+        self.assertIn('X unmute member', self.tui_app)
         self.assertIn('A archive/unarchive', self.tui_app)
         self.assertIn('H show/hide archived', self.tui_app)
 
