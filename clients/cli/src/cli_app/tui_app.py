@@ -421,7 +421,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     if render.help_overlay_active:
         overlay_lines = [
             "Keybindings",
-            "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices",
+            "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices / sessions_list / revoke_session / revoke_device",
             "Conversations: L refresh, U next unread, r mark read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
@@ -1019,6 +1019,76 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
             gateway_store.clear_cursors()
             heading_lines.extend(["gateway_session.json cleared", "gateway_cursors.json cleared"])
             _write_heading(heading_lines)
+            exit_code, output = 0, []
+        elif action == "sessions_list":
+            stored = gateway_store.load_session()
+            if stored is None:
+                log_writer([redact_text("No stored gateway session. Run gw_start first.")])
+                return
+            base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+            response = gateway_client.session_list(base_url, stored["session_token"])
+            sessions = response.get("sessions", [])
+            rows = ["sessions:"]
+            if isinstance(sessions, list):
+                for row in sessions:
+                    if not isinstance(row, dict):
+                        continue
+                    badge = "*" if bool(row.get("is_current", False)) else "-"
+                    rows.append(
+                        (
+                            f"{badge} device_id={row.get('device_id', '')} "
+                            f"session_id={row.get('session_id', '')} expires_at_ms={row.get('expires_at_ms', '')}"
+                        )
+                    )
+            _write_heading([redact_text(row) for row in rows])
+            exit_code, output = 0, []
+        elif action == "revoke_session":
+            stored = gateway_store.load_session()
+            if stored is None:
+                log_writer([redact_text("No stored gateway session. Run gw_start first.")])
+                return
+            revoke_session_id = fields.get("revoke_session_id", "").strip()
+            if not revoke_session_id:
+                log_writer([redact_text("revoke_session_id is required for revoke_session")])
+                return
+            include_self_raw = fields.get("revoke_include_self", "").strip().lower()
+            include_self = include_self_raw in {"1", "true", "yes", "y", "on"}
+            base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+            response = gateway_client.session_revoke(
+                base_url,
+                stored["session_token"],
+                session_id=revoke_session_id,
+                include_self=include_self,
+            )
+            revoked_ids = response.get("revoked_session_ids", [])
+            normalized_ids = sorted([str(row) for row in revoked_ids]) if isinstance(revoked_ids, list) else []
+            lines = [f"revoked={int(response.get('revoked', 0))}"]
+            lines.extend(normalized_ids)
+            _write_heading([redact_text(line) for line in lines])
+            exit_code, output = 0, []
+        elif action == "revoke_device":
+            stored = gateway_store.load_session()
+            if stored is None:
+                log_writer([redact_text("No stored gateway session. Run gw_start first.")])
+                return
+            revoke_device_id = fields.get("revoke_device_id", "").strip()
+            if not revoke_device_id:
+                log_writer([redact_text("revoke_device_id is required for revoke_device")])
+                return
+            include_self_raw = fields.get("revoke_include_self", "").strip().lower()
+            include_self = include_self_raw in {"1", "true", "yes", "y", "on"}
+            base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
+            response = gateway_client.session_revoke(
+                base_url,
+                stored["session_token"],
+                device_id=revoke_device_id,
+                include_self=include_self,
+            )
+            revoked_ids = response.get("revoked_session_ids", [])
+            normalized_ids = sorted([str(row) for row in revoked_ids]) if isinstance(revoked_ids, list) else []
+            lines = [f"revoked={int(response.get('revoked', 0))}"]
+            lines.extend(normalized_ids)
+            _write_heading([redact_text(line) for line in lines])
             exit_code, output = 0, []
         elif action == "rotate_device":
             record = model.rotate_device()

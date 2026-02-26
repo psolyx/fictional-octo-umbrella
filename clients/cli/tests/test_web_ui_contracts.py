@@ -94,6 +94,7 @@ class TestWebUiContracts(unittest.TestCase):
         cls.dm_ui = read_repo_text("clients", "web", "dm_ui.js")
         cls.social_ui = read_repo_text("clients", "web", "social_ui.js")
         cls.mls_vectors_loader = read_repo_text("clients", "web", "mls_vectors_loader.js")
+        cls.identity_js = read_repo_text("clients", "web", "identity.js")
 
     def test_custom_event_contracts_gateway(self):
         marker = "CustomEvent('conv.event.received'"
@@ -248,6 +249,11 @@ class TestWebUiContracts(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.gateway_ws_client if marker != 'Presence enabled' else self.index_html)
+
+    def test_account_session_contracts(self):
+        self.assertIn('data-test="session-list"', self.index_html)
+        self.assertIn('/v1/session/list', self.identity_js)
+        self.assertIn('/v1/session/revoke', self.identity_js)
 
     def test_rate_limited_marker_contract(self):
         self.assertIn("rate_limited", self.social_ui)

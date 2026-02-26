@@ -10,6 +10,9 @@ const account_export_btn = document.getElementById('account_export_btn');
 const account_rotate_device_btn = document.getElementById('account_rotate_device_btn');
 const account_logout_btn = document.getElementById('account_logout_btn');
 const account_logout_all_btn = document.getElementById('account_logout_all_btn');
+const account_sessions_refresh_btn = document.getElementById('account_sessions_refresh_btn');
+const account_sessions_list = document.getElementById('account_sessions_list');
+const account_sessions_status = document.getElementById('account_sessions_status');
 
 const bootstrap_token_input = document.getElementById('bootstrap_token');
 const device_id_input = document.getElementById('device_id');
@@ -104,7 +107,14 @@ const derive_http_base_url = (gateway_url) => {
 const clear_local_session_state = () => {
   localStorage.removeItem(session_storage_key);
   if (resume_token_input) resume_token_input.value = '';
+  if (account_sessions_list) account_sessions_list.textContent = '';
+  if (account_sessions_status) account_sessions_status.textContent = 'sessions: cleared';
   window.dispatchEvent(new CustomEvent('gateway.session.cleared'));
+};
+
+const set_sessions_status = (text) => {
+  if (!account_sessions_status) return;
+  account_sessions_status.textContent = text;
 };
 
 const post_session_action = async (path, payload = null) => {
@@ -146,6 +156,128 @@ const update_account_status = (prefix = 'ready') => {
     return;
   }
   account_status_line.textContent = `${prefix}: user_id=${identity.user_id} device_id=${identity.device_id}`;
+};
+
+const fetch_sessions_list = async () => {
+  const session = read_session();
+  const session_token = typeof session.session_token === 'string' ? session.session_token.trim() : '';
+  if (!session_token) {
+    set_sessions_status('sessions: no active session');
+    if (account_sessions_list) account_sessions_list.textContent = '';
+    return;
+  }
+  const stored_gateway_url = localStorage.getItem(gateway_url_storage_key) || '';
+  const gateway_url = typeof session.gateway_url === 'string' && session.gateway_url.trim()
+    ? session.gateway_url
+    : stored_gateway_url;
+  const http_base_url = derive_http_base_url(gateway_url);
+  if (!http_base_url) {
+    set_sessions_status('sessions: missing gateway URL');
+    return;
+  }
+  const response = await fetch(`${http_base_url}/v1/session/list`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${session_token}`,
+    },
+  });
+  if (response.status === 401) {
+    clear_local_session_state();
+    set_sessions_status('sessions: unauthorized; local session cleared');
+    update_account_status('ready');
+    return;
+  }
+  if (response.status === 429) {
+    set_sessions_status('sessions: rate limited; try again soon');
+    return;
+  }
+  if (!response.ok) {
+    set_sessions_status(`sessions: HTTP ${response.status}`);
+    return;
+  }
+  const payload = await response.json();
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  if (account_sessions_list) {
+    account_sessions_list.textContent = '';
+    sessions.forEach((row) => {
+      const item = document.createElement('li');
+      const badge = row.is_current ? ' (This device)' : '';
+      const summary = document.createElement('span');
+      summary.textContent = `device_id=${String(row.device_id || '')}${badge} session_id=${String(row.session_id || '')} expires_at_ms=${String(row.expires_at_ms || '')}`;
+      item.appendChild(summary);
+
+      const revoke_session_btn = document.createElement('button');
+      revoke_session_btn.type = 'button';
+      revoke_session_btn.textContent = 'Revoke session';
+      revoke_session_btn.addEventListener('click', async () => {
+        const include_self = Boolean(row.is_current) && window.confirm('Revoke current session?');
+        if (row.is_current && !include_self) {
+          set_sessions_status('sessions: current session revoke canceled');
+          return;
+        }
+        await revoke_session_target({ session_id: String(row.session_id || ''), include_self });
+      });
+      item.appendChild(revoke_session_btn);
+
+      const revoke_device_btn = document.createElement('button');
+      revoke_device_btn.type = 'button';
+      revoke_device_btn.textContent = 'Revoke device';
+      revoke_device_btn.addEventListener('click', async () => {
+        const include_self = Boolean(row.is_current) && window.confirm('Revoke all sessions for this device including current session?');
+        await revoke_session_target({ device_id: String(row.device_id || ''), include_self });
+      });
+      item.appendChild(revoke_device_btn);
+
+      account_sessions_list.appendChild(item);
+    });
+  }
+  set_sessions_status(`sessions: loaded ${sessions.length}`);
+};
+
+const revoke_session_target = async ({ session_id = null, device_id = null, include_self = false }) => {
+  const session = read_session();
+  const session_token = typeof session.session_token === 'string' ? session.session_token.trim() : '';
+  if (!session_token) {
+    set_sessions_status('sessions: no active session');
+    return;
+  }
+  const stored_gateway_url = localStorage.getItem(gateway_url_storage_key) || '';
+  const gateway_url = typeof session.gateway_url === 'string' && session.gateway_url.trim()
+    ? session.gateway_url
+    : stored_gateway_url;
+  const http_base_url = derive_http_base_url(gateway_url);
+  if (!http_base_url) {
+    set_sessions_status('sessions: missing gateway URL');
+    return;
+  }
+  const body = { include_self };
+  if (session_id) body.session_id = session_id;
+  if (device_id) body.device_id = device_id;
+  const response = await fetch(`${http_base_url}/v1/session/revoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${session_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    clear_local_session_state();
+    set_sessions_status('sessions: unauthorized; local session cleared');
+    update_account_status('ready');
+    return;
+  }
+  if (response.status === 429) {
+    set_sessions_status('sessions: rate limited; try again soon');
+    return;
+  }
+  if (!response.ok) {
+    set_sessions_status(`sessions: HTTP ${response.status}`);
+    return;
+  }
+  const payload = await response.json();
+  set_sessions_status(`sessions: revoked ${String(payload.revoked || 0)}`);
+  await fetch_sessions_list();
 };
 
 const export_identity = async () => {
@@ -288,6 +420,12 @@ if (account_logout_all_btn) {
   });
 }
 
+if (account_sessions_refresh_btn) {
+  account_sessions_refresh_btn.addEventListener('click', () => {
+    void fetch_sessions_list();
+  });
+}
+
 window.addEventListener('gateway.session.ready', (event) => {
   const detail = event && event.detail ? event.detail : {};
   const session_token = typeof detail.session_token === 'string' ? detail.session_token : '';
@@ -300,6 +438,7 @@ window.addEventListener('gateway.session.ready', (event) => {
     localStorage.setItem(gateway_url_storage_key, gateway_url);
   }
   load_gateway_defaults();
+  void fetch_sessions_list();
 });
 
 if (gateway_url_input) {
@@ -313,6 +452,7 @@ if (gateway_url_input) {
 
 window.addEventListener('load', () => {
   load_gateway_defaults();
+  void fetch_sessions_list();
 });
 
 export { read_identity, save_identity, update_account_status };

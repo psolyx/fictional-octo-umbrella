@@ -158,6 +158,9 @@ class TuiModel:
             "logout",
             "logout_server",
             "logout_all_devices",
+            "sessions_list",
+            "revoke_session",
+            "revoke_device",
             "rotate_device",
             "quit",
         ]
@@ -178,6 +181,9 @@ class TuiModel:
             "dm_ciphertext",
             "gateway_base_url",
             "identity_import_json",
+            "revoke_session_id",
+            "revoke_device_id",
+            "revoke_include_self",
         ]
         self.settings_path = Path(settings_path)
         self.max_log_lines = max_log_lines
@@ -202,6 +208,9 @@ class TuiModel:
             "dm_ciphertext": initial_settings.get("dm_ciphertext", ""),
             "gateway_base_url": initial_settings.get("gateway_base_url", "http://localhost:8787"),
             "identity_import_json": initial_settings.get("identity_import_json", ""),
+            "revoke_session_id": initial_settings.get("revoke_session_id", ""),
+            "revoke_device_id": initial_settings.get("revoke_device_id", ""),
+            "revoke_include_self": initial_settings.get("revoke_include_self", "0"),
         }
 
         self.fields: Dict[str, str] = defaults

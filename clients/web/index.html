@@ -28,6 +28,14 @@
       <textarea id="account_import_json" rows="4" cols="64"></textarea>
     </label>
     <button id="account_import_btn">Import identity JSON</button>
+    <section id="account_sessions" aria-labelledby="account_sessions_title">
+      <h3 id="account_sessions_title">Active sessions</h3>
+      <div class="button-row">
+        <button id="account_sessions_refresh_btn" type="button">Refresh sessions</button>
+        <span id="account_sessions_status" aria-live="polite">sessions: idle</span>
+      </div>
+      <ul id="account_sessions_list" data-test="session-list"></ul>
+    </section>
   </fieldset>
 
   <fieldset>
