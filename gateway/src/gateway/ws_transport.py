@@ -346,6 +346,8 @@ def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any])
         return None, None, ("invalid_request", "env too large")
     if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
         return None, None, ("forbidden", "not a member")
+    if not conv_id.startswith("dm_") and runtime.conversations.is_muted_member(conv_id, session.user_id):
+        return None, None, ("forbidden", "muted")
     now_ms = runtime.now_func()
     rate_key = f"{session.user_id}:{conv_id}"
     if not runtime.conv_send_limiter.allow(rate_key, now_ms):
@@ -1363,6 +1365,79 @@ async def handle_room_unban(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_room_mute(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.mute_member(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError as exc:
+        if str(exc) == "not a room":
+            return _invalid_request("not a room")
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_unmute(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return _invalid_request("malformed json")
+
+    conv_id = body.get("conv_id")
+    members = await _parse_room_members(body)
+    if not isinstance(conv_id, str) or not conv_id:
+        return _invalid_request("conv_id required")
+    if members is None:
+        return _invalid_request("members must be a list of user_ids")
+    try:
+        runtime.conversations.unmute_member(conv_id, session.user_id, members)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError as exc:
+        if str(exc) == "not a room":
+            return _invalid_request("not a room")
+        return _forbidden("unknown conversation")
+    return web.json_response({"status": "ok"})
+
+
+async def handle_room_mutes(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+    conv_id = request.query.get("conv_id", "")
+    if not conv_id:
+        return _invalid_request("conv_id required")
+    try:
+        mutes = runtime.conversations.list_mutes(conv_id, session.user_id)
+    except PermissionError:
+        return _forbidden("forbidden")
+    except ValueError as exc:
+        if str(exc) == "not a room":
+            return _invalid_request("not a room")
+        return _forbidden("forbidden")
+    return _with_no_store(web.json_response({"conv_id": conv_id, "mutes": mutes}))
+
+
 async def handle_room_bans(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1759,7 +1834,10 @@ def create_app(
     app.router.add_post("/v1/rooms/demote", handle_room_demote)
     app.router.add_post("/v1/rooms/ban", handle_room_ban)
     app.router.add_post("/v1/rooms/unban", handle_room_unban)
+    app.router.add_post("/v1/rooms/mute", handle_room_mute)
+    app.router.add_post("/v1/rooms/unmute", handle_room_unmute)
     app.router.add_get("/v1/rooms/bans", handle_room_bans)
+    app.router.add_get("/v1/rooms/mutes", handle_room_mutes)
     app.router.add_get("/v1/rooms/members", handle_room_members)
     app.router.add_post("/v1/social/events", handle_social_publish)
     app.router.add_get("/v1/social/events", handle_social_events)

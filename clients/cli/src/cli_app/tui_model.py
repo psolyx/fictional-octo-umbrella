@@ -1025,6 +1025,12 @@ class TuiModel:
             if key == "CHAR" and char in {"u"}:
                 self._open_room_modal("room_unban")
                 return None
+            if key == "CHAR" and char in {"x"}:
+                self._open_room_modal("room_mute")
+                return None
+            if key == "CHAR" and char in {"X"}:
+                self._open_room_modal("room_unmute")
+                return None
             if key == "CHAR" and char in {"+"}:
                 self._open_room_modal("room_promote")
                 return None

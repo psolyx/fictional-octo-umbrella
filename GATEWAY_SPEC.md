@@ -450,6 +450,7 @@ Semantics match WS frames.
 - Server MUST enforce membership for both streaming and persistence operations:
   - `conv.subscribe`/replay MUST return `error.forbidden` to non-members and MUST NOT deliver history.
   - `conv.send` MUST return `error.forbidden` to non-members and MUST NOT append or broadcast the payload.
+  - For room conversations (`conv_id` does not start with `dm_`), room-muted members MUST receive `error.forbidden` with message `muted` when calling `conv.send`.
   - Gateways MUST enforce per-user-per-conversation fixed-window send limits (`GATEWAY_CONV_SENDS_PER_MIN`, default 120/min). Exceeding limits returns `rate_limited` (`429` on HTTP inbox, `error` frame on WS).
   - Gateways MUST reject oversized `env` payloads (`GATEWAY_MAX_ENV_B64_LEN`, default 262144 chars) with `400 invalid_request` and message `env too large`.
   - For 2-member DM conversations, if either user has blocked the other, `conv.send` MUST fail with `forbidden` and message `blocked`.
@@ -643,6 +644,49 @@ Semantics match WS frames.
   - Visibility is admin-only (`owner`/`admin`). Non-admin members and non-members MUST receive `403 forbidden`.
   - Results MUST be deterministic and sorted by `user_id` ascending.
   - `banned_at_ms` MUST be serialized as an integer epoch-ms value.
+
+### 8.7 Mute / unmute and mute listing
+- Endpoint: `POST /v1/rooms/mute` (HTTP, authenticated as above).
+- Body:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "members": ["u_03F...", "u_04F..."]
+  }
+  ```
+- Semantics:
+  - `conv_id` values starting with `dm_` MUST be rejected with `400 invalid_request` and message `not a room`.
+  - Only owners/admins may mute; muting the owner is ignored.
+  - Mute does not remove membership and does not change roles.
+  - Muted users MUST receive `403 forbidden` and message `muted` when sending `conv.send` in that room.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+- Endpoint: `POST /v1/rooms/unmute` (HTTP, authenticated as above).
+- Body matches mute.
+- Semantics:
+  - `conv_id` values starting with `dm_` MUST be rejected with `400 invalid_request` and message `not a room`.
+  - Only owners/admins may unmute.
+  - Success response: `{ "status": "ok" }`; errors: `forbidden`, `invalid_request` for malformed payloads.
+
+- Endpoint: `GET /v1/rooms/mutes?conv_id=...` (HTTP, authenticated as above).
+- Response:
+  ```json
+  {
+    "conv_id": "c_7N7...",
+    "mutes": [
+      {
+        "user_id": "u_03F...",
+        "muted_by_user_id": "u_01F...",
+        "muted_at_ms": 1766793600123
+      }
+    ]
+  }
+  ```
+- Semantics:
+  - `conv_id` values starting with `dm_` MUST be rejected with `400 invalid_request` and message `not a room`.
+  - Visibility is admin-only (`owner`/`admin`). Non-admin members and non-members MUST receive `403 forbidden`.
+  - Results MUST be deterministic and sorted by `user_id` ascending.
+  - `muted_at_ms` MUST be serialized as an integer epoch-ms value.
 
 
 ---
