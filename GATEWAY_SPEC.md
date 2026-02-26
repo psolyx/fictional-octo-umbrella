@@ -219,6 +219,28 @@ Semantics match WS frames.
   - `include_self=false`: invalidates all other sessions for the authenticated user and keeps the current token valid.
   - `include_self=true`: invalidates all sessions for the authenticated user, including the current token.
   - Success response: `{ "status": "ok", "invalidated": <int>, "kept_current": <bool> }`.
+- `GET /v1/session/list` requires `Authorization: Bearer <session_token>` and returns active sessions for the authenticated user:
+  ```json
+  {
+    "sessions": [
+      {
+        "session_id": "sid_...",
+        "device_id": "d_...",
+        "expires_at_ms": 1766797200123,
+        "is_current": true
+      }
+    ],
+    "current_session_id": "sid_..."
+  }
+  ```
+  - `session_id` is deterministic and non-secret: `"sid_" + base64url(sha256(session_token_bytes)[:16])`.
+  - Ordering is deterministic: `is_current` descending, then `device_id` ascending, then `session_id` ascending.
+- `POST /v1/session/revoke` requires `Authorization: Bearer <session_token>` and accepts exactly one target selector:
+  - `{ "session_id": "sid_...", "include_self": false }`
+  - `{ "device_id": "d_...", "include_self": false }`
+  - `include_self` defaults to `false` and must be boolean if provided.
+  - If a request targets the current session while `include_self=false`, the server returns `400` with `{ "code": "invalid_request", "message": "refusing to revoke current session without include_self" }`.
+  - Success response: `{ "status": "ok", "revoked": <int>, "revoked_session_ids": ["sid_...", ...] }` where `revoked_session_ids` are lexicographically sorted.
 - Session invalidation endpoints MUST NOT echo `session_token` or `resume_token` in responses and MUST include `Cache-Control: no-store`.
 
 ### 4.4 Gateway identity

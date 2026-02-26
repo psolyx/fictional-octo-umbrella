@@ -113,6 +113,37 @@ def session_logout_all(base_url: str, session_token: str, include_self: bool) ->
         headers={"Authorization": f"Bearer {session_token}"},
     )
 
+
+def session_list(base_url: str, session_token: str) -> Dict[str, object]:
+    request = urllib.request.Request(
+        _build_url(base_url, "/v1/session/list"),
+        headers={"Authorization": f"Bearer {session_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
+def session_revoke(
+    base_url: str,
+    session_token: str,
+    *,
+    session_id: str | None = None,
+    device_id: str | None = None,
+    include_self: bool = False,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {"include_self": include_self}
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if device_id is not None:
+        payload["device_id"] = device_id
+    return _post_json(
+        _build_url(base_url, "/v1/session/revoke"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
 def inbox_send(
     base_url: str,
     session_token: str,

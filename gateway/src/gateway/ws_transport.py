@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import importlib
 import json
 import os
@@ -537,6 +539,13 @@ def _no_store_response(data: dict[str, Any], status: int = 200) -> web.Response:
     return _with_no_store(response)
 
 
+def _derive_session_id(session_token: str) -> str:
+    digest = hashlib.sha256(session_token.encode("utf-8")).digest()
+    short_digest = digest[:16]
+    encoded = base64.urlsafe_b64encode(short_digest).decode("ascii").rstrip("=")
+    return f"sid_{encoded}"
+
+
 async def handle_session_start_http(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     try:
@@ -618,6 +627,86 @@ async def handle_session_logout_all(request: web.Request) -> web.Response:
             "invalidated": invalidated,
             "kept_current": not include_self,
         }
+    )
+
+
+async def handle_session_list(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    session_token = _session_token_from_request(request)
+    if session is None or session_token is None:
+        return _with_no_store(_unauthorized())
+
+    current_session_id = _derive_session_id(session_token)
+    sessions: list[dict[str, Any]] = []
+    for row in runtime.sessions.list_for_user(session.user_id):
+        session_id = _derive_session_id(row.session_token)
+        sessions.append(
+            {
+                "session_id": session_id,
+                "device_id": row.device_id,
+                "expires_at_ms": row.expires_at_ms,
+                "is_current": session_id == current_session_id,
+            }
+        )
+    sessions.sort(key=lambda row: (not row["is_current"], row["device_id"], row["session_id"]))
+    return _no_store_response({"sessions": sessions, "current_session_id": current_session_id})
+
+
+async def handle_session_revoke(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    session_token = _session_token_from_request(request)
+    if session is None or session_token is None:
+        return _with_no_store(_unauthorized())
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _no_store_response({"code": "invalid_request", "message": "malformed json"}, status=400)
+    if not isinstance(body, dict):
+        return _no_store_response({"code": "invalid_request", "message": "body must be an object"}, status=400)
+
+    session_id = body.get("session_id")
+    device_id = body.get("device_id")
+    include_self = body.get("include_self", False)
+    if not isinstance(include_self, bool):
+        return _no_store_response(
+            {"code": "invalid_request", "message": "include_self must be a boolean"}, status=400
+        )
+    has_session_id = isinstance(session_id, str)
+    has_device_id = isinstance(device_id, str)
+    if has_session_id == has_device_id:
+        return _no_store_response(
+            {"code": "invalid_request", "message": "exactly one of session_id or device_id is required"},
+            status=400,
+        )
+
+    current_session_id = _derive_session_id(session_token)
+    revoked_session_ids: list[str] = []
+    for row in runtime.sessions.list_for_user(session.user_id):
+        row_session_id = _derive_session_id(row.session_token)
+        is_current = row_session_id == current_session_id
+        if has_session_id and row_session_id != session_id:
+            continue
+        if has_device_id and row.device_id != device_id:
+            continue
+        if is_current and not include_self:
+            if has_session_id:
+                return _no_store_response(
+                    {
+                        "code": "invalid_request",
+                        "message": "refusing to revoke current session without include_self",
+                    },
+                    status=400,
+                )
+            continue
+        runtime.sessions.invalidate_token(row.session_token)
+        revoked_session_ids.append(row_session_id)
+
+    revoked_session_ids.sort()
+    return _no_store_response(
+        {"status": "ok", "revoked": len(revoked_session_ids), "revoked_session_ids": revoked_session_ids}
     )
 
 
@@ -1891,6 +1980,8 @@ def create_app(
     app.router.add_post("/v1/session/resume", handle_session_resume_http)
     app.router.add_post("/v1/session/logout", handle_session_logout)
     app.router.add_post("/v1/session/logout_all", handle_session_logout_all)
+    app.router.add_get("/v1/session/list", handle_session_list)
+    app.router.add_post("/v1/session/revoke", handle_session_revoke)
     app.router.add_post("/v1/inbox", handle_inbox)
     app.router.add_get("/v1/sse", handle_sse)
     app.router.add_post("/v1/presence/lease", handle_presence_lease)
