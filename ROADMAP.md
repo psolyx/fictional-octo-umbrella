@@ -266,6 +266,7 @@ This roadmap is structured to retire the highest-risk areas early: MLS correctne
   - TUI remains stdlib-first unless a dependency has explicit justification and review.
 - Account lifecycle:
   - Sign in/session bootstrap, device resume, sign out/session revoke UX for web + TUI.
+  - Server-side logout invalidates session tokens immediately; logout-all devices is supported.
   - Deterministic reconnect + replay UX with cursor continuity and user-visible status.
   - Explicit identity UX: create/import identity, identity import/export safe boundary, and device rotate guidance (implementation may follow later milestones).
 - Profile:

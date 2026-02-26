@@ -119,6 +119,8 @@
   }
 
   const db_name = 'gateway_web_demo';
+  const session_logout_path = '/v1/session/logout';
+  const session_logout_all_path = '/v1/session/logout_all';
   const db_version = 2;
   const store_name = 'settings';
   const transcripts_store_name = 'transcripts';
@@ -1458,6 +1460,34 @@
     return null;
   };
 
+  const clear_stored_cursors = async () => {
+    const db = await open_db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store_name, 'readwrite');
+      const store = tx.objectStore(store_name);
+      const request = store.openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          return;
+        }
+        if (typeof cursor.key === 'string' && cursor.key.startsWith('cursor:')) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error || new Error('indexeddb cursor clear failed'));
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error('indexeddb cursor clear failed'));
+      };
+    });
+  };
+
   const write_setting = async (key, value) => {
     const db = await open_db();
     return new Promise((resolve, reject) => {
@@ -2275,6 +2305,14 @@
 
     ensure_connected() {
       return this.ws && this.ws.readyState === WebSocket.OPEN;
+    }
+
+    disconnect() {
+      if (!this.ws) {
+        return;
+      }
+      this.ws.close();
+      this.ws = null;
     }
 
     send_frame(type, body) {
@@ -3402,6 +3440,22 @@
 
   window.addEventListener('gateway.send_env', (event) => {
     handle_gateway_send_env(event);
+  });
+
+  window.addEventListener('gateway.session.cleared', () => {
+    rooms_session_token = '';
+    conversations_session_token = '';
+    conversations_user_id = '';
+    client.disconnect();
+    Object.keys(last_from_seq_by_conv_id).forEach((conv_id) => {
+      delete last_from_seq_by_conv_id[conv_id];
+    });
+    clear_stored_cursors().catch((err) => {
+      append_log(`failed to clear cursors: ${err.message}`);
+    });
+    set_rooms_status('status: logged out');
+    set_conversations_status('status: logged out');
+    announce_status('account logged out');
   });
 
   window.addEventListener('gateway.session.ready', (event) => {

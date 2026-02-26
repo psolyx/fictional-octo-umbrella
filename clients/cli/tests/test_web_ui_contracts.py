@@ -326,9 +326,15 @@ class TestWebUiContracts(unittest.TestCase):
             'Import identity JSON',
             'Export identity JSON',
             'Logout',
+            'Logout all devices',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.index_html)
+
+
+    def test_session_logout_endpoint_contracts(self):
+        self.assertIn('/v1/session/logout', self.gateway_ws_client)
+        self.assertIn('/v1/session/logout_all', self.gateway_ws_client)
 
     def test_social_publish_uses_identity_signing_contract(self):
         self.assertNotIn('sig_b64 is required', self.social_ui)

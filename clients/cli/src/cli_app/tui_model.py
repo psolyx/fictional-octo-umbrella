@@ -156,6 +156,8 @@ class TuiModel:
             "identity_import",
             "identity_new",
             "logout",
+            "logout_server",
+            "logout_all_devices",
             "rotate_device",
             "quit",
         ]

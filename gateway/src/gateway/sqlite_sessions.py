@@ -144,6 +144,55 @@ class SQLiteSessionStore:
         session.expires_at_ms = expires_at
         return session
 
+
+    def list_for_user(self, user_id: str) -> list[Session]:
+        now_ms = _now_ms()
+        with self._backend.lock:
+            conn = self._backend.connection
+            conn.execute("DELETE FROM sessions WHERE user_id=? AND expires_at_ms<=?", (user_id, now_ms))
+            rows = conn.execute(
+                """
+                SELECT session_token, resume_token, device_id, user_id, expires_at_ms
+                FROM sessions
+                WHERE user_id=?
+                ORDER BY device_id ASC, session_token ASC
+                """,
+                (user_id,),
+            ).fetchall()
+        sessions: list[Session] = []
+        for row in rows:
+            sessions.append(
+                Session(
+                    session_token=row[0],
+                    resume_token=row[1],
+                    device_id=row[2],
+                    user_id=row[3],
+                    expires_at_ms=row[4],
+                )
+            )
+        return sessions
+
+    def invalidate_token(self, session_token: str) -> None:
+        with self._backend.lock:
+            self._backend.connection.execute(
+                "DELETE FROM sessions WHERE session_token=?",
+                (session_token,),
+            )
+
+    def invalidate_all_for_user(self, user_id: str, keep_session_token: str | None = None) -> int:
+        with self._backend.lock:
+            if keep_session_token is None:
+                cursor = self._backend.connection.execute(
+                    "DELETE FROM sessions WHERE user_id=?",
+                    (user_id,),
+                )
+            else:
+                cursor = self._backend.connection.execute(
+                    "DELETE FROM sessions WHERE user_id=? AND session_token<>?",
+                    (user_id, keep_session_token),
+                )
+        return int(cursor.rowcount)
+
     def invalidate(self, session: Session) -> None:
         with self._backend.lock:
             self._backend.connection.execute(
