@@ -88,8 +88,9 @@ def session_start(
     auth_token: str,
     device_id: str,
     device_credential: Optional[str] = None,
+    client_label: str = "tui",
 ) -> Dict[str, str]:
-    payload = {"auth_token": auth_token, "device_id": device_id}
+    payload = {"auth_token": auth_token, "device_id": device_id, "client_label": client_label}
     if device_credential is not None:
         payload["device_credential"] = device_credential
     response = _post_json(_build_url(base_url, "/v1/session/start"), payload)

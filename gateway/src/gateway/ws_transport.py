@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import secrets
 from email.utils import formatdate
 from typing import Any, Callable, List, Tuple, TypedDict, Union
@@ -63,7 +64,7 @@ class SessionStore:
         self._by_session: dict[str, Session] = {}
         self._by_resume: dict[str, Session] = {}
 
-    def create(self, user_id: str, device_id: str) -> Session:
+    def create(self, user_id: str, device_id: str, client_label: str = "unknown") -> Session:
         now_ms = _now_ms()
         session = Session(
             user_id=user_id,
@@ -71,6 +72,9 @@ class SessionStore:
             session_token=f"st_{secrets.token_urlsafe(16)}",
             resume_token=f"rt_{secrets.token_urlsafe(16)}",
             expires_at_ms=now_ms + self._ttl_ms,
+            created_at_ms=now_ms,
+            last_seen_at_ms=now_ms,
+            client_label=client_label,
         )
         self._by_session[session.session_token] = session
         self._by_resume[session.resume_token] = session
@@ -326,18 +330,50 @@ def _session_ready_body(runtime: Runtime, session: Session) -> dict[str, Any]:
     }
 
 
-def _validate_session_start_body(body: dict[str, Any]) -> Tuple[tuple[str, str] | None, str | None]:
+_CLIENT_LABEL_RE = re.compile(r"^[a-z0-9 _-]+$")
+
+
+def _sanitize_client_label(raw_label: str) -> str:
+    filtered = "".join(ch for ch in raw_label.lower() if 32 <= ord(ch) <= 126)
+    collapsed = " ".join(filtered.split())
+    trimmed = collapsed[:32].strip()
+    if not trimmed:
+        return "unknown"
+    if "st_" in trimmed or "rt_" in trimmed:
+        return "unknown"
+    if not _CLIENT_LABEL_RE.match(trimmed):
+        return "unknown"
+    return trimmed
+
+
+def _derive_client_label_from_headers(request: web.Request) -> str:
+    user_agent = request.headers.get("User-Agent", "")
+    first_token = user_agent.split(" ", 1)[0]
+    return _sanitize_client_label(first_token)
+
+
+def _validate_session_start_body(body: dict[str, Any]) -> Tuple[tuple[str, str, str | None] | None, str | None]:
     auth_token = body.get("auth_token")
     device_id = body.get("device_id")
     device_credential = body.get("device_credential")
+    client_label = body.get("client_label")
     if not auth_token or not device_id:
         return None, "auth_token and device_id required"
     if not isinstance(auth_token, str) or not isinstance(device_id, str):
         return None, "auth_token and device_id must be strings"
     if device_credential is not None and not isinstance(device_credential, str):
         return None, "device_credential must be a string if provided"
+    if client_label is not None:
+        if not isinstance(client_label, str):
+            return None, "client_label must be a string if provided"
+        if len(client_label) < 1 or len(client_label) > 32:
+            return None, "client_label must be 1..32 chars"
+        if "st_" in client_label or "rt_" in client_label:
+            return None, "client_label contains forbidden token-like substring"
+        if not _CLIENT_LABEL_RE.match(client_label):
+            return None, "client_label must match ^[a-z0-9 _-]+$"
     user_id = _derive_user_id(auth_token)
-    return (user_id, device_id), None
+    return (user_id, device_id, client_label), None
 
 
 def _load_gateway_directory(directory_path: str | None) -> dict[str, str]:
@@ -560,8 +596,9 @@ async def handle_session_start_http(request: web.Request) -> web.Response:
         return _no_store_response({"code": "invalid_request", "message": error}, status=400)
 
     assert parsed is not None
-    user_id, device_id = parsed
-    session = runtime.sessions.create(user_id, device_id)
+    user_id, device_id, client_label = parsed
+    final_client_label = client_label if client_label is not None else _derive_client_label_from_headers(request)
+    session = runtime.sessions.create(user_id, device_id, client_label=final_client_label)
     ready_body = _session_ready_body(runtime, session)
     return _no_store_response(ready_body)
 
@@ -649,6 +686,9 @@ async def handle_session_list(request: web.Request) -> web.Response:
                 "device_id": row.device_id,
                 "expires_at_ms": row.expires_at_ms,
                 "is_current": session_id == current_session_id,
+                "created_at_ms": row.created_at_ms,
+                "last_seen_at_ms": row.last_seen_at_ms,
+                "client_label": _sanitize_client_label(row.client_label),
             }
         )
     sessions.sort(key=lambda row: (not row["is_current"], row["device_id"], row["session_id"]))
@@ -2256,8 +2296,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.close()
                 return ws
             assert parsed is not None
-            user_id, device_id = parsed
-            session = runtime.sessions.create(user_id, device_id)
+            user_id, device_id, client_label = parsed
+            final_client_label = client_label if client_label is not None else _derive_client_label_from_headers(request)
+            session = runtime.sessions.create(user_id, device_id, client_label=final_client_label)
         elif t == "session.resume":
             resume_token, error = _validate_session_resume_body(body)
             if error:

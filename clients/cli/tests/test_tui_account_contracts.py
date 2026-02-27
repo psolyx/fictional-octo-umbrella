@@ -66,5 +66,9 @@ class TestTuiAccountContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SMOKE_LITE_OK", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_OK)
         self.assertIn("PHASE5_2_SMOKE_LITE_END", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_END)
 
+    def test_sessions_list_includes_metadata_markers(self):
+        self.assertIn("client_label=", self.tui_app)
+        self.assertIn("last_seen_at_ms=", self.tui_app)
+
 if __name__ == "__main__":
     unittest.main()

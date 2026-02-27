@@ -18,6 +18,9 @@ class Session:
     session_token: str
     resume_token: str
     expires_at_ms: int
+    created_at_ms: int
+    last_seen_at_ms: int
+    client_label: str
 
 
 class SQLiteSessionStore:
@@ -27,19 +30,31 @@ class SQLiteSessionStore:
         self._backend = backend
         self._ttl_ms = ttl_ms
 
-    def create(self, user_id: str, device_id: str) -> Session:
+    def create(self, user_id: str, device_id: str, client_label: str = "unknown") -> Session:
+        now_ms = _now_ms()
         session = Session(
             user_id=user_id,
             device_id=device_id,
             session_token=f"st_{secrets.token_urlsafe(16)}",
             resume_token=f"rt_{secrets.token_urlsafe(16)}",
-            expires_at_ms=_now_ms() + self._ttl_ms,
+            expires_at_ms=now_ms + self._ttl_ms,
+            created_at_ms=now_ms,
+            last_seen_at_ms=now_ms,
+            client_label=client_label,
         )
         with self._backend.lock:
             self._backend.connection.execute(
                 """
-                INSERT INTO sessions (session_token, resume_token, device_id, user_id, expires_at_ms)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO sessions (
+                    session_token,
+                    resume_token,
+                    device_id,
+                    user_id,
+                    expires_at_ms,
+                    created_at_ms,
+                    last_seen_at_ms,
+                    client_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_token,
@@ -47,6 +62,9 @@ class SQLiteSessionStore:
                     session.device_id,
                     session.user_id,
                     session.expires_at_ms,
+                    session.created_at_ms,
+                    session.last_seen_at_ms,
+                    session.client_label,
                 ),
             )
         return session
@@ -54,7 +72,12 @@ class SQLiteSessionStore:
     def get_by_session(self, session_token: str) -> Session | None:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE session_token=?",
+                """
+                SELECT session_token, resume_token, device_id, user_id, expires_at_ms,
+                       created_at_ms, last_seen_at_ms, client_label
+                FROM sessions
+                WHERE session_token=?
+                """,
                 (session_token,),
             ).fetchone()
         if row is None:
@@ -65,16 +88,32 @@ class SQLiteSessionStore:
             device_id=row[2],
             user_id=row[3],
             expires_at_ms=row[4],
+            created_at_ms=row[5],
+            last_seen_at_ms=row[6],
+            client_label=row[7],
         )
-        if session.expires_at_ms <= _now_ms():
+        now_ms = _now_ms()
+        if session.expires_at_ms <= now_ms:
             self.invalidate(session)
             return None
+        if now_ms - session.last_seen_at_ms >= 30_000:
+            with self._backend.lock:
+                self._backend.connection.execute(
+                    "UPDATE sessions SET last_seen_at_ms=? WHERE session_token=?",
+                    (now_ms, session.session_token),
+                )
+            session.last_seen_at_ms = now_ms
         return session
 
     def get_by_resume(self, resume_token: str) -> Session | None:
         with self._backend.lock:
             row = self._backend.connection.execute(
-                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE resume_token=?",
+                """
+                SELECT session_token, resume_token, device_id, user_id, expires_at_ms,
+                       created_at_ms, last_seen_at_ms, client_label
+                FROM sessions
+                WHERE resume_token=?
+                """,
                 (resume_token,),
             ).fetchone()
 
@@ -87,6 +126,9 @@ class SQLiteSessionStore:
             device_id=row[2],
             user_id=row[3],
             expires_at_ms=row[4],
+            created_at_ms=row[5],
+            last_seen_at_ms=row[6],
+            client_label=row[7],
         )
         if session.expires_at_ms <= _now_ms():
             self.invalidate(session)
@@ -102,7 +144,12 @@ class SQLiteSessionStore:
             conn = self._backend.connection
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT session_token, resume_token, device_id, user_id, expires_at_ms FROM sessions WHERE resume_token=?",
+                """
+                SELECT session_token, resume_token, device_id, user_id, expires_at_ms,
+                       created_at_ms, last_seen_at_ms, client_label
+                FROM sessions
+                WHERE resume_token=?
+                """,
                 (resume_token,),
             ).fetchone()
 
@@ -116,6 +163,9 @@ class SQLiteSessionStore:
                 device_id=row[2],
                 user_id=row[3],
                 expires_at_ms=row[4],
+                created_at_ms=row[5],
+                last_seen_at_ms=row[6],
+                client_label=row[7],
             )
             if session.expires_at_ms <= now_ms:
                 conn.execute("DELETE FROM sessions WHERE resume_token=?", (resume_token,))
@@ -153,6 +203,7 @@ class SQLiteSessionStore:
             rows = conn.execute(
                 """
                 SELECT session_token, resume_token, device_id, user_id, expires_at_ms
+                       ,created_at_ms, last_seen_at_ms, client_label
                 FROM sessions
                 WHERE user_id=?
                 ORDER BY device_id ASC, session_token ASC
@@ -168,6 +219,9 @@ class SQLiteSessionStore:
                     device_id=row[2],
                     user_id=row[3],
                     expires_at_ms=row[4],
+                    created_at_ms=row[5],
+                    last_seen_at_ms=row[6],
+                    client_label=row[7],
                 )
             )
         return sessions

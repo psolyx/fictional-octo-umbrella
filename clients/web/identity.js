@@ -122,6 +122,12 @@ const set_sessions_status = (text) => {
   account_sessions_status.textContent = text;
 };
 
+
+const format_session_timestamp_utc = (value) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 'unknown';
+  return new Date(value).toISOString();
+};
+
 const post_session_action = async (path, payload = null) => {
   const session = read_session();
   const session_token = typeof session.session_token === 'string' ? session.session_token.trim() : '';
@@ -208,8 +214,26 @@ const fetch_sessions_list = async () => {
       const item = document.createElement('li');
       const badge = row.is_current ? ' (This device)' : '';
       const summary = document.createElement('span');
-      summary.textContent = `device_id=${String(row.device_id || '')}${badge} session_id=${String(row.session_id || '')} expires_at_ms=${String(row.expires_at_ms || '')}`;
+      const client_label = String(row.client_label || 'unknown');
+      const created_iso = format_session_timestamp_utc(Number(row.created_at_ms));
+      const last_seen_iso = format_session_timestamp_utc(Number(row.last_seen_at_ms));
+      summary.textContent = `device_id=${String(row.device_id || '')}${badge} session_id=${String(row.session_id || '')} label=${client_label} created=${created_iso} last_seen=${last_seen_iso} expires_at_ms=${String(row.expires_at_ms || '')}`;
+
+      const label_marker = document.createElement('span');
+      label_marker.dataset.test = 'session-client-label';
+      label_marker.textContent = `label=${client_label}`;
       item.appendChild(summary);
+      item.appendChild(label_marker);
+
+      const created_marker = document.createElement('span');
+      created_marker.dataset.test = 'session-created';
+      created_marker.textContent = `created=${created_iso}`;
+      item.appendChild(created_marker);
+
+      const last_seen_marker = document.createElement('span');
+      last_seen_marker.dataset.test = 'session-last-seen';
+      last_seen_marker.textContent = `last_seen=${last_seen_iso}`;
+      item.appendChild(last_seen_marker);
 
       const revoke_session_btn = document.createElement('button');
       revoke_session_btn.type = 'button';
@@ -340,6 +364,7 @@ const create_identity = async () => {
     user_id: social_public_key_b64,
     device_id: `d_${random_b64url(16)}`,
     device_credential: random_b64url(32),
+    client_label: 'web',
     social_private_key_b64: b64url_encode(private_key_bytes),
     social_public_key_b64,
   };
@@ -388,6 +413,7 @@ if (account_rotate_device_btn) {
         ...identity,
         device_id: `d_${random_b64url(16)}`,
         device_credential: random_b64url(32),
+        client_label: 'web',
       };
       save_identity(rotated);
       load_gateway_defaults();

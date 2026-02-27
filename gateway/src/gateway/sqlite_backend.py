@@ -46,7 +46,7 @@ class SQLiteBackend:
                 user_version = 1
             else:
                 raise ValueError(f"Unsupported schema version: {legacy_version}")
-        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
+        elif user_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
             raise ValueError(f"Unsupported schema version: {user_version}")
 
         if user_version == 1:
@@ -97,7 +97,11 @@ class SQLiteBackend:
             self._migrate_v12_to_v13()
             user_version = 13
 
-        if user_version != 13:
+        if user_version == 13:
+            self._migrate_v13_to_v14()
+            user_version = 14
+
+        if user_version != 14:
             raise ValueError(f"Unsupported schema version: {user_version}")
 
     def _read_legacy_schema_version(self) -> int | None:
@@ -381,3 +385,23 @@ class SQLiteBackend:
             "CREATE INDEX IF NOT EXISTS conversation_mutes_conv_idx ON conversation_mutes (conv_id, user_id)"
         )
         self._conn.execute("PRAGMA user_version = 13")
+
+    def _migrate_v13_to_v14(self) -> None:
+        sessions_table = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if sessions_table is not None:
+            session_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "created_at_ms" not in session_columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0")
+            if "last_seen_at_ms" not in session_columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN last_seen_at_ms INTEGER NOT NULL DEFAULT 0")
+            if "client_label" not in session_columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN client_label TEXT NOT NULL DEFAULT ''")
+            self._conn.execute(
+                "UPDATE sessions SET created_at_ms=expires_at_ms-3600000 WHERE created_at_ms=0"
+            )
+            self._conn.execute(
+                "UPDATE sessions SET last_seen_at_ms=created_at_ms WHERE last_seen_at_ms=0"
+            )
+        self._conn.execute("PRAGMA user_version = 14")
