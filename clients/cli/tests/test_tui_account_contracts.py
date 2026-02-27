@@ -1,6 +1,8 @@
 import pathlib
 import unittest
 
+from cli_app import phase5_2_smoke_lite
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -58,6 +60,11 @@ class TestTuiAccountContracts(unittest.TestCase):
         self.assertIn('"expired"', self.tui_model)
         self.assertIn('elif action == "account_reauth"', self.tui_app)
 
+    def test_phase5_2_smoke_lite_contract_markers(self):
+        self.assertTrue(hasattr(phase5_2_smoke_lite, "run_smoke_lite_http"))
+        self.assertIn("PHASE5_2_SMOKE_LITE_BEGIN", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_BEGIN)
+        self.assertIn("PHASE5_2_SMOKE_LITE_OK", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_OK)
+        self.assertIn("PHASE5_2_SMOKE_LITE_END", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_END)
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,6 +88,9 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.production_spec)
 
+    def test_phase5_2_smoke_lite_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SMOKE_LITE", self.production_spec)
+        self.assertIn("python -m cli_app.phase5_2_smoke_lite_main", self.production_spec)
 
 if __name__ == "__main__":
     unittest.main()
