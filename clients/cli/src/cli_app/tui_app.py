@@ -964,6 +964,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 model.identity.auth_token,
                 model.identity.device_id,
                 model.identity.device_credential,
+                client_label="tui",
             )
             gateway_store.save_session(base_url, response["session_token"], response["resume_token"])
             model.auth_state = "ok"
@@ -1051,7 +1052,11 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                     rows.append(
                         (
                             f"{badge} device_id={row.get('device_id', '')} "
-                            f"session_id={row.get('session_id', '')} expires_at_ms={row.get('expires_at_ms', '')}"
+                            f"session_id={row.get('session_id', '')} "
+                            f"client_label={row.get('client_label', '')} "
+                            f"created_at_ms={row.get('created_at_ms', '')} "
+                            f"last_seen_at_ms={row.get('last_seen_at_ms', '')} "
+                            f"expires_at_ms={row.get('expires_at_ms', '')}"
                         )
                     )
             _write_heading([redact_text(row) for row in rows])

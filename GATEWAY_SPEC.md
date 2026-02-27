@@ -201,7 +201,7 @@ Semantics match WS frames.
   POST /v1/session/start
   Content-Type: application/json
 
-  { "auth_token": "Bearer ey...", "device_id": "d_01G...", "device_credential": "b64" }
+  { "auth_token": "Bearer ey...", "device_id": "d_01G...", "device_credential": "b64", "client_label": "web" }
   ```
   Response:
   ```json
@@ -227,7 +227,10 @@ Semantics match WS frames.
         "session_id": "sid_...",
         "device_id": "d_...",
         "expires_at_ms": 1766797200123,
-        "is_current": true
+        "is_current": true,
+        "created_at_ms": 1766793600123,
+        "last_seen_at_ms": 1766795400123,
+        "client_label": "web"
       }
     ],
     "current_session_id": "sid_..."
@@ -235,6 +238,10 @@ Semantics match WS frames.
   ```
   - `session_id` is deterministic and non-secret: `"sid_" + base64url(sha256(session_token_bytes)[:16])`.
   - Ordering is deterministic: `is_current` descending, then `device_id` ascending, then `session_id` ascending.
+  - Each session row includes `created_at_ms`, `last_seen_at_ms`, and sanitized `client_label` metadata for safe device identification.
+
+  - `client_label` is optional on session start and, when provided, MUST be `1..32` chars matching `^[a-z0-9 _-]+$` and MUST NOT contain `st_` or `rt_` substrings.
+  - If `client_label` is omitted, the server derives a coarse low-entropy label from `User-Agent`; empty/invalid values map to `"unknown"`.
 - `POST /v1/session/revoke` requires `Authorization: Bearer <session_token>` and accepts exactly one target selector:
   - `{ "session_id": "sid_...", "include_self": false }`
   - `{ "device_id": "d_...", "include_self": false }`

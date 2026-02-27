@@ -155,8 +155,13 @@ class PresenceStatusTests(unittest.IsolatedAsyncioTestCase):
         first = payload['sessions'][0]
         self.assertTrue(first['is_current'])
         self.assertEqual(first['device_id'], 'd_b')
+        self.assertIsInstance(first['created_at_ms'], int)
+        self.assertIsInstance(first['last_seen_at_ms'], int)
+        self.assertGreaterEqual(first['last_seen_at_ms'], first['created_at_ms'])
+        self.assertIsInstance(first['client_label'], str)
+        self.assertLessEqual(len(first['client_label']), 32)
         session_keys = list(first.keys())
-        self.assertEqual(session_keys, ['session_id', 'device_id', 'expires_at_ms', 'is_current'])
+        self.assertEqual(session_keys, ['session_id', 'device_id', 'expires_at_ms', 'is_current', 'created_at_ms', 'last_seen_at_ms', 'client_label'])
 
         ordered_pairs = [(row['is_current'], row['device_id'], row['session_id']) for row in payload['sessions']]
         self.assertEqual(ordered_pairs, sorted(ordered_pairs, key=lambda row: (not row[0], row[1], row[2])))
@@ -169,6 +174,21 @@ class PresenceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(same_device_session.session_token, raw_json)
         self.assertNotIn(other_device_session.session_token, raw_json)
         self.assertNotIn(current_session.resume_token, raw_json)
+
+        def _collect_scalar_values(value):
+            if isinstance(value, dict):
+                for nested in value.values():
+                    yield from _collect_scalar_values(nested)
+                return
+            if isinstance(value, list):
+                for nested in value:
+                    yield from _collect_scalar_values(nested)
+                return
+            yield str(value)
+
+        values_blob = " ".join(_collect_scalar_values(payload))
+        self.assertNotIn('st_', values_blob)
+        self.assertNotIn('rt_', values_blob)
 
     async def test_session_revoke_by_session_id_invalidates_token(self):
         clock = FakeClock()

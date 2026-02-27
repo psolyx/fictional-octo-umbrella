@@ -257,7 +257,17 @@ class TestWebUiContracts(unittest.TestCase):
 
     def test_account_session_contracts(self):
         self.assertIn('data-test="session-list"', self.index_html)
+        self.assertIn('session-client-label', self.identity_js)
+        self.assertIn('session-created', self.identity_js)
+        self.assertIn('session-last-seen', self.identity_js)
+        self.assertIn('label', self.index_html)
+        self.assertIn('created', self.index_html)
+        self.assertIn('last seen', self.index_html)
         self.assertIn('/v1/session/list', self.identity_js)
+        self.assertIn('client_label', self.identity_js)
+        self.assertIn('created_at_ms', self.identity_js)
+        self.assertIn('last_seen_at_ms', self.identity_js)
+        self.assertIn("toISOString", self.identity_js)
         self.assertIn('data-test="session-expired-banner"', self.index_html)
         self.assertIn('data-test="session-expired-reauth"', self.index_html)
         self.assertIn("gateway.session.expired", self.gateway_ws_client)
