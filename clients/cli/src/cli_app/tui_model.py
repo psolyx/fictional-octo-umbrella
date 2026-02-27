@@ -152,6 +152,7 @@ class TuiModel:
             "dm_decrypt",
             "gw_start",
             "gw_resume",
+            "conv_mark_all_read",
             "identity_export",
             "identity_import",
             "identity_new",
@@ -1022,6 +1023,8 @@ class TuiModel:
                 self.focus_area = "new_dm"
                 return None
             if key == "CTRL_R":
+                if self.focus_area in {"conversations", "transcript", "compose"}:
+                    return "conv_mark_all_read"
                 self._open_room_modal("room_create")
                 return None
             if key == "CHAR" and char in {"I"}:

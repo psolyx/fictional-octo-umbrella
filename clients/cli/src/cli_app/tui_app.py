@@ -240,7 +240,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: new room | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | z: mute | A: archive | H: archived filter | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
+        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: mark all read | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | z: mute | A: archive | H: archived filter | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
@@ -422,7 +422,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices / sessions_list / revoke_session / revoke_device",
-            "Conversations: L refresh, U next unread, r mark read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
+            "Conversations: L refresh, U next unread, r mark read, Ctrl-R mark all read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
             "Roster overlay: B cycles roster/bans/mutes",
@@ -1687,6 +1687,25 @@ def _mark_selected_conversation_read(
     return conv_id
 
 
+def _mark_all_conversations_read(model: TuiModel, session: SessionState | None) -> None:
+    if session is None:
+        _append_system_message(model, "No active session. Press r to resume.")
+        return
+    try:
+        payload = gateway_client.conversations_mark_all_read(
+            session.base_url,
+            session.session_token,
+            include_archived=model.show_archived,
+            include_muted=True,
+        )
+    except urllib.error.HTTPError as exc:
+        _append_system_message(model, f"mark_all_read {_read_http_error_code(exc)}")
+        return
+    updated = payload.get("updated") if isinstance(payload, dict) else 0
+    updated_value = int(updated) if isinstance(updated, int) else 0
+    _append_system_message(model, f"mark_all_read ok updated={updated_value}")
+
+
 def _toggle_selected_conversation_pinned(model: TuiModel, session: SessionState | None) -> None:
     if session is None:
         _append_system_message(model, "No active session. Press r to resume.")
@@ -2865,6 +2884,9 @@ def main() -> int:
                     force=True,
                     last_marked_conv_id=last_marked_conv_id,
                 )
+            if action == "conv_mark_all_read":
+                _mark_all_conversations_read(model, session_state)
+                _refresh_conversations(model, session_state)
             if action == "conv_toggle_pinned":
                 _toggle_selected_conversation_pinned(model, session_state)
                 _refresh_conversations(model, session_state)

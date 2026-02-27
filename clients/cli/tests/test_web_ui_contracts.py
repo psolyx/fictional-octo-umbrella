@@ -115,6 +115,11 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("addEventListener('gateway.send_env'", self.gateway_ws_client)
 
 
+
+    def test_mark_all_read_contract_markers(self):
+        self.assertIn('data-test="conv-mark-all-read"', self.index_html)
+        self.assertIn('/v1/conversations/mark_all_read', self.gateway_ws_client)
+
     def test_message_lifecycle_markers(self):
         self.assertIn("msg-pending", self.gateway_ws_client)
         self.assertIn("Retry send", self.gateway_ws_client)

@@ -379,5 +379,119 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
             body = await response.json()
             self.assertEqual(body.get("code"), "forbidden")
 
+    async def test_mark_all_read_clears_unread_with_muted_archived_controls(self):
+        alice_token = await self._session("u_alice", "d_alice")
+
+        await self._create_room(alice_token, "conv_a", [])
+        await self._create_room(alice_token, "conv_b", [])
+        await self._create_room(alice_token, "conv_c", [])
+
+        await self._send_inbox(alice_token, conv_id="conv_a", msg_id="a1", env="ZW52", ts_ms=1000)
+        await self._send_inbox(alice_token, conv_id="conv_a", msg_id="a2", env="ZW52", ts_ms=1100)
+        await self._send_inbox(alice_token, conv_id="conv_b", msg_id="b1", env="ZW52", ts_ms=1200)
+        await self._send_inbox(alice_token, conv_id="conv_c", msg_id="c1", env="ZW52", ts_ms=1300)
+        await self._send_inbox(alice_token, conv_id="conv_c", msg_id="c2", env="ZW52", ts_ms=1400)
+        await self._send_inbox(alice_token, conv_id="conv_c", msg_id="c3", env="ZW52", ts_ms=1500)
+
+        initial_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(initial_list.status, 200)
+        initial_by_conv = {item["conv_id"]: item for item in (await initial_list.json())["items"]}
+        self.assertEqual(initial_by_conv["conv_a"]["unread_count"], 2)
+        self.assertEqual(initial_by_conv["conv_b"]["unread_count"], 1)
+        self.assertEqual(initial_by_conv["conv_c"]["unread_count"], 3)
+
+        mark_all = await self.client.post(
+            "/v1/conversations/mark_all_read",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(mark_all.status, 200)
+        mark_all_body = await mark_all.json()
+        self.assertEqual(mark_all_body["status"], "ok")
+        self.assertEqual(mark_all_body["updated"], 3)
+        self.assertEqual(mark_all_body["updated_conv_ids"], ["conv_a", "conv_b", "conv_c"])
+
+        post_mark_list = await self.client.get(
+            "/v1/conversations",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        self.assertEqual(post_mark_list.status, 200)
+        post_mark_by_conv = {item["conv_id"]: item for item in (await post_mark_list.json())["items"]}
+        self.assertEqual(post_mark_by_conv["conv_a"]["unread_count"], 0)
+        self.assertEqual(post_mark_by_conv["conv_b"]["unread_count"], 0)
+        self.assertEqual(post_mark_by_conv["conv_c"]["unread_count"], 0)
+
+        await self._send_inbox(alice_token, conv_id="conv_a", msg_id="a3", env="ZW52", ts_ms=1600)
+        await self._send_inbox(alice_token, conv_id="conv_b", msg_id="b2", env="ZW52", ts_ms=1700)
+        await self._send_inbox(alice_token, conv_id="conv_c", msg_id="c4", env="ZW52", ts_ms=1800)
+
+        mute_response = await self.client.post(
+            "/v1/conversations/mute",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"conv_id": "conv_b", "muted": True},
+        )
+        self.assertEqual(mute_response.status, 200)
+
+        archive_response = await self.client.post(
+            "/v1/conversations/archive",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"conv_id": "conv_c", "archived": True},
+        )
+        self.assertEqual(archive_response.status, 200)
+
+        no_muted_or_archived = await self.client.post(
+            "/v1/conversations/mark_all_read",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"include_archived": False, "include_muted": False},
+        )
+        self.assertEqual(no_muted_or_archived.status, 200)
+        body = await no_muted_or_archived.json()
+        self.assertEqual(body["updated_conv_ids"], ["conv_a"])
+
+        include_archived_list = await self.client.get(
+            "/v1/conversations?include_archived=1",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        by_conv = {item["conv_id"]: item for item in (await include_archived_list.json())["items"]}
+        self.assertEqual(by_conv["conv_a"]["unread_count"], 0)
+        self.assertEqual(by_conv["conv_b"]["unread_count"], 1)
+        self.assertEqual(by_conv["conv_c"]["unread_count"], 1)
+
+        include_archived_only = await self.client.post(
+            "/v1/conversations/mark_all_read",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"include_archived": True, "include_muted": False},
+        )
+        self.assertEqual(include_archived_only.status, 200)
+        self.assertEqual((await include_archived_only.json())["updated_conv_ids"], ["conv_a", "conv_c"])
+
+        include_archived_list = await self.client.get(
+            "/v1/conversations?include_archived=1",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        by_conv = {item["conv_id"]: item for item in (await include_archived_list.json())["items"]}
+        self.assertEqual(by_conv["conv_b"]["unread_count"], 1)
+        self.assertEqual(by_conv["conv_c"]["unread_count"], 0)
+
+        include_muted = await self.client.post(
+            "/v1/conversations/mark_all_read",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json={"include_archived": True, "include_muted": True},
+        )
+        self.assertEqual(include_muted.status, 200)
+        self.assertEqual((await include_muted.json())["updated_conv_ids"], ["conv_a", "conv_b", "conv_c"])
+
+        final_list = await self.client.get(
+            "/v1/conversations?include_archived=1",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+        final_by_conv = {item["conv_id"]: item for item in (await final_list.json())["items"]}
+        self.assertEqual(final_by_conv["conv_a"]["unread_count"], 0)
+        self.assertEqual(final_by_conv["conv_b"]["unread_count"], 0)
+        self.assertEqual(final_by_conv["conv_c"]["unread_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
