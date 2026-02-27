@@ -306,6 +306,7 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("History pruned", self.index_html)
         self.assertIn("replay_window_banner", self.index_html)
         self.assertIn("replay_window_resubscribe_btn", self.index_html)
+        self.assertIn('id="replay_window_banner" role="status"', self.index_html)
 
 
     def test_web_secret_redaction_contracts(self):
