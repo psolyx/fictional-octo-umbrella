@@ -94,6 +94,32 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - [ ] Publish command confirms success/failure with retry guidance.
 - [ ] Author-profile jump command works from timeline items.
 
+## Phase 5.2 smoke lite (non-browser, deterministic)
+
+Marker family: `PHASE5_2_SMOKE_LITE`.
+
+Record a deterministic evidence transcript against a running gateway:
+
+```bash
+BASE_URL=http://127.0.0.1:8788 python -m cli_app.phase5_2_smoke_lite_main |& tee phase5_2_smoke_lite.log
+```
+
+Coverage (happy-path smoke lite):
+- account/session lifecycle (`/v1/session/start`, `/v1/session/list`, `/v1/session/revoke`, revoked-token 401 check)
+- DMs + conversation metadata (`/v1/dms/create`, `/v1/inbox`, `/v1/conversations`, `/v1/conversations/mark_read`)
+- rooms-lite workflow (`/v1/rooms/create`, `/v1/rooms/members`, room message send via `/v1/inbox`)
+- social profile/feed signed-event flow (`/v1/social/events`, `/v1/social/profile`, `/v1/social/feed`)
+- notifications-lite mark-all-read (`/v1/conversations/mark_all_read`)
+
+Out of scope for this smoke:
+- browser launch/runtime smoke coverage (kept in existing browser-gated tests)
+- MLS crypto correctness beyond existing dedicated protocol/unit tests
+
+Transcript invariants:
+- deterministic line format per step (`step=<N> ok ...` / `step=<N> FAIL ...`)
+- stable grep markers: `PHASE5_2_SMOKE_LITE_BEGIN`, `PHASE5_2_SMOKE_LITE_OK`, `PHASE5_2_SMOKE_LITE_END`
+- secret redaction posture: bearer/session/resume/private-key material is never printed
+
 ## User-flow contracts
 
 ### Account lifecycle
