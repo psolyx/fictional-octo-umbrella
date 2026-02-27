@@ -237,6 +237,7 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - TUI:
   - Show explicit pruned-history state in conversation status line/panel.
   - Provide one-key recovery action to continue from earliest retained seq.
+  - TUI shows a HISTORY PRUNED banner and supports one-key recovery via `g`.
 - Both clients:
   - Explain that older history is unavailable due to retention policy.
   - Avoid silent data loss; recovery action must be explicit and logged in UX state.

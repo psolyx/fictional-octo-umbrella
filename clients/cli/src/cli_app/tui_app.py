@@ -245,6 +245,16 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
+    selected_conv = render.dm_conversations[render.selected_conversation] if render.dm_conversations else {}
+    if str(selected_conv.get("replay_pruned", "0")) == "1":
+        earliest_seq = str(selected_conv.get("replay_pruned_earliest_seq", ""))
+        requested_from_seq = str(selected_conv.get("replay_pruned_requested_from_seq", ""))
+        _render_text(
+            stdscr,
+            5,
+            1,
+            f"HISTORY PRUNED: earliest_seq={earliest_seq} (requested_from_seq={requested_from_seq}). Press g to recover.",
+        )
 
     stdscr.vline(header_offset, left_width, curses.ACS_VLINE, max(1, max_y - header_offset))
 
@@ -422,7 +432,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices / sessions_list / revoke_session / revoke_device",
-            "Conversations: L refresh, U next unread, r mark read, Ctrl-R mark all read, z mute/unmute, A archive/unarchive, H show/hide archived, Ctrl-N new DM",
+            "Conversations: L refresh, U next unread, r mark read, Ctrl-R mark all read, z mute/unmute, A archive/unarchive, H show/hide archived, g recover pruned history, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
             "Roster overlay: B cycles roster/bans/mutes",
@@ -459,7 +469,6 @@ def _draw_harness_screen(stdscr: curses.window, model: TuiModel) -> None:
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
-
     stdscr.vline(header_offset, left_width, curses.ACS_VLINE, max(1, max_y - header_offset))
 
     _render_text(stdscr, header_offset, 1, "Conversations")
@@ -1254,6 +1263,21 @@ def _start_tail_thread(
                         return
                     event_queue.put({"type": "conv", "conv_id": conv_id, "event": event})
                 time.sleep(0.1)
+            except gateway_client.ReplayWindowExceededError as exc:
+                event_queue.put(
+                    {
+                        "type": "conv",
+                        "conv_id": conv_id,
+                        "pruned": {
+                            "earliest_seq": exc.earliest_seq,
+                            "latest_seq": exc.latest_seq,
+                            "requested_from_seq": exc.requested_from_seq,
+                        },
+                    }
+                )
+                prune_min_seq = int(exc.earliest_seq)
+                while not stop_event.is_set() and gateway_store.get_next_seq(conv_id) < prune_min_seq:
+                    time.sleep(0.2)
             except Exception as exc:  # pragma: no cover - network tolerance
                 event_queue.put({"type": "conv", "conv_id": conv_id, "error": str(exc)})
                 time.sleep(0.5)
@@ -2356,6 +2380,23 @@ def main() -> int:
                     if "error" in payload:
                         model.append_message(conv_id, "sys", "Tail error; retrying.")
                         continue
+                    pruned = payload.get("pruned")
+                    if isinstance(pruned, dict):
+                        earliest_seq = pruned.get("earliest_seq")
+                        latest_seq = pruned.get("latest_seq")
+                        requested_from_seq = pruned.get("requested_from_seq")
+                        if (
+                            isinstance(earliest_seq, int)
+                            and isinstance(latest_seq, int)
+                            and isinstance(requested_from_seq, int)
+                        ):
+                            model.set_pruned_state(conv_id, earliest_seq, latest_seq, requested_from_seq)
+                            model.append_message(
+                                conv_id,
+                                "sys",
+                                f"History pruned. Press g to recover from earliest_seq={earliest_seq}.",
+                            )
+                        continue
                     if session_state is None:
                         continue
                     event = payload.get("event")
@@ -2941,6 +2982,28 @@ def main() -> int:
                             break
             if action == "conv_toggle_show_archived":
                 _refresh_conversations(model, session_state)
+            if action == "conv_recover_pruned":
+                conv_id = model.get_selected_conv_id().strip()
+                selected_conv = model.get_selected_conv()
+                earliest_seq_text = str(selected_conv.get("replay_pruned_earliest_seq", "")).strip()
+                try:
+                    earliest_seq = int(earliest_seq_text)
+                except ValueError:
+                    model.append_message(conv_id, "sys", "Pruned recovery unavailable: missing earliest_seq.")
+                    continue
+                gateway_store.update_next_seq(conv_id, earliest_seq - 1)
+                model.clear_pruned_state(conv_id)
+                model.append_message(
+                    conv_id,
+                    "sys",
+                    f"Recovered pruned history: resubscribing from earliest_seq={earliest_seq}.",
+                )
+                tail = tail_threads.get(conv_id)
+                if tail:
+                    tail.stop_event.set()
+                    tail.thread.join(timeout=0.2)
+                    del tail_threads[conv_id]
+                _ensure_tail_threads()
             if action == "conv_set_title_forbidden":
                 _append_system_message(model, "forbidden: room title requires owner/admin role")
             if action == "social_toggle":

@@ -232,6 +232,7 @@
     if (!replay_window_banner || !replay_window_text || !details) {
       return;
     }
+    const banner_was_hidden = replay_window_banner.hidden;
     replay_window_conv_id = conv_id;
     replay_window_earliest_seq = details.earliest_seq;
     const requested_text = Number.isInteger(details.requested_from_seq)
@@ -239,6 +240,9 @@
       : '';
     replay_window_text.textContent = `History pruned. Earliest available seq: ${details.earliest_seq}.${requested_text}`;
     replay_window_banner.hidden = false;
+    if (banner_was_hidden && replay_window_resubscribe_btn) {
+      replay_window_resubscribe_btn.focus();
+    }
     announce_status(replay_window_text.textContent);
   };
 

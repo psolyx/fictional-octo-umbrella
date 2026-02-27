@@ -34,6 +34,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"t"}',
             'return "conv_mark_read"',
             'return "conv_mark_all_read"',
+            'return "conv_recover_pruned"',
             'return f"{self.room_modal_action}_submit"',
             'self._open_room_modal("room_create")',
             'self._open_room_modal("room_invite")',
@@ -133,6 +134,11 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('X unmute member', self.tui_app)
         self.assertIn('A archive/unarchive', self.tui_app)
         self.assertIn('H show/hide archived', self.tui_app)
+
+    def test_tui_pruned_history_markers(self):
+        self.assertIn('HISTORY PRUNED', self.tui_app)
+        self.assertIn('Press g to recover', self.tui_app)
+        self.assertIn('g recover pruned history', self.tui_app)
 
     def test_tui_presence_room_markers(self):
         for marker in (

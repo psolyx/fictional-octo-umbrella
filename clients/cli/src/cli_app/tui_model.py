@@ -358,6 +358,10 @@ class TuiModel:
             "pinned": str(entry.get("pinned", "0")),
             "muted": str(entry.get("muted", "0")),
             "archived": str(entry.get("archived", "0")),
+            "replay_pruned": str(entry.get("replay_pruned", "0")),
+            "replay_pruned_earliest_seq": str(entry.get("replay_pruned_earliest_seq", "")),
+            "replay_pruned_latest_seq": str(entry.get("replay_pruned_latest_seq", "")),
+            "replay_pruned_requested_from_seq": str(entry.get("replay_pruned_requested_from_seq", "")),
             "transcript": [
                 {
                     "ts": float(item.get("ts", 0.0)),
@@ -629,6 +633,26 @@ class TuiModel:
     def append_pending_outbound(self, conv_id: str, msg_id: str, text: str) -> None:
         self.append_message(conv_id, "out", f"[pending msg_id={msg_id}] {text}")
         self.update_conversation_preview(conv_id, f"me: {text}")
+
+    def set_pruned_state(self, conv_id: str, earliest_seq: int, latest_seq: int, requested_from_seq: int) -> None:
+        conv = self.find_conversation(conv_id)
+        if conv is None:
+            return
+        conv["replay_pruned"] = "1"
+        conv["replay_pruned_earliest_seq"] = str(earliest_seq)
+        conv["replay_pruned_latest_seq"] = str(latest_seq)
+        conv["replay_pruned_requested_from_seq"] = str(requested_from_seq)
+        self._persist()
+
+    def clear_pruned_state(self, conv_id: str) -> None:
+        conv = self.find_conversation(conv_id)
+        if conv is None:
+            return
+        conv["replay_pruned"] = "0"
+        conv["replay_pruned_earliest_seq"] = ""
+        conv["replay_pruned_latest_seq"] = ""
+        conv["replay_pruned_requested_from_seq"] = ""
+        self._persist()
 
     def mark_outbound_delivered(self, conv_id: str, msg_id: str, seq: int | None = None) -> bool:
         conv = self.find_conversation(conv_id)
@@ -1084,6 +1108,13 @@ class TuiModel:
                 self.show_archived = not self.show_archived
                 self._persist()
                 return "conv_toggle_show_archived"
+            if (
+                key == "CHAR"
+                and char in {"g", "G"}
+                and self.focus_area in {"conversations", "transcript", "compose"}
+                and str(self.get_selected_conv().get("replay_pruned", "0")) == "1"
+            ):
+                return "conv_recover_pruned"
             if self.focus_area == "conversations":
                 if key == "UP":
                     self.select_prev_conv()
