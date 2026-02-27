@@ -58,6 +58,7 @@
   let conversations_list = null;
   let conversations_status = null;
   let conversations_show_archived_toggle = null;
+  let conversations_mark_all_read_btn = null;
   let conversation_label_input = null;
   let conversation_label_save_btn = null;
   let conversation_label_error = null;
@@ -105,6 +106,7 @@
   conversations_list = document.getElementById('conversations_list');
   conversations_status = document.getElementById('conversations_status');
   conversations_show_archived_toggle = document.getElementById('conversations_show_archived_toggle');
+  conversations_mark_all_read_btn = document.getElementById('conversations_mark_all_read_btn');
   conversation_label_input = document.getElementById('conversation_label_input');
   conversation_label_save_btn = document.getElementById('conversation_label_save_btn');
   conversation_label_error = document.getElementById('conversation_label_error');
@@ -724,6 +726,11 @@
     return post_conversations_json('/v1/conversations/mark_read', payload);
   };
 
+  const mark_all_conversations_read = async () => post_conversations_json('/v1/conversations/mark_all_read', {
+    include_archived: conversations_show_archived,
+    include_muted: true,
+  });
+
   const set_conversation_label = async (conv_id, label) => post_conversations_json('/v1/conversations/label', { conv_id, label });
   const set_conversation_title = async (conv_id, title) => post_conversations_json('/v1/conversations/title', { conv_id, title });
   const set_conversation_pin = async (conv_id, pinned) => post_conversations_json('/v1/conversations/pin', { conv_id, pinned });
@@ -918,6 +925,19 @@
         if (event.key === 'Enter') {
           event.preventDefault();
           activate_conversation(item, members);
+          return;
+        }
+        if (event.key === 'r') {
+          event.preventDefault();
+          mark_conversation_read(item.conv_id)
+            .then((result) => {
+              const unread_count = Number.isInteger(result && result.unread_count) ? result.unread_count : 0;
+              set_conversations_status(`status: mark_read ok unread=${unread_count}`);
+              return refresh_conversations();
+            })
+            .catch((error) => {
+              set_conversations_status(`status: mark_read ${error.message || 'request_failed'}`);
+            });
         }
       });
       list_item.appendChild(conversation_btn);
@@ -3317,6 +3337,20 @@
       refresh_conversations().catch((err) =>
         set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
       );
+    });
+  }
+
+  if (conversations_mark_all_read_btn) {
+    conversations_mark_all_read_btn.addEventListener('click', () => {
+      mark_all_conversations_read()
+        .then((payload) => {
+          const updated = Number.isInteger(payload && payload.updated) ? payload.updated : 0;
+          set_conversations_status(`status: mark_all_read ok updated=${updated}`);
+          return refresh_conversations();
+        })
+        .catch((error) => {
+          set_conversations_status(`status: mark_all_read ${error.message || 'request_failed'}`);
+        });
     });
   }
 

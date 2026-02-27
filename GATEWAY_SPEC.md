@@ -561,7 +561,35 @@ Semantics match WS frames.
   - The effective minimum mark is clamped to `earliest_seq - 1` when retention has pruned older events.
   - `unread_count` MUST be deterministic and never negative.
 
-### 8.1c DM create alias
+### 8.1c Mark all conversations read
+- Endpoint: `POST /v1/conversations/mark_all_read` (HTTP, authenticated as above).
+- Body (optional):
+  ```json
+  {
+    "include_archived": false,
+    "include_muted": true
+  }
+  ```
+  - If provided, body MUST be an object.
+  - `include_archived` defaults to `false`.
+  - `include_muted` defaults to `true`.
+- Response:
+  ```json
+  {
+    "status": "ok",
+    "updated": 2,
+    "updated_conv_ids": ["c_01", "c_02"]
+  }
+  ```
+- Semantics:
+  - Candidate conversations are derived from `list_for_user(user_id, include_archived=include_archived)`.
+  - Iteration and `updated_conv_ids` ordering MUST be deterministic: `conv_id` lexicographic ascending.
+  - When `include_muted` is `false`, muted conversations are skipped.
+  - For each included conversation, server marks read through current retained `latest_seq` using normal per-conversation monotonic clamping semantics.
+  - Permission failures during iteration MUST be treated as skips (never `500`).
+  - Errors: `invalid_request` for malformed JSON, non-object body, or non-boolean include flags.
+
+### 8.1d DM create alias
 - Endpoint: `POST /v1/dms/create` (HTTP, authenticated via `Authorization: Bearer {session_token}`).
 - Body:
   ```json

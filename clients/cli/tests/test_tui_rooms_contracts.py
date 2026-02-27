@@ -33,6 +33,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'char in {"H"}',
             'char in {"t"}',
             'return "conv_mark_read"',
+            'return "conv_mark_all_read"',
             'return f"{self.room_modal_action}_submit"',
             'self._open_room_modal("room_create")',
             'self._open_room_modal("room_invite")',
@@ -63,6 +64,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'def rooms_mutes(',
             'def rooms_members(',
             'def conversations_mark_read(',
+            'def conversations_mark_all_read(',
             'def conversations_set_title(',
             'def conversations_set_label(',
             'def conversations_set_pinned(',
@@ -86,6 +88,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'gateway_client.rooms_members',
             'room_roster_toggle_view',
             'gateway_client.conversations_mark_read',
+            'gateway_client.conversations_mark_all_read',
             'gateway_client.conversations_set_title',
             'gateway_client.conversations_set_label',
             'gateway_client.conversations_set_pinned',
@@ -96,6 +99,8 @@ class TestTuiRoomsContracts(unittest.TestCase):
             'Room mutes',
             'Add selected to modal members',
             'mark_read',
+            'mark_all_read',
+            'conv_mark_all_read',
             'conv_toggle_pinned',
             'conv_toggle_muted',
             'conv_toggle_archived',
@@ -122,6 +127,7 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('"Keybindings"', self.tui_app)
         self.assertIn('"Press Esc to close (or q)"', self.tui_app)
         self.assertIn('r mark read', self.tui_app)
+        self.assertIn('Ctrl-R mark all read', self.tui_app)
         self.assertIn('z mute/unmute', self.tui_app)
         self.assertIn('x mute member', self.tui_app)
         self.assertIn('X unmute member', self.tui_app)

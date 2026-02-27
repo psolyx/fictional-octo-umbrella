@@ -241,6 +241,23 @@ def conversations_mark_read(
     )
 
 
+def conversations_mark_all_read(
+    base_url: str,
+    session_token: str,
+    include_archived: bool = False,
+    include_muted: bool = True,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "include_archived": include_archived,
+        "include_muted": include_muted,
+    }
+    return _post_json(
+        _build_url(base_url, "/v1/conversations/mark_all_read"),
+        payload,
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+
 def conversations_set_title(
     base_url: str,
     session_token: str,

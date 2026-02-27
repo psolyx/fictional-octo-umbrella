@@ -1237,6 +1237,63 @@ async def handle_conversations_mark_read(request: web.Request) -> web.Response:
     )
 
 
+async def handle_conversations_mark_all_read(request: web.Request) -> web.Response:
+    runtime: Runtime = request.app[RUNTIME_KEY]
+    session = _authenticate_request(request)
+    if session is None:
+        return _unauthorized()
+
+    include_archived = False
+    include_muted = True
+    if request.can_read_body:
+        raw_body = await request.read()
+        if raw_body:
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+            except Exception:
+                return _invalid_request("malformed json")
+            if not isinstance(body, dict):
+                return _invalid_request("body must be an object")
+            include_archived_raw = body.get("include_archived", False)
+            if not isinstance(include_archived_raw, bool):
+                return _invalid_request("include_archived must be a boolean")
+            include_muted_raw = body.get("include_muted", True)
+            if not isinstance(include_muted_raw, bool):
+                return _invalid_request("include_muted must be a boolean")
+            include_archived = include_archived_raw
+            include_muted = include_muted_raw
+
+    items = runtime.conversations.list_for_user(session.user_id, include_archived=include_archived)
+    updated_conv_ids: list[str] = []
+    for item in sorted(items, key=lambda row: str(row.get("conv_id", ""))):
+        conv_id = str(item.get("conv_id", ""))
+        if not conv_id:
+            continue
+        if not include_muted and bool(item.get("muted")):
+            continue
+        earliest_seq, latest_seq, _ = runtime.log.bounds(conv_id)
+        try:
+            runtime.conversations.mark_read(
+                conv_id,
+                session.user_id,
+                to_seq=latest_seq,
+                now_ms=runtime.now_func(),
+                latest_seq=latest_seq,
+                earliest_seq=earliest_seq,
+            )
+        except PermissionError:
+            continue
+        updated_conv_ids.append(conv_id)
+
+    return web.json_response(
+        {
+            "status": "ok",
+            "updated": len(updated_conv_ids),
+            "updated_conv_ids": updated_conv_ids,
+        }
+    )
+
+
 async def handle_conversations_title(request: web.Request) -> web.Response:
     runtime: Runtime = request.app[RUNTIME_KEY]
     session = _authenticate_request(request)
@@ -1996,6 +2053,7 @@ def create_app(
     app.router.add_post("/v1/dms/create", handle_dms_create)
     app.router.add_get("/v1/conversations", handle_conversations_list)
     app.router.add_post("/v1/conversations/mark_read", handle_conversations_mark_read)
+    app.router.add_post("/v1/conversations/mark_all_read", handle_conversations_mark_all_read)
     app.router.add_post("/v1/conversations/title", handle_conversations_title)
     app.router.add_post("/v1/conversations/label", handle_conversations_label)
     app.router.add_post("/v1/conversations/pin", handle_conversations_pin)
