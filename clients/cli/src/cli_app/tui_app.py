@@ -957,6 +957,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                 model.identity.device_credential,
             )
             gateway_store.save_session(base_url, response["session_token"], response["resume_token"])
+            model.auth_state = "ok"
             _write_heading([f"base_url={base_url}", "Gateway session started."])
             exit_code, output = 0, []
         elif action == "gw_resume":
@@ -967,6 +968,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
             base_url = fields.get("gateway_base_url", "").strip() or stored["base_url"]
             response = gateway_client.session_resume(base_url, stored["resume_token"])
             gateway_store.save_session(base_url, response["session_token"], response["resume_token"])
+            model.auth_state = "ok"
             _write_heading([f"base_url={base_url}", "Gateway session resumed."])
             exit_code, output = 0, []
         elif action == "identity_export":
@@ -990,6 +992,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
         elif action == "logout":
             gateway_store.clear_session()
             gateway_store.clear_cursors()
+            model.auth_state = "missing"
             _write_heading(["gateway_session.json cleared", "gateway_cursors.json cleared"])
             exit_code, output = 0, []
         elif action == "logout_server":
@@ -1003,6 +1006,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                     heading_lines = ["server logout failed (cleared local state)"]
             gateway_store.clear_session()
             gateway_store.clear_cursors()
+            model.auth_state = "missing"
             heading_lines.extend(["gateway_session.json cleared", "gateway_cursors.json cleared"])
             _write_heading(heading_lines)
             exit_code, output = 0, []
@@ -1017,6 +1021,7 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
                     heading_lines = ["server logout all devices failed (cleared local state)"]
             gateway_store.clear_session()
             gateway_store.clear_cursors()
+            model.auth_state = "missing"
             heading_lines.extend(["gateway_session.json cleared", "gateway_cursors.json cleared"])
             _write_heading(heading_lines)
             exit_code, output = 0, []
@@ -1090,6 +1095,13 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
             lines.extend(normalized_ids)
             _write_heading([redact_text(line) for line in lines])
             exit_code, output = 0, []
+        elif action == "account_reauth":
+            model.auth_state = "missing"
+            _write_heading([
+                "status: re-auth required",
+                "Use gw_start to sign in again (or gw_resume if a resume token is still valid).",
+            ])
+            exit_code, output = 0, []
         elif action == "rotate_device":
             record = model.rotate_device()
             _write_heading(
@@ -1102,6 +1114,9 @@ def _run_action(model: TuiModel, log_writer: Callable[[Iterable[str]], None]) ->
         else:
             log_writer([f"Unknown action: {action}"])
             return
+    except gateway_client.UnauthorizedError:
+        _handle_session_expired(model)
+        return
     except Exception as exc:  # pragma: no cover - defensive
         log_writer([f"Error while running {action}: {exc}"])
         return
@@ -1122,6 +1137,13 @@ def _invoke(func: Callable[[], int]) -> tuple[int, list[str]]:
 def _append_system_message(model: TuiModel, text: str) -> None:
     conv_id = model.get_selected_conv_id()
     model.append_message(conv_id, "sys", redact_text(text))
+
+
+def _handle_session_expired(model: TuiModel) -> None:
+    gateway_store.clear_session()
+    gateway_store.clear_cursors()
+    model.auth_state = "expired"
+    _append_system_message(model, "status: session expired (401). re-auth required.")
 
 
 def _set_social_status(model: TuiModel, text: str) -> None:
@@ -1244,6 +1266,7 @@ def _start_tail_thread(
 def _resume_or_start_session(model: TuiModel) -> SessionState | None:
     stored = gateway_store.load_session()
     if stored is None:
+        model.auth_state = "missing"
         _append_system_message(model, "No stored gateway session. Run gw-start or gw-resume first.")
         return None
     base_url = stored["base_url"]
@@ -1252,8 +1275,12 @@ def _resume_or_start_session(model: TuiModel) -> SessionState | None:
         response = gateway_client.session_resume(base_url, resume_token)
         session = SessionState(base_url=base_url, session_token=response["session_token"], resume_token=response["resume_token"])
         gateway_store.save_session(base_url, session.session_token, session.resume_token)
+        model.auth_state = "ok"
         _append_system_message(model, "Session resumed.")
         return session
+    except gateway_client.UnauthorizedError:
+        _handle_session_expired(model)
+        return None
     except Exception:
         identity = model.identity
         try:
@@ -1263,11 +1290,15 @@ def _resume_or_start_session(model: TuiModel) -> SessionState | None:
                 identity.device_id,
                 identity.device_credential,
             )
+        except gateway_client.UnauthorizedError:
+            _handle_session_expired(model)
+            return None
         except Exception as exc:  # pragma: no cover - defensive
             _append_system_message(model, f"Session start failed: {exc}")
             return None
         session = SessionState(base_url=base_url, session_token=response["session_token"], resume_token=response["resume_token"])
         gateway_store.save_session(base_url, session.session_token, session.resume_token)
+        model.auth_state = "ok"
         _append_system_message(model, "Session started.")
         return session
 
@@ -1674,6 +1705,9 @@ def _mark_selected_conversation_read(
         return last_marked_conv_id
     try:
         response = gateway_client.conversations_mark_read(session.base_url, session.session_token, conv_id)
+    except gateway_client.UnauthorizedError:
+        _handle_session_expired(model)
+        return last_marked_conv_id
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"mark_read {conv_id} {_read_http_error_code(exc)}")
         return last_marked_conv_id
@@ -1698,6 +1732,9 @@ def _mark_all_conversations_read(model: TuiModel, session: SessionState | None) 
             include_archived=model.show_archived,
             include_muted=True,
         )
+    except gateway_client.UnauthorizedError:
+        _handle_session_expired(model)
+        return
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"mark_all_read {_read_http_error_code(exc)}")
         return

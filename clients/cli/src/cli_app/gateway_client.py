@@ -10,6 +10,10 @@ import urllib.request
 from typing import Dict, Iterator, Optional
 
 
+class UnauthorizedError(Exception):
+    pass
+
+
 class ReplayWindowExceededError(Exception):
     def __init__(self, *, requested_from_seq: int, earliest_seq: int, latest_seq: int):
         self.requested_from_seq = requested_from_seq
@@ -59,14 +63,23 @@ def _build_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}{path}"
 
 
+def _read_response_text(request: urllib.request.Request, timeout: Optional[float] = None) -> str:
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise UnauthorizedError("unauthorized") from None
+        raise
+
+
 def _post_json(url: str, payload: Dict[str, object], headers: Optional[Dict[str, str]] = None) -> Dict[str, object]:
     body = json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, data=body, headers=request_headers, method="POST")
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 
 
@@ -120,8 +133,7 @@ def session_list(base_url: str, session_token: str) -> Dict[str, object]:
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 
 
@@ -220,8 +232,7 @@ def conversations_list(base_url: str, session_token: str, include_archived: bool
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 
 
@@ -334,8 +345,7 @@ def presence_blocklist(base_url: str, session_token: str) -> list[str]:
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     payload = json.loads(raw) if raw else {}
     blocked = payload.get("blocked") if isinstance(payload, dict) else []
     return [entry for entry in blocked if isinstance(entry, str)]
@@ -482,8 +492,7 @@ def room_bans(base_url: str, session_token: str, conv_id: str) -> Dict[str, obje
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 def rooms_create(
     base_url: str,
@@ -587,8 +596,7 @@ def rooms_mutes(base_url: str, session_token: str, conv_id: str) -> Dict[str, ob
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 
 
@@ -600,8 +608,7 @@ def rooms_members(base_url: str, session_token: str, conv_id: str) -> Dict[str, 
         headers={"Authorization": f"Bearer {session_token}"},
         method="GET",
     )
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    raw = _read_response_text(request)
     return json.loads(raw) if raw else {}
 
 def inbox_ack(base_url: str, session_token: str, conv_id: str, seq: int) -> Dict[str, object]:
@@ -661,6 +668,8 @@ def sse_tail(
     except socket.timeout:
         return
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise UnauthorizedError("unauthorized") from None
         replay_error = _parse_replay_window_error(exc)
         if replay_error is not None:
             raise replay_error from exc

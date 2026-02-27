@@ -67,6 +67,12 @@
     </div>
   </fieldset>
 
+
+  <div id="session_expired_banner" data-test="session-expired-banner" class="session-expired-banner" role="status" aria-live="polite" hidden>
+    <span>Session expired</span>
+    <button id="session_expired_reauth_btn" data-test="session-expired-reauth" type="button">Re-auth</button>
+  </div>
+
   <div id="replay_window_banner" class="replay-window-banner" aria-live="polite" hidden>
     <span id="replay_window_text">History pruned.</span>
     <button id="replay_window_resubscribe_btn" type="button">Click to resubscribe</button>

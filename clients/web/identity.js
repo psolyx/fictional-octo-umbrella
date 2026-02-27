@@ -104,13 +104,18 @@ const derive_http_base_url = (gateway_url) => {
   return trimmed.replace(/\/v1\/ws$/, '');
 };
 
-const clear_local_session_state = () => {
+const clear_local_session_state = ({ reason = 'unknown' } = {}) => {
   localStorage.removeItem(session_storage_key);
   if (resume_token_input) resume_token_input.value = '';
   if (account_sessions_list) account_sessions_list.textContent = '';
   if (account_sessions_status) account_sessions_status.textContent = 'sessions: cleared';
-  window.dispatchEvent(new CustomEvent('gateway.session.cleared'));
+  window.dispatchEvent(new CustomEvent('gateway.session.cleared', { detail: { reason } }));
+  if (reason === 'expired') {
+    window.dispatchEvent(new CustomEvent('gateway.session.expired', { detail: { reason } }));
+  }
 };
+
+window.clear_local_session_state = clear_local_session_state;
 
 const set_sessions_status = (text) => {
   if (!account_sessions_status) return;
@@ -182,7 +187,7 @@ const fetch_sessions_list = async () => {
     },
   });
   if (response.status === 401) {
-    clear_local_session_state();
+    clear_local_session_state({ reason: 'expired' });
     set_sessions_status('sessions: unauthorized; local session cleared');
     update_account_status('ready');
     return;
@@ -262,7 +267,7 @@ const revoke_session_target = async ({ session_id = null, device_id = null, incl
     body: JSON.stringify(body),
   });
   if (response.status === 401) {
-    clear_local_session_state();
+    clear_local_session_state({ reason: 'expired' });
     set_sessions_status('sessions: unauthorized; local session cleared');
     update_account_status('ready');
     return;
@@ -402,7 +407,7 @@ if (account_logout_btn) {
     } catch (_error) {
       status_prefix = 'server logout failed (cleared local state)';
     }
-    clear_local_session_state();
+    clear_local_session_state({ reason: 'logout' });
     update_account_status(status_prefix);
   });
 }
@@ -415,7 +420,7 @@ if (account_logout_all_btn) {
     } catch (_error) {
       status_prefix = 'server logout-all failed (cleared local state)';
     }
-    clear_local_session_state();
+    clear_local_session_state({ reason: 'logout' });
     update_account_status(status_prefix);
   });
 }
