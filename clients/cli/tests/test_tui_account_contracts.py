@@ -24,6 +24,7 @@ class TestTuiAccountContracts(unittest.TestCase):
             "identity_import",
             "identity_export",
             "identity_new",
+            "account_reauth",
             "rotate_device",
         ):
             with self.subTest(marker=marker):
@@ -49,6 +50,13 @@ class TestTuiAccountContracts(unittest.TestCase):
         self.assertIn("from cli_app.redact import redact_text", self.tui_app)
         self.assertIn("model.social_status_line = redact_text(text)", self.tui_app)
         self.assertIn("redact_text(text)", self.tui_model)
+
+
+    def test_session_expired_contract_markers(self):
+        self.assertIn('session expired', self.tui_app)
+        self.assertIn('auth_state', self.tui_model)
+        self.assertIn('"expired"', self.tui_model)
+        self.assertIn('elif action == "account_reauth"', self.tui_app)
 
 
 if __name__ == "__main__":

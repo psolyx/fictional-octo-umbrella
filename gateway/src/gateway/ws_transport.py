@@ -207,7 +207,9 @@ async def handle_health(_: web.Request) -> web.Response:
 
 
 def _unauthorized() -> web.Response:
-    return web.json_response({"code": "unauthorized", "message": "invalid session_token"}, status=401)
+    response = web.json_response({"code": "unauthorized", "message": "invalid session_token"}, status=401)
+    response.headers["WWW-Authenticate"] = "Bearer"
+    return _with_no_store(response)
 
 
 def _invalid_request(message: str) -> web.Response:

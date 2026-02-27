@@ -3,6 +3,8 @@
   const connection_status = document.getElementById('connection_status');
   const debug_log = document.getElementById('debug_log');
   const event_log = document.getElementById('event_log');
+  const session_expired_banner = document.getElementById('session_expired_banner');
+  const session_expired_reauth_btn = document.getElementById('session_expired_reauth_btn');
   const replay_window_banner = document.getElementById('replay_window_banner');
   const replay_window_text = document.getElementById('replay_window_text');
   const replay_window_resubscribe_btn = document.getElementById('replay_window_resubscribe_btn');
@@ -570,6 +572,10 @@
       },
       body: JSON.stringify(payload),
     });
+    if (response.status === 401) {
+      dispatch_session_expired();
+      throw new Error('unauthorized');
+    }
     if (!response.ok) {
       throw new Error(`presence ${path} http ${response.status}`);
     }
@@ -659,6 +665,35 @@
     announce_status(`conversations ${value}`);
   };
 
+
+  const dispatch_session_expired = () => {
+    if (typeof window.clear_local_session_state === 'function') {
+      window.clear_local_session_state({ reason: 'expired' });
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('gateway.session.expired', { detail: { reason: 'expired' } }));
+  };
+
+  const handle_auth_expired_ui = () => {
+    if (session_expired_banner) {
+      session_expired_banner.hidden = false;
+    }
+    rooms_session_token = '';
+    conversations_session_token = '';
+    conversations_user_id = '';
+    connection_status.textContent = 'disconnected (auth expired)';
+    if (conversations_list) {
+      conversations_list.textContent = '';
+    }
+    if (conversations_mark_all_read_btn) {
+      conversations_mark_all_read_btn.disabled = true;
+    }
+    if (conversations_refresh_btn) {
+      conversations_refresh_btn.disabled = true;
+    }
+    announce_status('status: session expired (401). re-auth required.');
+  };
+
   const short_id = (value, prefix = 8, suffix = 4) => {
     if (typeof value !== 'string') {
       return '';
@@ -708,6 +743,10 @@
       body = payload_text ? JSON.parse(payload_text) : {};
     } catch (error) {
       body = {};
+    }
+    if (response.status === 401) {
+      dispatch_session_expired();
+      throw new Error('unauthorized');
     }
     if (!response.ok) {
       throw new Error(response_error_label(response, body));
@@ -961,6 +1000,10 @@
           Authorization: `Bearer ${conversations_session_token}`,
         },
       });
+      if (response.status === 401) {
+        dispatch_session_expired();
+        throw new Error('unauthorized');
+      }
       if (!response.ok) {
         throw new Error(`http ${response.status}`);
       }
@@ -1007,6 +1050,10 @@
   };
 
   const set_rooms_response_status = (response, payload_text) => {
+    if (response && response.status === 401) {
+      dispatch_session_expired();
+      return;
+    }
     const compact_payload = payload_text ? payload_text : '{}';
     let payload = {};
     try {
@@ -3446,6 +3493,20 @@
 
   window.addEventListener('gateway.subscribe', handle_gateway_subscribe);
 
+  if (session_expired_reauth_btn) {
+    session_expired_reauth_btn.addEventListener('click', () => {
+      if (session_expired_banner) {
+        session_expired_banner.hidden = true;
+      }
+      connection_status.textContent = 'disconnected (auth expired)';
+      announce_status('status: re-auth required');
+      if (bootstrap_token_input) {
+        bootstrap_token_input.focus();
+        bootstrap_token_input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+  }
+
   if (replay_window_resubscribe_btn) {
     replay_window_resubscribe_btn.addEventListener('click', () => {
       if (!replay_window_conv_id || !Number.isInteger(replay_window_earliest_seq)) {
@@ -3476,7 +3537,13 @@
     handle_gateway_send_env(event);
   });
 
-  window.addEventListener('gateway.session.cleared', () => {
+  window.addEventListener('gateway.session.expired', () => {
+    handle_auth_expired_ui();
+  });
+
+  window.addEventListener('gateway.session.cleared', (event) => {
+    const detail = event && event.detail ? event.detail : {};
+    const reason = typeof detail.reason === 'string' ? detail.reason : 'unknown';
     rooms_session_token = '';
     conversations_session_token = '';
     conversations_user_id = '';
@@ -3489,6 +3556,17 @@
     });
     set_rooms_status('status: logged out');
     set_conversations_status('status: logged out');
+    if (conversations_mark_all_read_btn) {
+      conversations_mark_all_read_btn.disabled = false;
+    }
+    if (conversations_refresh_btn) {
+      conversations_refresh_btn.disabled = false;
+    }
+    if (reason === 'expired') {
+      set_rooms_status('status: session expired');
+      set_conversations_status('status: session expired');
+      return;
+    }
     announce_status('account logged out');
   });
 
@@ -3507,6 +3585,15 @@
     conversations_session_token = rooms_session_token;
     conversations_http_base_url = rooms_http_base_url;
     conversations_user_id = typeof detail.user_id === 'string' ? detail.user_id : '';
+    if (session_expired_banner) {
+      session_expired_banner.hidden = true;
+    }
+    if (conversations_mark_all_read_btn) {
+      conversations_mark_all_read_btn.disabled = false;
+    }
+    if (conversations_refresh_btn) {
+      conversations_refresh_btn.disabled = false;
+    }
     ensure_presence_loop();
     refresh_conversations().catch((err) =>
       set_conversations_status(`status: error (${err.message || 'fetch failed'})`)

@@ -160,3 +160,15 @@ pre {
   padding: 8px;
   margin-bottom: 8px;
 }
+
+.session-expired-banner {
+  border: 1px solid #8d1400;
+  background: #ffecec;
+  color: #6f0000;
+  padding: 8px;
+  margin-bottom: 12px;
+}
+
+.session-expired-banner button {
+  margin-left: 10px;
+}

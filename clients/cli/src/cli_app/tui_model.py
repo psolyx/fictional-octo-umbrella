@@ -26,6 +26,7 @@ MODE_HARNESS = "HARNESS"
 NEW_DM_FIELD_ORDER = ["peer_user_id", "name", "state_dir", "conv_id"]
 ROOM_CREATE_FIELD_ORDER = ["name", "members", "conv_id", "state_dir"]
 ROOM_MEMBERS_FIELD_ORDER = ["members"]
+AUTH_STATES = ("ok", "expired", "missing")
 
 
 def _atomic_write(path: Path | str, content: str) -> None:
@@ -127,6 +128,7 @@ class RenderState:
     user_id: str
     device_id: str
     identity_path: Path
+    auth_state: str
 
 
 class TuiModel:
@@ -162,6 +164,7 @@ class TuiModel:
             "sessions_list",
             "revoke_session",
             "revoke_device",
+            "account_reauth",
             "rotate_device",
             "quit",
         ]
@@ -286,6 +289,9 @@ class TuiModel:
         self.presence_prompt_active = False
         self.presence_prompt_action = ""
         self.presence_prompt_text = ""
+
+        stored_session = gateway_store.load_session()
+        self.auth_state = "ok" if stored_session is not None else "missing"
 
         self.dm_conversations = self._load_conversations(initial_settings, defaults)
         self.selected_conversation = self._load_selected_conversation(initial_settings)
@@ -1251,6 +1257,7 @@ class TuiModel:
             user_id=self.identity.user_id,
             device_id=self.identity.device_id,
             identity_path=self.identity_path,
+            auth_state=self.auth_state,
         )
 
     def set_presence_status(self, text: str) -> None:

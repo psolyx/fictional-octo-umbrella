@@ -63,6 +63,11 @@ class ConversationListTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_requires_auth(self):
         response = await self.client.get("/v1/conversations")
         self.assertEqual(response.status, 401)
+        payload = await response.json()
+        self.assertEqual(payload.get("code"), "unauthorized")
+        self.assertEqual(payload.get("message"), "invalid session_token")
+        self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+        self.assertIn("no-store", response.headers.get("Cache-Control", ""))
 
     async def test_conversation_list_membership_order_and_roster_bound(self):
         alice_token = await self._session("u_alice", "d_alice")

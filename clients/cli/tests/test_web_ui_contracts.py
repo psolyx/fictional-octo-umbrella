@@ -258,6 +258,10 @@ class TestWebUiContracts(unittest.TestCase):
     def test_account_session_contracts(self):
         self.assertIn('data-test="session-list"', self.index_html)
         self.assertIn('/v1/session/list', self.identity_js)
+        self.assertIn('data-test="session-expired-banner"', self.index_html)
+        self.assertIn('data-test="session-expired-reauth"', self.index_html)
+        self.assertIn("gateway.session.expired", self.gateway_ws_client)
+        self.assertIn("session_expired_banner", self.gateway_ws_client)
         self.assertIn('/v1/session/revoke', self.identity_js)
 
     def test_rate_limited_marker_contract(self):
