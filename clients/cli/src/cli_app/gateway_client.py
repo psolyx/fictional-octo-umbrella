@@ -24,6 +24,36 @@ class ReplayWindowExceededError(Exception):
         )
 
 
+class RateLimitedError(Exception):
+    def __init__(self, retry_after_s: int, message: str = "rate_limited") -> None:
+        self.retry_after_s = int(max(0, retry_after_s))
+        self.message = str(message)
+        super().__init__(self.message)
+
+
+def _parse_rate_limited_error(http_error: urllib.error.HTTPError) -> RateLimitedError | None:
+    if http_error.code != 429:
+        return None
+    payload_text = http_error.read().decode("utf-8", errors="ignore")
+    payload: dict[str, object] = {}
+    try:
+        parsed_payload = json.loads(payload_text) if payload_text else {}
+        if isinstance(parsed_payload, dict):
+            payload = parsed_payload
+    except Exception:
+        payload = {}
+    retry_after_s = payload.get("retry_after_s")
+    if not isinstance(retry_after_s, int):
+        retry_after_header = http_error.headers.get("Retry-After")
+        try:
+            retry_after_s = int(str(retry_after_header)) if retry_after_header is not None else 0
+        except ValueError:
+            retry_after_s = 0
+    retry_after_s = max(0, retry_after_s)
+    message = payload.get("message") if isinstance(payload.get("message"), str) else "rate_limited"
+    return RateLimitedError(retry_after_s=retry_after_s, message=message)
+
+
 def _parse_replay_window_error(http_error: urllib.error.HTTPError) -> ReplayWindowExceededError | None:
     if http_error.code != 410:
         return None
@@ -70,6 +100,9 @@ def _read_response_text(request: urllib.request.Request, timeout: Optional[float
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             raise UnauthorizedError("unauthorized") from None
+        rate_limited_error = _parse_rate_limited_error(exc)
+        if rate_limited_error is not None:
+            raise rate_limited_error from None
         raise
 
 

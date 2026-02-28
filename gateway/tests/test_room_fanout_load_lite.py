@@ -192,7 +192,7 @@ class RoomFanoutLoadLiteTests(unittest.TestCase):
         )
         self.assertIsNone(seq)
         self.assertIsNone(event)
-        self.assertEqual(error, ("forbidden", "not a member"))
+        self.assertEqual(error[:2], ("forbidden", "not a member"))
 
         runtime.conversations.invite(conv_id, owner_user_id, [target_user_id])
         seq, event, error = _process_conv_send(

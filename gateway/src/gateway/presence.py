@@ -36,11 +36,15 @@ class UserStatus:
 
 
 class RateLimitExceeded(Exception):
-    pass
+    def __init__(self, message: str, *, retry_after_ms: int = 0) -> None:
+        self.retry_after_ms = int(max(0, retry_after_ms))
+        super().__init__(message)
 
 
 class LimitExceeded(Exception):
-    pass
+    def __init__(self, message: str, *, retry_after_ms: int = 0) -> None:
+        self.retry_after_ms = int(max(0, retry_after_ms))
+        super().__init__(message)
 
 
 class FixedWindowRateLimiter:
@@ -49,13 +53,20 @@ class FixedWindowRateLimiter:
         self.window_ms = window_ms
         self._windows: Dict[str, tuple[int, int]] = {}
 
-    def allow(self, key: str, now_ms: int) -> bool:
+    def check(self, key: str, now_ms: int) -> tuple[bool, int]:
         window_start, count = self._windows.get(key, (now_ms, 0))
         if now_ms - window_start >= self.window_ms:
             window_start, count = now_ms, 0
         count += 1
         self._windows[key] = (window_start, count)
-        return count <= self.limit
+        if count <= self.limit:
+            return True, 0
+        retry_after_ms = max(0, self.window_ms - (now_ms - window_start))
+        return False, retry_after_ms
+
+    def allow(self, key: str, now_ms: int) -> bool:
+        allowed, _ = self.check(key, now_ms)
+        return allowed
 
 
 class Presence:
@@ -207,8 +218,9 @@ class Presence:
 
     def lease(self, user_id: str, device_id: str, ttl_seconds: int, *, invisible: bool = False) -> int:
         now_ms = self._now()
-        if not self._renew_rate.allow(device_id, now_ms):
-            raise RateLimitExceeded("presence renewals exceeded")
+        allowed, retry_after_ms = self._renew_rate.check(device_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("presence renewals exceeded", retry_after_ms=retry_after_ms)
 
         ttl_ms = self._clamp_ttl(ttl_seconds) * 1000
         expires_at_ms = now_ms + ttl_ms
@@ -221,8 +233,9 @@ class Presence:
 
     def renew(self, user_id: str, device_id: str, ttl_seconds: int, *, invisible: bool | None = None) -> int:
         now_ms = self._now()
-        if not self._renew_rate.allow(device_id, now_ms):
-            raise RateLimitExceeded("presence renewals exceeded")
+        allowed, retry_after_ms = self._renew_rate.check(device_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("presence renewals exceeded", retry_after_ms=retry_after_ms)
 
         prior = self._leases.get(device_id)
         current_invisible = prior.invisible if prior else False
@@ -250,8 +263,9 @@ class Presence:
 
     def watch(self, watcher_user_id: str, contacts: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._watch_rate.allow(watcher_user_id, now_ms):
-            raise RateLimitExceeded("watch mutations exceeded")
+        allowed, retry_after_ms = self._watch_rate.check(watcher_user_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("watch mutations exceeded", retry_after_ms=retry_after_ms)
         contacts_set = {c for c in contacts if isinstance(c, str) and not self.is_blocked(watcher_user_id, c)}
         watchlist = self._watchlists.get(watcher_user_id, set())
         new_total = len(watchlist | contacts_set)
@@ -275,8 +289,9 @@ class Presence:
 
     def unwatch(self, watcher_user_id: str, contacts: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._watch_rate.allow(watcher_user_id, now_ms):
-            raise RateLimitExceeded("watch mutations exceeded")
+        allowed, retry_after_ms = self._watch_rate.check(watcher_user_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("watch mutations exceeded", retry_after_ms=retry_after_ms)
         contacts_set = {c for c in contacts if isinstance(c, str)}
         watchlist = self._watchlists.get(watcher_user_id, set())
         for target in contacts_set:
@@ -297,8 +312,9 @@ class Presence:
 
     def block(self, blocker_user_id: str, targets: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._block_rate.allow(blocker_user_id, now_ms):
-            raise RateLimitExceeded("block mutations exceeded")
+        allowed, retry_after_ms = self._block_rate.check(blocker_user_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("block mutations exceeded", retry_after_ms=retry_after_ms)
 
         targets_set = {t for t in targets if isinstance(t, str)}
         blocklist = self._blocklists.get(blocker_user_id, set())
@@ -312,8 +328,9 @@ class Presence:
 
     def unblock(self, blocker_user_id: str, targets: Iterable[str]) -> None:
         now_ms = self._now()
-        if not self._block_rate.allow(blocker_user_id, now_ms):
-            raise RateLimitExceeded("block mutations exceeded")
+        allowed, retry_after_ms = self._block_rate.check(blocker_user_id, now_ms)
+        if not allowed:
+            raise RateLimitExceeded("block mutations exceeded", retry_after_ms=retry_after_ms)
 
         targets_set = {t for t in targets if isinstance(t, str)}
         blocklist = self._blocklists.get(blocker_user_id, set())

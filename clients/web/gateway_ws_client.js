@@ -103,6 +103,8 @@
   const subscribe_btn = document.getElementById('subscribe_btn');
   const ack_btn = document.getElementById('ack_btn');
   const send_btn = document.getElementById('send_btn');
+  let send_cooldown_timer = null;
+  const rooms_cooldown_timer_by_action = {};
   const clear_log_btn = document.getElementById('clear_log');
   conversations_refresh_btn = document.getElementById('conversations_refresh_btn');
   conversations_list = document.getElementById('conversations_list');
@@ -729,6 +731,21 @@
     return response ? `http_${response.status}` : 'request_failed';
   };
 
+  const parse_retry_after_s = (response, body) => {
+    if (body && Number.isInteger(body.retry_after_s) && body.retry_after_s > 0) {
+      return body.retry_after_s;
+    }
+    const retry_after = response && response.headers ? response.headers.get('Retry-After') : null;
+    if (!retry_after) {
+      return 0;
+    }
+    const parsed = Number.parseInt(retry_after, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return 0;
+    }
+    return parsed;
+  };
+
   const post_conversations_json = async (path, payload) => {
     if (!conversations_http_base_url || !conversations_session_token) {
       throw new Error('session required');
@@ -753,6 +770,12 @@
       throw new Error('unauthorized');
     }
     if (!response.ok) {
+      if (response.status === 429) {
+        const retry_after_s = parse_retry_after_s(response, body);
+        if (retry_after_s > 0) {
+          throw new Error(`rate_limited retry_after_s=${retry_after_s}`);
+        }
+      }
       throw new Error(response_error_label(response, body));
     }
     return body;
@@ -1053,6 +1076,55 @@
     announce_status(`rooms ${message}`);
   };
 
+  const rooms_action_button = (action_label) => {
+    const buttons = {
+      create: rooms_create_btn,
+      invite: rooms_invite_btn,
+      remove: rooms_remove_btn,
+      promote: rooms_promote_btn,
+      demote: rooms_demote_btn,
+      ban: rooms_ban_btn,
+      unban: rooms_unban_btn,
+      mute: rooms_mute_btn,
+      unmute: rooms_unmute_btn,
+    };
+    return buttons[action_label] || null;
+  };
+
+  const apply_send_cooldown = (retry_after_s) => {
+    if (!send_btn || !Number.isInteger(retry_after_s) || retry_after_s <= 0) {
+      return;
+    }
+    send_btn.disabled = true;
+    set_inline_error(ciphertext_input, compose_error, `rate_limited: retry in ${retry_after_s}s`);
+    if (send_cooldown_timer) {
+      window.clearTimeout(send_cooldown_timer);
+    }
+    send_cooldown_timer = window.setTimeout(() => {
+      send_btn.disabled = false;
+      send_cooldown_timer = null;
+      if (compose_error && compose_error.textContent === `rate_limited: retry in ${retry_after_s}s`) {
+        set_inline_error(ciphertext_input, compose_error, '');
+      }
+    }, retry_after_s * 1000);
+  };
+
+  const apply_rooms_action_cooldown = (action_label, retry_after_s) => {
+    const button = rooms_action_button(action_label);
+    if (!button || !Number.isInteger(retry_after_s) || retry_after_s <= 0) {
+      return;
+    }
+    button.disabled = true;
+    const existing_timer = rooms_cooldown_timer_by_action[action_label];
+    if (existing_timer) {
+      window.clearTimeout(existing_timer);
+    }
+    rooms_cooldown_timer_by_action[action_label] = window.setTimeout(() => {
+      button.disabled = false;
+      delete rooms_cooldown_timer_by_action[action_label];
+    }, retry_after_s * 1000);
+  };
+
   const set_rooms_response_status = (response, payload_text) => {
     if (response && response.status === 401) {
       dispatch_session_expired();
@@ -1065,13 +1137,14 @@
     } catch (err) {
       payload = {};
     }
+    const retry_after_s = parse_retry_after_s(response, payload);
     let detail = '';
     if (payload && payload.code === 'forbidden' && payload.message === 'banned') {
       detail = ' banned';
     } else if (response && response.status === 403) {
       detail = ' forbidden';
     } else if (response && response.status === 429) {
-      detail = ' rate_limited';
+      detail = retry_after_s > 0 ? ` rate_limited retry_after_s=${retry_after_s}` : ' rate_limited';
     }
     const status_label = response ? `${response.status} ${response.statusText}${detail}`.trim() : 'unknown';
     set_rooms_status(`status: ${status_label} ${compact_payload}`);
@@ -1426,6 +1499,10 @@
         payload_text = JSON.stringify(response_payload);
       } else if (response_text) {
         payload_text = JSON.stringify({ message: response_text });
+      }
+      const retry_after_s = parse_retry_after_s(response, response_payload || {});
+      if (response.status === 429 && retry_after_s > 0) {
+        apply_rooms_action_cooldown(action_label, retry_after_s);
       }
       set_rooms_response_status(response, payload_text);
       if (response.ok && endpoint === '/v1/rooms/create') {
@@ -2552,13 +2629,22 @@
       if (message.t === 'error') {
         // rate_limited marker: deterministic UI feedback for abuse controls.
         if (body.code === 'rate_limited') {
-          announce_status(`rate_limited: ${body.message || 'retry later'}`);
+          const retry_after_s = parse_retry_after_s(null, body);
+          if (retry_after_s > 0) {
+            announce_status(`rate_limited retry_after_s=${retry_after_s}`);
+            apply_send_cooldown(retry_after_s);
+          } else {
+            announce_status(`rate_limited: ${body.message || 'retry later'}`);
+          }
           const active_conv_id = conv_id_input && conv_id_input.value ? conv_id_input.value.trim() : '';
           const active_msg_id = msg_id_input && msg_id_input.value ? msg_id_input.value.trim() : '';
           if (active_conv_id && active_msg_id) {
+            const failed_reason = retry_after_s > 0
+              ? `rate_limited: retry in ${retry_after_s}s`
+              : `rate_limited: ${body.message || 'retry later'}`;
             const failed_item = set_outbox_item(active_conv_id, active_msg_id, {
               status: 'failed',
-              failed_reason: `rate_limited: ${body.message || 'retry later'}`,
+              failed_reason,
             });
             if (failed_item) {
               render_local_outbound_event(failed_item);

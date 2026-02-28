@@ -104,7 +104,12 @@ class AbuseControlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status, 200)
         self.assertEqual(second.status, 200)
         self.assertEqual(third.status, 429)
-        self.assertEqual((await third.json()).get("code"), "rate_limited")
+        payload = await third.json()
+        self.assertEqual(payload.get("code"), "rate_limited")
+        self.assertIsInstance(payload.get("retry_after_s"), int)
+        self.assertGreaterEqual(payload.get("retry_after_s"), 1)
+        self.assertEqual(third.headers.get("Retry-After"), str(payload.get("retry_after_s")))
+        self.assertIn("no-store", third.headers.get("Cache-Control", ""))
 
     async def test_social_publish_rate_limited_returns_429(self):
         seed, public_key = generate_keypair()
@@ -134,7 +139,12 @@ class AbuseControlsTests(unittest.IsolatedAsyncioTestCase):
             json={"prev_hash": None, "ts_ms": ts_ms + 1, "kind": "username", "payload": payload, "sig_b64": sig_b64},
         )
         self.assertEqual(second.status, 429)
-        self.assertEqual((await second.json()).get("code"), "rate_limited")
+        payload = await second.json()
+        self.assertEqual(payload.get("code"), "rate_limited")
+        self.assertIsInstance(payload.get("retry_after_s"), int)
+        self.assertGreaterEqual(payload.get("retry_after_s"), 1)
+        self.assertEqual(second.headers.get("Retry-After"), str(payload.get("retry_after_s")))
+        self.assertIn("no-store", second.headers.get("Cache-Control", ""))
 
 
     async def test_presence_blocklist_returns_sorted_self_only(self):
