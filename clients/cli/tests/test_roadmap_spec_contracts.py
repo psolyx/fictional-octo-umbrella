@@ -6,6 +6,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 ROADMAP_PATH = REPO_ROOT / "ROADMAP.md"
 PRODUCTION_SPEC_PATH = REPO_ROOT / "clients" / "docs" / "production_clients_exit_criteria.md"
 ASPECTS_PHASE6_PATH = REPO_ROOT / "clients" / "docs" / "aspects_phase6.md"
+SECURITY_CHECKLIST_PATH = REPO_ROOT / "clients" / "docs" / "baseline_security_checklist.md"
+A11Y_CHECKLIST_PATH = REPO_ROOT / "clients" / "docs" / "baseline_accessibility_checklist.md"
 
 
 class TestRoadmapSpecContracts(unittest.TestCase):
@@ -91,6 +93,15 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_smoke_lite_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SMOKE_LITE", self.production_spec)
         self.assertIn("python -m cli_app.phase5_2_smoke_lite_main", self.production_spec)
+
+    def test_phase5_2_static_audit_checklist_markers_exist(self):
+        self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")
+        self.assertTrue(A11Y_CHECKLIST_PATH.exists(), msg="baseline accessibility checklist must exist")
+        security_text = SECURITY_CHECKLIST_PATH.read_text(encoding="utf-8")
+        a11y_text = A11Y_CHECKLIST_PATH.read_text(encoding="utf-8")
+        self.assertIn("SECURITY_CHECKLIST_V1", security_text)
+        self.assertIn("A11Y_CHECKLIST_V1", a11y_text)
+        self.assertIn("PHASE5_2_STATIC_AUDIT", self.production_spec)
 
 if __name__ == "__main__":
     unittest.main()

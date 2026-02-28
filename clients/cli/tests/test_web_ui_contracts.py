@@ -143,6 +143,21 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("Retry-After", self.gateway_ws_client)
         self.assertIn("retry_after_s", self.gateway_ws_client)
 
+
+    def test_phase5_2_a11y_and_retry_contract_markers(self):
+        for marker in (
+            'id="session_expired_banner"',
+            'id="replay_window_banner"',
+            'id="conv_filter_status"',
+            'role="status"',
+            'aria-live="polite"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.index_html)
+        for marker in ("parse_retry_after_s", "retry_after_s", "Retry-After"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.gateway_ws_client)
+
     def test_rooms_panel_contracts(self):
         self.assertIn("Rooms v1", self.gateway_ws_client)
         self.assertIn("/v1/rooms/create", self.gateway_ws_client)
