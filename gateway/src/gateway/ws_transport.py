@@ -224,12 +224,35 @@ def _resume_failed() -> web.Response:
     return web.json_response({"code": "resume_failed", "message": "resume token invalid or expired"}, status=401)
 
 
-def _rate_limited(message: str) -> web.Response:
-    return web.json_response({"code": "rate_limited", "message": message}, status=429)
+def _retry_after_seconds(retry_after_ms: int | None) -> int:
+    if retry_after_ms is None:
+        return 0
+    retry_after_ms = int(max(0, retry_after_ms))
+    if retry_after_ms <= 0:
+        return 0
+    return max(1, (retry_after_ms + 999) // 1000)
 
 
-def _limit_exceeded(message: str) -> web.Response:
-    return web.json_response({"code": "limit_exceeded", "message": message}, status=429)
+def _rate_limited(message: str, retry_after_s: int | None = None) -> web.Response:
+    retry_after_value = int(max(0, retry_after_s or 0))
+    response = web.json_response(
+        {"code": "rate_limited", "message": message, "retry_after_s": retry_after_value},
+        status=429,
+    )
+    if retry_after_value > 0:
+        response.headers["Retry-After"] = str(retry_after_value)
+    return _with_no_store(response)
+
+
+def _limit_exceeded(message: str, retry_after_s: int | None = None) -> web.Response:
+    retry_after_value = int(max(0, retry_after_s or 0))
+    response = web.json_response(
+        {"code": "limit_exceeded", "message": message, "retry_after_s": retry_after_value},
+        status=429,
+    )
+    if retry_after_value > 0:
+        response.headers["Retry-After"] = str(retry_after_value)
+    return _with_no_store(response)
 
 
 def _forbidden(message: str) -> web.Response:
@@ -408,29 +431,30 @@ def _validate_session_resume_body(body: dict[str, Any]) -> Tuple[str | None, str
     return resume_token, None
 
 
-def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any]) -> tuple[int | None, ConversationEvent | None, tuple[str, str] | None]:
+def _process_conv_send(runtime: Runtime, session: Session, body: dict[str, Any]) -> tuple[int | None, ConversationEvent | None, tuple[str, str, int] | None]:
     conv_id = body.get("conv_id")
     msg_id = body.get("msg_id")
     env = body.get("env")
     ts = body.get("ts") or _now_ms()
     if not conv_id or not msg_id or env is None:
-        return None, None, ("invalid_request", "conv_id, msg_id, env required")
+        return None, None, ("invalid_request", "conv_id, msg_id, env required", 0)
     if not isinstance(env, str):
-        return None, None, ("invalid_request", "conv_id, msg_id, env required")
+        return None, None, ("invalid_request", "conv_id, msg_id, env required", 0)
     if len(env) > runtime.max_env_b64_len:
-        return None, None, ("invalid_request", "env too large")
+        return None, None, ("invalid_request", "env too large", 0)
     if not runtime.conversations.is_known(conv_id) or not runtime.conversations.is_member(conv_id, session.user_id):
-        return None, None, ("forbidden", "not a member")
+        return None, None, ("forbidden", "not a member", 0)
     if not conv_id.startswith("dm_") and runtime.conversations.is_muted_member(conv_id, session.user_id):
-        return None, None, ("forbidden", "muted")
+        return None, None, ("forbidden", "muted", 0)
     now_ms = runtime.now_func()
     rate_key = f"{session.user_id}:{conv_id}"
-    if not runtime.conv_send_limiter.allow(rate_key, now_ms):
-        return None, None, ("rate_limited", "conversation sends rate limit exceeded")
+    allowed, retry_after_ms = runtime.conv_send_limiter.check(rate_key, now_ms)
+    if not allowed:
+        return None, None, ("rate_limited", "conversation sends rate limit exceeded", _retry_after_seconds(retry_after_ms))
     members = runtime.conversations.list_members(conv_id)
     member_user_ids = [member.get("user_id") for member in members if isinstance(member, dict)]
     if len(member_user_ids) == 2 and runtime.presence.is_blocked(str(member_user_ids[0]), str(member_user_ids[1])):
-        return None, None, ("forbidden", "blocked")
+        return None, None, ("forbidden", "blocked", 0)
     seq, event, created = runtime.log.append(conv_id, msg_id, env, session.device_id, ts)
     if created:
         _opportunistic_prune(runtime, conv_id)
@@ -529,8 +553,9 @@ async def handle_keypackage_fetch(request: web.Request) -> web.Response:
         return _invalid_request("user_id and count required")
 
     now_ms = runtime.now_func()
-    if not runtime.keypackage_fetch_limiter.allow(session.user_id, now_ms):
-        return _rate_limited("keypackage fetch rate limit exceeded")
+    allowed, retry_after_ms = runtime.keypackage_fetch_limiter.check(session.user_id, now_ms)
+    if not allowed:
+        return _rate_limited("keypackage fetch rate limit exceeded", _retry_after_seconds(retry_after_ms))
 
     keypackages = runtime.keypackages.fetch(user_id, count)
     response_body = {
@@ -772,7 +797,7 @@ async def handle_presence_lease(request: web.Request) -> web.Response:
     try:
         expires_at = runtime.presence.lease(session.user_id, device_id, ttl_seconds, invisible=invisible)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "expires_at": expires_at})
 
 
@@ -798,7 +823,7 @@ async def handle_presence_renew(request: web.Request) -> web.Response:
     try:
         expires_at = runtime.presence.renew(session.user_id, device_id, ttl_seconds, invisible=invisible)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "expires_at": expires_at})
 
 
@@ -818,9 +843,9 @@ async def handle_presence_watch(request: web.Request) -> web.Response:
     try:
         runtime.presence.watch(session.user_id, contacts)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except LimitExceeded as exc:
-        return _with_no_store(_limit_exceeded(str(exc)))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.user_id)})
 
 
@@ -840,7 +865,7 @@ async def handle_presence_unwatch(request: web.Request) -> web.Response:
     try:
         runtime.presence.unwatch(session.user_id, contacts)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "watching": runtime.presence.watchlist_size(session.user_id)})
 
 
@@ -860,9 +885,9 @@ async def handle_presence_block(request: web.Request) -> web.Response:
     try:
         runtime.presence.block(session.user_id, contacts)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except LimitExceeded as exc:
-        return _with_no_store(_limit_exceeded(str(exc)))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
 
 
@@ -882,7 +907,7 @@ async def handle_presence_unblock(request: web.Request) -> web.Response:
     try:
         runtime.presence.unblock(session.user_id, contacts)
     except RateLimitExceeded as exc:
-        return _with_no_store(_rate_limited(str(exc)))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return _no_store_response({"status": "ok", "blocked": runtime.presence.blocklist_size(session.user_id)})
 
 
@@ -930,11 +955,11 @@ async def handle_inbox(request: web.Request) -> web.Response:
     if frame_type == "conv.send":
         seq, _, error = _process_conv_send(runtime, session, frame_body)
         if error:
-            code, message = error
+            code, message, retry_after_s = error
             if code == "forbidden":
                 return _forbidden(message)
             if code == "rate_limited":
-                return _rate_limited(message)
+                return _rate_limited(message, retry_after_s)
             return _invalid_request(message)
         assert seq is not None
         return web.json_response({"status": "ok", "seq": seq, **_routing_metadata(runtime, frame_body.get("conv_id"))})
@@ -1140,7 +1165,7 @@ async def handle_room_create(request: web.Request) -> web.Response:
     except ValueError:
         return _invalid_request("conversation already exists")
     except LimitExceeded as exc:
-        return _limit_exceeded(str(exc))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return web.json_response({"status": "ok"})
 
 
@@ -1163,8 +1188,9 @@ async def handle_dms_create(request: web.Request) -> web.Response:
     if runtime.presence.is_blocked(session.user_id, peer_user_id):
         return _forbidden("blocked")
     now_ms = runtime.now_func()
-    if not runtime.dms_create_limiter.allow(session.user_id, now_ms):
-        return _rate_limited("dm create rate limit exceeded")
+    allowed, retry_after_ms = runtime.dms_create_limiter.check(session.user_id, now_ms)
+    if not allowed:
+        return _rate_limited("dm create rate limit exceeded", _retry_after_seconds(retry_after_ms))
 
     conv_id_raw = body.get("conv_id")
     if conv_id_raw is None or conv_id_raw == "":
@@ -1187,7 +1213,7 @@ async def handle_dms_create(request: web.Request) -> web.Response:
     except ValueError:
         return _invalid_request("conversation already exists")
     except LimitExceeded as exc:
-        return _limit_exceeded(str(exc))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     return web.json_response({"status": "ok", "conv_id": conv_id})
 
 
@@ -1494,9 +1520,9 @@ async def handle_room_invite(request: web.Request) -> web.Response:
             return _forbidden("banned")
         return _forbidden("forbidden")
     except RateLimitExceeded as exc:
-        return _rate_limited(str(exc))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except LimitExceeded as exc:
-        return _limit_exceeded(str(exc))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except ValueError:
         return _forbidden("unknown conversation")
     return web.json_response({"status": "ok"})
@@ -1523,9 +1549,9 @@ async def handle_room_remove(request: web.Request) -> web.Response:
     except PermissionError:
         return _forbidden("forbidden")
     except RateLimitExceeded as exc:
-        return _rate_limited(str(exc))
+        return _rate_limited(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except LimitExceeded as exc:
-        return _limit_exceeded(str(exc))
+        return _limit_exceeded(str(exc), _retry_after_seconds(getattr(exc, "retry_after_ms", 0)))
     except ValueError:
         return _forbidden("unknown conversation")
     return web.json_response({"status": "ok"})
@@ -1765,8 +1791,9 @@ async def handle_social_publish(request: web.Request) -> web.Response:
     if not isinstance(sig_b64, str) or not sig_b64:
         return _invalid_request("sig_b64 required")
     now_ms = runtime.now_func()
-    if not runtime.social_publish_limiter.allow(session.user_id, now_ms):
-        return _with_no_store(_rate_limited("social publish rate limit exceeded"))
+    allowed, retry_after_ms = runtime.social_publish_limiter.check(session.user_id, now_ms)
+    if not allowed:
+        return _rate_limited("social publish rate limit exceeded", _retry_after_seconds(retry_after_ms))
     try:
         canonical_event_bytes = json.dumps(
             {
@@ -2441,7 +2468,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 elif frame_type == "conv.send":
                     seq, _, error = _process_conv_send(runtime, session, body)
                     if error:
-                        await ws.send_json(_error_frame(error[0], error[1], request_id=frame.get("id")))
+                        code, message, retry_after_s = error
+                        extra_body = {"retry_after_s": retry_after_s} if code in {"rate_limited", "limit_exceeded"} else None
+                        await ws.send_json(_error_frame(code, message, request_id=frame.get("id"), extra_body=extra_body))
                         continue
                     assert seq is not None
                     await ws.send_json(

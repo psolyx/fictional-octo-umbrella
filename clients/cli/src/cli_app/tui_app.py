@@ -1737,6 +1737,9 @@ def _mark_selected_conversation_read(
     except gateway_client.UnauthorizedError:
         _handle_session_expired(model)
         return last_marked_conv_id
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return last_marked_conv_id
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"mark_read {conv_id} {_read_http_error_code(exc)}")
         return last_marked_conv_id
@@ -1764,6 +1767,9 @@ def _mark_all_conversations_read(model: TuiModel, session: SessionState | None) 
     except gateway_client.UnauthorizedError:
         _handle_session_expired(model)
         return
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"mark_all_read {_read_http_error_code(exc)}")
         return
@@ -1789,6 +1795,9 @@ def _toggle_selected_conversation_pinned(model: TuiModel, session: SessionState 
             conv_id,
             not currently_pinned,
         )
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"pin failed: {_read_http_error_code(exc)}")
         return
@@ -1814,6 +1823,9 @@ def _toggle_selected_conversation_muted(model: TuiModel, session: SessionState |
             conv_id,
             not currently_muted,
         )
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"mute failed: {_read_http_error_code(exc)}")
         return
@@ -1838,6 +1850,9 @@ def _toggle_selected_conversation_archived(model: TuiModel, session: SessionStat
             conv_id,
             not currently_archived,
         )
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         _append_system_message(model, f"archive failed: {_read_http_error_code(exc)}")
         return
@@ -1888,6 +1903,11 @@ def _send_dm_message(
     try:
         gateway_client.inbox_send(session.base_url, session.session_token, conv_id, msg_id, env_b64)
         model.append_pending_outbound(conv_id, msg_id, plaintext)
+    except gateway_client.RateLimitedError as exc:
+        model.append_pending_outbound(conv_id, msg_id, plaintext)
+        model.mark_outbound_failed(conv_id, msg_id, f"rate_limited retry_after_s={exc.retry_after_s}")
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         model.append_pending_outbound(conv_id, msg_id, plaintext)
         if exc.code == 429:
@@ -1956,10 +1976,10 @@ def _create_new_dm(
             peer_user_id,
             conv_id if conv_id else None,
         )
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            _append_system_message(model, "rate_limited: DM create failed; retry later.")
-            return
         if exc.code == 403:
             _append_system_message(model, "BLOCKED: DM create forbidden by gateway policy.")
             return
@@ -2084,6 +2104,9 @@ def _run_room_action(
         return
     try:
         runner(session.base_url, session.session_token, conv_id, members)
+    except gateway_client.RateLimitedError as exc:
+        _append_system_message(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+        return
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="ignore")
         payload_json: dict[str, object] = {}
@@ -2093,9 +2116,6 @@ def _run_room_action(
                 payload_json = parsed
         except Exception:
             payload_json = {}
-        if exc.code == 429:
-            _append_system_message(model, f"rate_limited: room {action_name} conv_id={conv_id}")
-            return
         if exc.code == 403:
             message = str(payload_json.get("message", "forbidden"))
             if message == "banned":
@@ -2504,10 +2524,10 @@ def main() -> int:
                     model.blocked_user_ids.add(target_user_id)
                     _set_social_status(model, f"Blocked {target_user_id}.")
                 _refresh_blocklist()
+            except gateway_client.RateLimitedError as exc:
+                _set_social_status(model, f"status: rate_limited retry_after_s={exc.retry_after_s}")
+                return
             except urllib.error.HTTPError as exc:
-                if exc.code == 429:
-                    _set_social_status(model, f"rate_limited: block toggle failed for {target_user_id}")
-                    return
                 _set_social_status(model, f"Block toggle failed: {exc}")
 
         def _refresh_social_feed(load_more: bool = False) -> None:

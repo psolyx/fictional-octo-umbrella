@@ -125,6 +125,10 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn("Retry send", self.gateway_ws_client)
         self.assertIn("conv-preview", self.gateway_ws_client)
 
+    def test_rate_limit_retry_after_markers(self):
+        self.assertIn("Retry-After", self.gateway_ws_client)
+        self.assertIn("retry_after_s", self.gateway_ws_client)
+
     def test_rooms_panel_contracts(self):
         self.assertIn("Rooms v1", self.gateway_ws_client)
         self.assertIn("/v1/rooms/create", self.gateway_ws_client)

@@ -70,5 +70,11 @@ class TestTuiAccountContracts(unittest.TestCase):
         self.assertIn("client_label=", self.tui_app)
         self.assertIn("last_seen_at_ms=", self.tui_app)
 
+    def test_rate_limit_markers(self):
+        gateway_client_text = (REPO_ROOT / "clients" / "cli" / "src" / "cli_app" / "gateway_client.py").read_text(encoding="utf-8")
+        self.assertIn("RateLimitedError", gateway_client_text)
+        self.assertIn("Retry-After", gateway_client_text)
+        self.assertIn("retry_after_s=", self.tui_app)
+
 if __name__ == "__main__":
     unittest.main()
