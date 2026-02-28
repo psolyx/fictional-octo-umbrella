@@ -1,7 +1,7 @@
 import pathlib
 import unittest
 
-from cli_app import phase5_2_smoke_lite
+from cli_app import phase5_2_smoke_lite, phase5_2_static_audit
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -65,6 +65,13 @@ class TestTuiAccountContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SMOKE_LITE_BEGIN", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_BEGIN)
         self.assertIn("PHASE5_2_SMOKE_LITE_OK", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_OK)
         self.assertIn("PHASE5_2_SMOKE_LITE_END", phase5_2_smoke_lite.PHASE5_2_SMOKE_LITE_END)
+
+
+    def test_phase5_2_static_audit_contract_markers(self):
+        self.assertTrue(hasattr(phase5_2_static_audit, "run_audit"))
+        self.assertIn("PHASE5_2_STATIC_AUDIT_BEGIN", phase5_2_static_audit.PHASE5_2_STATIC_AUDIT_BEGIN)
+        self.assertIn("PHASE5_2_STATIC_AUDIT_OK", phase5_2_static_audit.PHASE5_2_STATIC_AUDIT_OK)
+        self.assertIn("PHASE5_2_STATIC_AUDIT_END", phase5_2_static_audit.PHASE5_2_STATIC_AUDIT_END)
 
     def test_sessions_list_includes_metadata_markers(self):
         self.assertIn("client_label=", self.tui_app)

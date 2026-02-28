@@ -293,6 +293,13 @@ Transcript invariants:
 - Non-color-only affordances for status/error/success states.
 - Keyboard-only completion for account lifecycle, profile, DMs, rooms, and timeline flows.
 
+## Auditable baseline checklist artifacts (Phase 5.2)
+- `clients/docs/baseline_security_checklist.md` (`SECURITY_CHECKLIST_V1`)
+- `clients/docs/baseline_accessibility_checklist.md` (`A11Y_CHECKLIST_V1`)
+- Static audit marker: `PHASE5_2_STATIC_AUDIT`
+- Audit runner command:
+  - `env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_static_audit_main`
+
 ## Smoke tests
 
 ### Manual smoke tests
