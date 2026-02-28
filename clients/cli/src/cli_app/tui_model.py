@@ -71,7 +71,12 @@ class RenderState:
     menu_items: List[str]
     dm_conversations: List[Dict[str, str]]
     show_archived: bool
+    conv_filter_q: str
+    conv_filter_unread_only: str
+    conv_filter_pinned_only: str
+    filtered_conversation_count: int
     selected_conversation: int
+    selected_visible_conversation: int
     field_order: List[str]
     fields: Dict[str, str]
     active_field: int
@@ -280,6 +285,11 @@ class TuiModel:
 
         self.presence_active = False
         self.show_archived = bool(initial_settings.get("show_archived", False))
+        self.conv_filter_q = str(initial_settings.get("conv_filter_q", ""))
+        self.conv_filter_unread_only = "1" if str(initial_settings.get("conv_filter_unread_only", "0")) == "1" else "0"
+        self.conv_filter_pinned_only = "1" if str(initial_settings.get("conv_filter_pinned_only", "0")) == "1" else "0"
+        self.conv_filter_edit_active = False
+        self.conv_filter_edit_buffer = ""
         self.presence_enabled = True
         self.presence_invisible = False
         self.presence_entries: Dict[str, Dict[str, Any]] = {}
@@ -307,6 +317,9 @@ class TuiModel:
         settings["dm_selected"] = self.selected_conversation
         settings["tui_mode"] = self.mode
         settings["show_archived"] = self.show_archived
+        settings["conv_filter_q"] = self.conv_filter_q
+        settings["conv_filter_unread_only"] = self.conv_filter_unread_only
+        settings["conv_filter_pinned_only"] = self.conv_filter_pinned_only
         persist_settings(settings, self.settings_path)
 
     def _load_conversations(self, initial_settings: Dict[str, Any], defaults: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -482,6 +495,69 @@ class TuiModel:
                 conv["name"] = new_value
         self._persist()
 
+    def _conversation_matches_filter(self, conversation: Dict[str, Any]) -> bool:
+        q = self.conv_filter_q.strip().lower()
+        unread_only = self.conv_filter_unread_only == "1"
+        pinned_only = self.conv_filter_pinned_only == "1"
+        unread_count = int(conversation.get("unread_count") or 0)
+        pinned = str(conversation.get("pinned", "0")) == "1"
+        if unread_only and unread_count <= 0:
+            return False
+        if pinned_only and not pinned:
+            return False
+        if not q:
+            return True
+        candidates = [
+            str(conversation.get("label", "")),
+            str(conversation.get("name", "")),
+            str(conversation.get("conv_id", "")),
+            str(conversation.get("peer_user_id", "")),
+        ]
+        return any(q in candidate.lower() for candidate in candidates)
+
+    def filtered_conversation_indices(self) -> List[int]:
+        indices: List[int] = []
+        for idx, conversation in enumerate(self.dm_conversations):
+            if self._conversation_matches_filter(conversation):
+                indices.append(idx)
+        return indices
+
+    def ensure_selected_conversation_visible(self) -> None:
+        visible_indices = self.filtered_conversation_indices()
+        if not visible_indices:
+            return
+        if self.selected_conversation in visible_indices:
+            return
+        for idx in visible_indices:
+            if idx >= self.selected_conversation:
+                self.selected_conversation = idx
+                self.transcript_scroll = 0
+                self._sync_fields_from_selected()
+                return
+        self.selected_conversation = visible_indices[0]
+        self.transcript_scroll = 0
+        self._sync_fields_from_selected()
+
+    def _move_visible_conversation(self, direction: int) -> None:
+        visible_indices = self.filtered_conversation_indices()
+        if not visible_indices:
+            return
+        if self.selected_conversation not in visible_indices:
+            self.ensure_selected_conversation_visible()
+        if self.selected_conversation not in visible_indices:
+            return
+        position = visible_indices.index(self.selected_conversation)
+        next_position = (position + direction) % len(visible_indices)
+        self.selected_conversation = visible_indices[next_position]
+        self.transcript_scroll = 0
+        self._sync_fields_from_selected()
+        self._persist()
+
+    def _apply_filter_flags(self) -> None:
+        self.conv_filter_q = self.conv_filter_q.replace("\n", " ").replace("\r", " ").strip()[:64]
+        self.ensure_selected_conversation_visible()
+        self._persist()
+
     def get_selected_conv(self) -> Dict[str, Any]:
         if not self.dm_conversations:
             self.dm_conversations = [self._build_default_conversation(self.fields)]
@@ -492,36 +568,26 @@ class TuiModel:
         return str(self.get_selected_conv().get("conv_id", ""))
 
     def select_next_conv(self) -> None:
-        if not self.dm_conversations:
-            return
-        self.selected_conversation = (self.selected_conversation + 1) % len(self.dm_conversations)
-        self.transcript_scroll = 0
-        self._sync_fields_from_selected()
-        self._persist()
+        self._move_visible_conversation(1)
 
     def select_prev_conv(self) -> None:
-        if not self.dm_conversations:
-            return
-        self.selected_conversation = (self.selected_conversation - 1) % len(self.dm_conversations)
+        self._move_visible_conversation(-1)
+
+    def select_next_unread_conv(self) -> bool:
+        visible_indices = self.filtered_conversation_indices()
+        unread_indices = [idx for idx in visible_indices if int(self.dm_conversations[idx].get("unread_count") or 0) > 0]
+        if not unread_indices:
+            return False
+        if self.selected_conversation in unread_indices:
+            start_position = unread_indices.index(self.selected_conversation)
+            next_index = unread_indices[(start_position + 1) % len(unread_indices)]
+        else:
+            next_index = unread_indices[0]
+        self.selected_conversation = next_index
         self.transcript_scroll = 0
         self._sync_fields_from_selected()
         self._persist()
-
-    def select_next_unread_conv(self) -> bool:
-        if not self.dm_conversations:
-            return False
-        total = len(self.dm_conversations)
-        start = self.selected_conversation
-        for offset in range(1, total + 1):
-            idx = (start + offset) % total
-            unread_count = int(self.dm_conversations[idx].get("unread_count") or 0)
-            if unread_count > 0:
-                self.selected_conversation = idx
-                self.transcript_scroll = 0
-                self._sync_fields_from_selected()
-                self._persist()
-                return True
-        return False
+        return True
 
     def add_conv(self, name: str, state_dir: str) -> None:
         label = name.strip() if name.strip() else f"dm{len(self.dm_conversations) + 1}"
@@ -756,6 +822,29 @@ class TuiModel:
 
         if key == "q":
             return "quit"
+
+        if self.conv_filter_edit_active:
+            if key == "ESC":
+                self.conv_filter_edit_active = False
+                self.conv_filter_edit_buffer = ""
+                return None
+            if key == "BACKSPACE":
+                self.conv_filter_edit_buffer = self.conv_filter_edit_buffer[:-1]
+                return None
+            if key == "DELETE":
+                self.conv_filter_edit_buffer = ""
+                return None
+            if key == "ENTER":
+                self.conv_filter_q = self.conv_filter_edit_buffer
+                self.conv_filter_edit_active = False
+                self.conv_filter_edit_buffer = ""
+                self._apply_filter_flags()
+                return None
+            if key == "CHAR" and char:
+                if len(self.conv_filter_edit_buffer) < 64:
+                    self.conv_filter_edit_buffer += char
+                return None
+            return None
         if key == "t" and not (self.mode == MODE_DM_CLIENT and self.focus_area == "conversations"):
             self.mode = MODE_HARNESS if self.mode == MODE_DM_CLIENT else MODE_DM_CLIENT
             self.focus_area = "conversations" if self.mode == MODE_DM_CLIENT else "menu"
@@ -1087,6 +1176,24 @@ class TuiModel:
                 return "conv_refresh"
             if key == "CHAR" and char in {"U"}:
                 return "conv_next_unread"
+            if key == "CHAR" and char == "/":
+                self.conv_filter_edit_active = True
+                self.conv_filter_edit_buffer = self.conv_filter_q
+                return "conv_filter_focus"
+            if key == "CHAR" and char in {"o", "O"}:
+                self.conv_filter_unread_only = "0" if self.conv_filter_unread_only == "1" else "1"
+                self._apply_filter_flags()
+                return "conv_filter_toggle_unread"
+            if key == "CHAR" and char in {"i", "I"}:
+                self.conv_filter_pinned_only = "0" if self.conv_filter_pinned_only == "1" else "1"
+                self._apply_filter_flags()
+                return "conv_filter_toggle_pinned"
+            if key == "CHAR" and char in {"c", "C"}:
+                self.conv_filter_q = ""
+                self.conv_filter_unread_only = "0"
+                self.conv_filter_pinned_only = "0"
+                self._apply_filter_flags()
+                return "conv_filter_clear"
             if key == "CHAR" and char in {"R"}:
                 return "retry_failed_send"
             if key == "CHAR" and char in {"n", "N"}:
@@ -1206,6 +1313,8 @@ class TuiModel:
     def render(self) -> RenderState:
         transcript = list(self.get_selected_conv().get("transcript", []))
         presence_items = [self.presence_entries[key] for key in sorted(self.presence_entries.keys())]
+        visible_indices = self.filtered_conversation_indices()
+        selected_visible = visible_indices.index(self.selected_conversation) if self.selected_conversation in visible_indices else -1
         return RenderState(
             mode=self.mode,
             focus_area=self.focus_area,
@@ -1228,10 +1337,15 @@ class TuiModel:
                         self.presence_entries.get(str(conv.get("peer_user_id", "")), {}).get("status", "")
                     ),
                 }
-                for conv in self.dm_conversations
+                for conv in [self.dm_conversations[idx] for idx in visible_indices]
             ],
             show_archived=self.show_archived,
+            conv_filter_q=self.conv_filter_q,
+            conv_filter_unread_only=self.conv_filter_unread_only,
+            conv_filter_pinned_only=self.conv_filter_pinned_only,
+            filtered_conversation_count=len(visible_indices),
             selected_conversation=self.selected_conversation,
+            selected_visible_conversation=selected_visible,
             field_order=list(self.field_order),
             fields=dict(self.fields),
             active_field=self.active_field,

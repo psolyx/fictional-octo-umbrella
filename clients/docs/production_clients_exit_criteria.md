@@ -40,6 +40,7 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - [ ] Send action transitions message from pending to echoed state.
 - [ ] Replay from cursor recovers history deterministically.
 - [ ] Duplicate inbound events are deduplicated in render path.
+- [ ] Conversation discovery filters support deterministic search/unread/pinned visibility without reordering server-provided list order.
 - [ ] Pruned replay error offers explicit recovery action.
 
 #### Rooms (Web UI)
@@ -81,6 +82,7 @@ This document is codex-facing guidance for implementing and verifying **Phase 5.
 - [ ] Send workflow marks pending until echoed `seq` observed.
 - [ ] Replay from cursor resumes deterministically.
 - [ ] Duplicate events are not rendered twice in transcript view.
+- [ ] Conversation discovery filters support deterministic search/unread/pinned visibility without reordering server-provided list order.
 - [ ] Pruned replay state offers one-key recovery action.
 
 #### Rooms (TUI)

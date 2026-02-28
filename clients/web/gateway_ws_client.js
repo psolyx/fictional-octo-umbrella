@@ -61,6 +61,11 @@
   let conversations_status = null;
   let conversations_show_archived_toggle = null;
   let conversations_mark_all_read_btn = null;
+  let conv_filter_q_input = null;
+  let conv_filter_unread_input = null;
+  let conv_filter_pinned_input = null;
+  let conv_filter_clear_btn = null;
+  let conv_filter_status = null;
   let conversation_label_input = null;
   let conversation_label_save_btn = null;
   let conversation_label_error = null;
@@ -74,6 +79,11 @@
   let conversations_http_base_url = '';
   let conversations_user_id = '';
   let conversations_show_archived = false;
+  let conversation_source_items = [];
+  let filtered_conversation_items = [];
+  let conv_filter_q = '';
+  let conv_filter_unread_only = false;
+  let conv_filter_pinned_only = false;
   let presence_map_by_user_id = {};
   let presence_watched_contacts = new Set();
   let presence_known_dm_peers = new Set();
@@ -111,6 +121,11 @@
   conversations_status = document.getElementById('conversations_status');
   conversations_show_archived_toggle = document.getElementById('conversations_show_archived_toggle');
   conversations_mark_all_read_btn = document.getElementById('conversations_mark_all_read_btn');
+  conv_filter_q_input = document.getElementById('conv_filter_q');
+  conv_filter_unread_input = document.getElementById('conv_filter_unread');
+  conv_filter_pinned_input = document.getElementById('conv_filter_pinned');
+  conv_filter_clear_btn = document.getElementById('conv_filter_clear_btn');
+  conv_filter_status = document.getElementById('conv_filter_status');
   conversation_label_input = document.getElementById('conversation_label_input');
   conversation_label_save_btn = document.getElementById('conversation_label_save_btn');
   conversation_label_error = document.getElementById('conversation_label_error');
@@ -828,19 +843,89 @@
     }
   };
 
-  const render_conversations = async (items) => {
+  const sanitize_filter_q = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    return value.replace(/[
+]+/g, ' ').trim().slice(0, 64);
+  };
+
+  const update_conv_filter_status = () => {
+    if (!conv_filter_status) {
+      return;
+    }
+    const safe_q = sanitize_filter_q(conv_filter_q);
+    conv_filter_status.textContent = `filter: ${filtered_conversation_items.length}/${conversation_source_items.length} q='${safe_q}' unread=${conv_filter_unread_only ? 1 : 0} pinned=${conv_filter_pinned_only ? 1 : 0}`;
+  };
+
+  const conv_matches_filter = (item) => {
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    if (conv_filter_unread_only && !(Number.isInteger(item.unread_count) && item.unread_count > 0)) {
+      return false;
+    }
+    if (conv_filter_pinned_only && !(item.is_pinned === true || item.pinned === true || Number.isInteger(item.pinned_rank))) {
+      return false;
+    }
+    const safe_q = sanitize_filter_q(conv_filter_q).toLowerCase();
+    if (!safe_q) {
+      return true;
+    }
+    const candidates = [
+      typeof item.display_name === 'string' ? item.display_name : '',
+      typeof item.conv_id === 'string' ? item.conv_id : '',
+      typeof item.peer_user_id === 'string' ? item.peer_user_id : '',
+      typeof item.room_id === 'string' ? item.room_id : '',
+    ];
+    return candidates.some((entry) => entry.toLowerCase().includes(safe_q));
+  };
+
+  const get_filtered_conversations = () => {
+    return conversation_source_items.filter((item) => conv_matches_filter(item));
+  };
+
+  const ensure_selected_visible_index = () => {
+    const visible_index = filtered_conversation_items.findIndex((item) => item && item.conv_id === last_selected_conv_id);
+    if (visible_index >= 0) {
+      last_selected_conv_index = visible_index;
+      return;
+    }
+    if (filtered_conversation_items.length > 0) {
+      const target_index = Math.max(0, Math.min(last_selected_conv_index, filtered_conversation_items.length - 1));
+      const next_item = filtered_conversation_items[target_index];
+      last_selected_conv_id = next_item && typeof next_item.conv_id === 'string' ? next_item.conv_id : null;
+      last_selected_conv_index = target_index;
+      return;
+    }
+    last_selected_conv_id = null;
+    last_selected_conv_index = 0;
+    selected_conversation_item = null;
+  };
+
+  const render_conversations = async () => {
     if (!conversations_list) {
       return;
     }
     conversations_list.innerHTML = '';
-    if (!Array.isArray(items) || items.length === 0) {
+    filtered_conversation_items = get_filtered_conversations();
+    ensure_selected_visible_index();
+    update_conv_filter_status();
+    if (!Array.isArray(conversation_source_items) || conversation_source_items.length === 0) {
       const empty_item = document.createElement('li');
       empty_item.textContent = 'no conversations';
       conversations_list.appendChild(empty_item);
       return;
     }
+    if (!filtered_conversation_items.length) {
+      const empty_item = document.createElement('li');
+      empty_item.textContent = '(no matches)';
+      conversations_list.appendChild(empty_item);
+      return;
+    }
     const computed_items = [];
-    for (const item of items) {
+    for (const item of filtered_conversation_items) {
       if (!item || typeof item !== 'object' || typeof item.conv_id !== 'string') {
         continue;
       }
@@ -895,48 +980,36 @@
       let peer_label = '';
       let default_label = `room ${short_id(item.conv_id, 10, 4)}`;
       if (member_count === 2 && members.length > 0) {
-        const other_member = members.find((member) => member !== conversations_user_id) || members[0];
+        const other_member = members.find((member) => member !== conversations_user_id);
         if (other_member) {
-          peer_label = ` peer ${short_id(other_member, 10, 4)}`;
-          default_label = `dm ${short_id(other_member, 10, 4)}`;
-        }
-      }
-      const meta = ensure_conv_meta(item.conv_id);
-      if (meta && !meta.label) {
-        meta.label = default_label;
-      }
-      const status_markers = [];
-      if (item.pinned) {
-        status_markers.push('📌');
-      }
-      if (item.muted) {
-        status_markers.push('🔕');
-      }
-      if (item.archived && conversations_show_archived) {
-        status_markers.push('(archived)');
-      }
-      if (item.unread_count > 0) {
-        if (item.muted) {
-          status_markers.push(`unread~${item.unread_count}`);
-        } else {
-          status_markers.push(`unread=${item.unread_count}`);
-        }
-      }
-      if (item.pruned) {
-        status_markers.push('pruned');
-      }
-      const status_suffix = status_markers.length ? ` ${status_markers.join(' ')}` : '';
-      const base_name = typeof item.display_name === 'string' && item.display_name.trim()
-        ? item.display_name.trim()
-        : ((meta && meta.label) || default_label);
-      conversation_btn.innerHTML = `${base_name} role=${role} members=${member_count}${peer_label}${status_suffix}`;
-      if (member_count === 2 && members.length > 0) {
-        const other_member = members.find((member) => member !== conversations_user_id) || members[0];
-        if (other_member) {
-          conversation_btn.innerHTML += ` ${render_presence_indicator(other_member)}`;
+          peer_label = short_id(other_member, 8, 6);
+          default_label = `dm ${presence_indicator(other_member)}`;
           presence_known_dm_peers.add(other_member);
         }
       }
+      const meta = ensure_conv_meta(item.conv_id);
+      const title = typeof item.title === 'string' && item.title ? item.title : '';
+      const label = typeof item.label === 'string' && item.label ? item.label : '';
+      const display_name = typeof item.display_name === 'string' && item.display_name ? item.display_name : '';
+      const role_suffix = role !== 'member' ? ` (${role})` : '';
+      const badges = [];
+      if (item.pinned) {
+        badges.push('📌');
+      }
+      if (item.muted) {
+        badges.push('🔕');
+      }
+      if (item.archived) {
+        badges.push('🗄️');
+      }
+      if (item.pruned) {
+        badges.push('⚠️pruned');
+      }
+      if (item.unread_count > 0) {
+        badges.push(`unread=${item.unread_count}`);
+      }
+      const primary_label = title || label || display_name || meta.label || peer_label || default_label;
+      conversation_btn.textContent = `${badges.join(' ')} ${primary_label}${role_suffix}`.trim();
       const preview_line = document.createElement('div');
       preview_line.dataset.test = 'conv-preview';
       const preview_value = meta && meta.last_preview ? meta.last_preview : '(no messages yet)';
@@ -1035,10 +1108,10 @@
         throw new Error(`http ${response.status}`);
       }
       const payload = await response.json();
-      const items = payload && Array.isArray(payload.items) ? payload.items : [];
-      await render_conversations(items);
+      conversation_source_items = payload && Array.isArray(payload.items) ? payload.items : [];
+      await render_conversations();
       await watch_presence_contacts(Array.from(presence_known_dm_peers));
-      set_conversations_status(`status: loaded ${items.length}`);
+      set_conversations_status(`status: loaded ${conversation_source_items.length}`);
     } catch (err) {
       set_conversations_status(`status: error (${err.message || 'fetch failed'})`);
     }
@@ -3467,6 +3540,58 @@
       refresh_conversations().catch((err) =>
         set_conversations_status(`status: error (${err.message || 'fetch failed'})`)
       );
+    });
+  }
+
+  if (conv_filter_q_input) {
+    conv_filter_q_input.addEventListener('input', () => {
+      conv_filter_q = sanitize_filter_q(conv_filter_q_input.value);
+      render_conversations().catch((err) => set_conversations_status(`status: error (${err.message || 'render failed'})`));
+    });
+    conv_filter_q_input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        conv_filter_q = '';
+        conv_filter_q_input.value = '';
+        render_conversations().catch((err) => set_conversations_status(`status: error (${err.message || 'render failed'})`));
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        focus_conversations_list();
+      }
+    });
+  }
+
+  if (conv_filter_unread_input) {
+    conv_filter_unread_input.addEventListener('change', () => {
+      conv_filter_unread_only = !!conv_filter_unread_input.checked;
+      render_conversations().catch((err) => set_conversations_status(`status: error (${err.message || 'render failed'})`));
+    });
+  }
+
+  if (conv_filter_pinned_input) {
+    conv_filter_pinned_input.addEventListener('change', () => {
+      conv_filter_pinned_only = !!conv_filter_pinned_input.checked;
+      render_conversations().catch((err) => set_conversations_status(`status: error (${err.message || 'render failed'})`));
+    });
+  }
+
+  if (conv_filter_clear_btn) {
+    conv_filter_clear_btn.addEventListener('click', () => {
+      conv_filter_q = '';
+      conv_filter_unread_only = false;
+      conv_filter_pinned_only = false;
+      if (conv_filter_q_input) {
+        conv_filter_q_input.value = '';
+      }
+      if (conv_filter_unread_input) {
+        conv_filter_unread_input.checked = false;
+      }
+      if (conv_filter_pinned_input) {
+        conv_filter_pinned_input.checked = false;
+      }
+      render_conversations().catch((err) => set_conversations_status(`status: error (${err.message || 'render failed'})`));
     });
   }
   if (conversations_refresh_btn) {
