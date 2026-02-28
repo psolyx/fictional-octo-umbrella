@@ -240,12 +240,12 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         stdscr,
         1,
         1,
-        "Tab: focus | ?: keybindings | Ctrl-N: new DM | Ctrl-R: mark all read | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | z: mute | A: archive | H: archived filter | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
+        "Tab: focus | ?: keybindings | /: filter query | o: unread-only filter | i: pinned-only filter | c: clear filter | Ctrl-N: new DM | Ctrl-R: mark all read | M: room roster | L: refresh convs | U: next unread | I/K/b/u/+/-: moderate | n: label | p: pin | z: mute | A: archive | H: archived filter | t: room title | Enter: send | R: retry failed | r: mark read | Start DM (D) | Ctrl-P: panel | q: quit",
     )
     _render_text(stdscr, 2, 1, f"user:   {render.user_id}")
     _render_text(stdscr, 3, 1, f"device: {render.device_id}")
     _render_text(stdscr, 4, 1, f"identity: {render.identity_path}")
-    selected_conv = render.dm_conversations[render.selected_conversation] if render.dm_conversations else {}
+    selected_conv = render.dm_conversations[render.selected_visible_conversation] if render.dm_conversations and render.selected_visible_conversation >= 0 else {}
     if str(selected_conv.get("replay_pruned", "0")) == "1":
         earliest_seq = str(selected_conv.get("replay_pruned_earliest_seq", ""))
         requested_from_seq = str(selected_conv.get("replay_pruned_requested_from_seq", ""))
@@ -259,8 +259,10 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
     stdscr.vline(header_offset, left_width, curses.ACS_VLINE, max(1, max_y - header_offset))
 
     _render_text(stdscr, header_offset, 1, "Conversations")
+    filter_line = f"Filter: q=\"{render.conv_filter_q}\" unread={render.conv_filter_unread_only} pinned={render.conv_filter_pinned_only} shown={render.filtered_conversation_count}/{len(model.dm_conversations)}"
+    _render_text(stdscr, header_offset + 1, 2, filter_line[: max(1, left_width - 4)])
     for idx, conv in enumerate(render.dm_conversations):
-        attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_conversation) else 0
+        attr = curses.A_REVERSE if (render.focus_area == "conversations" and idx == render.selected_visible_conversation) else 0
         label = conv.get("label", conv.get("name", ""))
         if str(conv.get("pinned", "0")) == "1":
             label = f"📌 {label}"
@@ -278,11 +280,15 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         if presence_status:
             label = f"{label} [{presence_status}]"
         subtitle = conv.get("last_preview", "") or conv.get("peer_user_id", "")
-        _render_text(stdscr, header_offset + 1 + idx * 2, 2, label, attr)
-        if subtitle and header_offset + 2 + idx * 2 < max_y:
-            _render_text(stdscr, header_offset + 2 + idx * 2, 4, subtitle[: left_width - 6], attr)
+        _render_text(stdscr, header_offset + 2 + idx * 2, 2, label, attr)
+        if subtitle and header_offset + 3 + idx * 2 < max_y:
+            _render_text(stdscr, header_offset + 3 + idx * 2, 4, subtitle[: left_width - 6], attr)
 
-    form_start = header_offset + 1 + len(render.dm_conversations) * 2
+    form_start = header_offset + 2 + len(render.dm_conversations) * 2
+    if model.conv_filter_edit_active and form_start < max_y - 2:
+        _render_text(stdscr, form_start, 1, f"Filter query (Enter save, Esc cancel): {model.conv_filter_edit_buffer}")
+        form_start += 1
+
     if render.new_dm_active and form_start < max_y - 2:
         _render_text(stdscr, form_start, 1, "New DM (Enter to advance, Enter on conv_id to submit)")
         y = form_start + 1
@@ -432,7 +438,7 @@ def _draw_dm_screen(stdscr: curses.window, model: TuiModel) -> None:
         overlay_lines = [
             "Keybindings",
             "Account: identity_new / identity_import / identity_export / logout / logout_server / logout_all_devices / sessions_list / revoke_session / revoke_device",
-            "Conversations: L refresh, U next unread, r mark read, Ctrl-R mark all read, z mute/unmute, A archive/unarchive, H show/hide archived, g recover pruned history, Ctrl-N new DM",
+            "Conversations: L refresh, U next unread, / filter conversations, o toggle unread-only, i toggle pinned-only, c clear filter, r mark read, Ctrl-R mark all read, z mute/unmute, A archive/unarchive, H show/hide archived, g recover pruned history, Ctrl-N new DM",
             "Social: Start DM (D) from profile/friends/feed",
             "Rooms: Ctrl-R create, M roster, I invite, K remove, b ban, u unban, x mute member, X unmute member, + promote, - demote",
             "Roster overlay: B cycles roster/bans/mutes",
@@ -1700,6 +1706,7 @@ def _refresh_conversations(
         model.selected_conversation = max(0, min(matched_index, len(model.dm_conversations) - 1))
     else:
         model.selected_conversation = 0
+    model.ensure_selected_conversation_visible()
     _append_system_message(model, f"Conversations refreshed: {len(items)} total, {added} added.")
 
 

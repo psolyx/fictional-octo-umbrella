@@ -120,6 +120,20 @@ class TestWebUiContracts(unittest.TestCase):
         self.assertIn('data-test="conv-mark-all-read"', self.index_html)
         self.assertIn('/v1/conversations/mark_all_read', self.gateway_ws_client)
 
+    def test_conversation_filter_contract_markers(self):
+        for marker in (
+            'data-test="conv-filter-q"',
+            'data-test="conv-filter-unread"',
+            'data-test="conv-filter-pinned"',
+            'data-test="conv-filter-clear"',
+            'data-test="conv-filter-status"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.index_html)
+        for marker in ("conv_filter_q", "conv_filter_unread", "conv_filter_pinned"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.gateway_ws_client)
+
     def test_message_lifecycle_markers(self):
         self.assertIn("msg-pending", self.gateway_ws_client)
         self.assertIn("Retry send", self.gateway_ws_client)

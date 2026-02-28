@@ -134,6 +134,10 @@ class TestTuiRoomsContracts(unittest.TestCase):
         self.assertIn('X unmute member', self.tui_app)
         self.assertIn('A archive/unarchive', self.tui_app)
         self.assertIn('H show/hide archived', self.tui_app)
+        self.assertIn('filter conversations', self.tui_app)
+        self.assertIn('toggle unread-only', self.tui_app)
+        self.assertIn('toggle pinned-only', self.tui_app)
+        self.assertIn('clear filter', self.tui_app)
 
     def test_tui_pruned_history_markers(self):
         self.assertIn('HISTORY PRUNED', self.tui_app)

@@ -92,7 +92,23 @@
       <label><input type="checkbox" id="conversations_show_archived_toggle" /> Show archived</label>
       <span id="conversations_status" aria-live="polite">idle</span>
     </div>
+    <div class="button-row">
+      <label>
+        Search
+        <input
+          id="conv_filter_q"
+          data-test="conv-filter-q"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </label>
+      <label><input id="conv_filter_unread" data-test="conv-filter-unread" type="checkbox" /> unread only</label>
+      <label><input id="conv_filter_pinned" data-test="conv-filter-pinned" type="checkbox" /> pinned only</label>
+      <button id="conv_filter_clear_btn" data-test="conv-filter-clear" type="button">clear</button>
+    </div>
     <p>Legend: unread=N comes from server read state. pruned means your read pointer is behind retained history.</p>
+    <div id="conv_filter_status" data-test="conv-filter-status" role="status" aria-live="polite"></div>
     <ul id="conversations_list" role="listbox" aria-label="Conversations"></ul>
     <div>
       <h4>Conversation details</h4>
