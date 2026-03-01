@@ -122,6 +122,37 @@ Transcript invariants:
 - stable grep markers: `PHASE5_2_SMOKE_LITE_BEGIN`, `PHASE5_2_SMOKE_LITE_OK`, `PHASE5_2_SMOKE_LITE_END`
 - secret redaction posture: bearer/session/resume/private-key material is never printed
 
+
+## PHASE5_2_SIGNOFF_BUNDLE
+
+Marker family: `PHASE5_2_SIGNOFF_BUNDLE` + `PHASE5_2_SIGNOFF_BUNDLE_V1`.
+
+Run the deterministic signoff bundle generator:
+
+```bash
+./scripts/phase5_2_signoff_bundle.sh
+# or
+env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_signoff_bundle_main
+```
+
+Expected evidence layout:
+
+- `evidence/<YYYY-MM-DD>-<platform_tag>-<repo_tag>/phase5_2_signoff_bundle_<UTC_TS>/`
+  - `SIGNOFF_SUMMARY.txt`
+  - `ENV.txt`
+  - `GATE_TESTS/t01_...txt` through `GATE_TESTS/t13_...txt`
+  - `PHASE5_2_SMOKE_LITE.txt`
+  - `PHASE5_2_STATIC_AUDIT.txt`
+  - `GATEWAY_SERVER.txt`
+  - `MANIFEST.json`
+  - `sha256.txt`
+
+Determinism expectations:
+- Stable filenames and stable step ordering.
+- Summary includes BEGIN/OK/END markers with per-step PASS/FAIL lines.
+- `sha256.txt` entries are sorted by relative path.
+- All emitted logs are redacted with the shared redaction helper.
+
 ## User-flow contracts
 
 ### Account lifecycle
