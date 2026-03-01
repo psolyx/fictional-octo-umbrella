@@ -138,6 +138,7 @@ env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_signoff_bundle_main
 Expected evidence layout:
 
 - `evidence/<YYYY-MM-DD>-<platform_tag>-<repo_tag>/phase5_2_signoff_bundle_<UTC_TS>/`
+  - `index.html` (primary human entrypoint)
   - `SIGNOFF_SUMMARY.txt`
   - `ENV.txt`
   - `GATE_TESTS/t01_...txt` through `GATE_TESTS/t13_...txt`
@@ -152,6 +153,25 @@ Determinism expectations:
 - Summary includes BEGIN/OK/END markers with per-step PASS/FAIL lines.
 - `sha256.txt` entries are sorted by relative path.
 - All emitted logs are redacted with the shared redaction helper.
+
+## PHASE5_2_SIGNOFF_VERIFY
+
+Marker family: `PHASE5_2_SIGNOFF_VERIFY` + `PHASE5_2_SIGNOFF_VERIFY_V1`.
+
+Run the deterministic offline verifier:
+
+```bash
+EVID_DIR=./evidence/<bundle-path> ./scripts/phase5_2_signoff_verify.sh
+# or
+env PYTHONPATH=clients/cli/src EVID_DIR=./evidence/<bundle-path> python -m cli_app.phase5_2_signoff_verify_main
+```
+
+Verifier checks:
+- Required artifact presence (`index.html`, core transcripts, gate tests, manifest, checksums).
+- Summary marker consistency against `MANIFEST.json` success state.
+- Strict `sha256.txt` ordering + per-file digest integrity + no missing/extra files.
+- Deterministic `MANIFEST.json` structure and step status/exit-code consistency.
+- Deterministic redaction scan for forbidden token strings across evidence text artifacts.
 
 ## User-flow contracts
 
