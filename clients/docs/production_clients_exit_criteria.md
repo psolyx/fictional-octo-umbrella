@@ -154,6 +154,19 @@ Determinism expectations:
 - `sha256.txt` entries are sorted by relative path.
 - All emitted logs are redacted with the shared redaction helper.
 
+### PHASE5_2_SIGNOFF_ARCHIVE
+
+By default, each signoff run also emits sibling portable artifacts next to the evidence directory:
+
+- `<bundle_dir>.tgz`
+- `<bundle_dir>.tgz.sha256`
+
+Archive expectations:
+- Archive payload contains the entire evidence directory tree, including `SIGNOFF_SUMMARY.txt`, `index.html`, and `sha256.txt`.
+- Tar members use deterministic relative names (`<bundle_dir.name>/<relpath>`), deterministic ordering, and normalized metadata.
+- Gzip header mtime is normalized for deterministic archive bytes.
+- Set `SIGNOFF_NO_ARCHIVE=1` to skip archive generation.
+
 ## PHASE5_2_SIGNOFF_VERIFY
 
 Marker family: `PHASE5_2_SIGNOFF_VERIFY` + `PHASE5_2_SIGNOFF_VERIFY_V1`.
@@ -162,8 +175,10 @@ Run the deterministic offline verifier:
 
 ```bash
 EVID_DIR=./evidence/<bundle-path> ./scripts/phase5_2_signoff_verify.sh
+ARCHIVE_PATH=./evidence/<bundle-path>.tgz ./scripts/phase5_2_signoff_verify.sh
 # or
 env PYTHONPATH=clients/cli/src EVID_DIR=./evidence/<bundle-path> python -m cli_app.phase5_2_signoff_verify_main
+env PYTHONPATH=clients/cli/src ARCHIVE_PATH=./evidence/<bundle-path>.tgz python -m cli_app.phase5_2_signoff_verify_main
 ```
 
 Verifier checks:

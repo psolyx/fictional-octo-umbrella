@@ -10,13 +10,15 @@ from cli_app.phase5_2_signoff_verify import (
     PHASE5_2_SIGNOFF_VERIFY_END,
     PHASE5_2_SIGNOFF_VERIFY_OK,
     PHASE5_2_SIGNOFF_VERIFY_V1,
+    verify_signoff_archive,
     verify_signoff_bundle,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Verify a Phase 5.2 signoff evidence directory.")
+    parser = argparse.ArgumentParser(description="Verify a Phase 5.2 signoff evidence directory or archive.")
     parser.add_argument("--evid-dir", default=os.environ.get("EVID_DIR"), help="Path to signoff evidence directory")
+    parser.add_argument("--archive-path", default=os.environ.get("ARCHIVE_PATH"), help="Path to signoff .tgz archive")
     args = parser.parse_args(argv)
 
     sys.stdout.write(f"{PHASE5_2_SIGNOFF_VERIFY_BEGIN}\n")
@@ -25,6 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         dry_run = os.environ.get("VERIFY_DRY_RUN") == "1"
         if dry_run:
+            sys.stdout.write("mode=archive\n")
+            sys.stdout.write("plan validate archive extension and sibling sha256\n")
+            sys.stdout.write("plan validate archive sha256 strict single-line format\n")
+            sys.stdout.write("plan safe extract archive and delegate directory verification\n")
+            sys.stdout.write("mode=dir\n")
             sys.stdout.write("plan validate required files\n")
             sys.stdout.write("plan validate summary markers against manifest success\n")
             sys.stdout.write("plan validate sha256 strict ordering and integrity\n")
@@ -33,11 +40,18 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"{PHASE5_2_SIGNOFF_VERIFY_OK}\n")
             return 0
 
+        if args.archive_path:
+            archive_path = pathlib.Path(args.archive_path).resolve()
+            sys.stdout.write("mode=archive\n")
+            sys.stdout.write(f"run archive_path={archive_path.as_posix()}\n")
+            return verify_signoff_archive(str(archive_path), out=sys.stdout)
+
         if not args.evid_dir:
             sys.stdout.write("verify_fail missing_evid_dir\n")
             return 2
 
         evid_dir = pathlib.Path(args.evid_dir).resolve()
+        sys.stdout.write("mode=dir\n")
         sys.stdout.write(f"run evid_dir={evid_dir.as_posix()}\n")
         return verify_signoff_bundle(str(evid_dir), out=sys.stdout)
     finally:

@@ -34,6 +34,11 @@ class TestPhase52SignoffVerifyContracts(unittest.TestCase):
         ):
             self.assertIn(marker, lines)
         expected_plan = [
+            "mode=archive",
+            "plan validate archive extension and sibling sha256",
+            "plan validate archive sha256 strict single-line format",
+            "plan safe extract archive and delegate directory verification",
+            "mode=dir",
             "plan validate required files",
             "plan validate summary markers against manifest success",
             "plan validate sha256 strict ordering and integrity",
