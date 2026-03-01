@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
 import hashlib
 import html
 import json
@@ -10,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -116,6 +118,46 @@ def _sha256(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _build_deterministic_archive(bundle_dir: Path) -> tuple[Path, Path]:
+    archive_path = bundle_dir.parent / f"{bundle_dir.name}.tgz"
+    archive_sha_path = bundle_dir.parent / f"{bundle_dir.name}.tgz.sha256"
+
+    rel_dirs = sorted(path.relative_to(bundle_dir).as_posix() for path in bundle_dir.rglob("*") if path.is_dir())
+    rel_files = sorted(path.relative_to(bundle_dir).as_posix() for path in bundle_dir.rglob("*") if path.is_file())
+
+    with archive_path.open("wb") as archive_handle:
+        with gzip.GzipFile(fileobj=archive_handle, mode="wb", mtime=0) as gzip_handle:
+            with tarfile.open(fileobj=gzip_handle, mode="w|") as tar_handle:
+                members: list[tuple[str, Path, bool]] = [(bundle_dir.name, bundle_dir, True)]
+                for rel_dir in rel_dirs:
+                    members.append((f"{bundle_dir.name}/{rel_dir}", bundle_dir / rel_dir, True))
+                for rel_file in rel_files:
+                    members.append((f"{bundle_dir.name}/{rel_file}", bundle_dir / rel_file, False))
+
+                for member_name, source_path, is_dir in members:
+                    info = tarfile.TarInfo(name=member_name)
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    if is_dir:
+                        info.type = tarfile.DIRTYPE
+                        info.mode = 0o755
+                        info.size = 0
+                        tar_handle.addfile(info)
+                    else:
+                        info.mode = 0o644
+                        info.size = source_path.stat().st_size
+                        with source_path.open("rb") as file_handle:
+                            tar_handle.addfile(info, fileobj=file_handle)
+
+    archive_digest = _sha256(archive_path)
+    with archive_sha_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{archive_digest}  {archive_path.name}\n")
+    return archive_path, archive_sha_path
 
 
 def _run_subprocess(step: _Step, repo_root: Path, output_path: Path) -> tuple[int, float]:
@@ -371,6 +413,7 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
     day = _dt.datetime.utcnow().strftime("%Y-%m-%d")
     utc_stamp = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     bundle_dir = evid_root / f"{day}-{_platform_tag()}-{_repo_tag(root)}" / f"phase5_2_signoff_bundle_{utc_stamp}"
+    no_archive = os.environ.get("SIGNOFF_NO_ARCHIVE") == "1"
 
     def emit(line: str) -> None:
         out_stream.write(f"{line}\n")
@@ -383,6 +426,8 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
             emit(f"step={step.step_id} plan {step.label}")
         emit("step=s1 plan phase5_2_smoke_lite_main")
         emit("step=s2 plan phase5_2_static_audit_main")
+        if not no_archive:
+            emit("step=a1 plan deterministic_signoff_archive")
         emit(PHASE5_2_SIGNOFF_BUNDLE_OK)
         emit(PHASE5_2_SIGNOFF_BUNDLE_END)
         return 0, None
@@ -490,6 +535,11 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
     if audit_rc != 0:
         all_ok = False
 
+    archive_name = f"{bundle_dir.name}.tgz"
+    archive_sha_name = f"{bundle_dir.name}.tgz.sha256"
+    summary_lines.append(f"archive_name={archive_name}")
+    summary_lines.append(f"archive_sha256_name={archive_sha_name}")
+
     if all_ok:
         summary_lines.append(PHASE5_2_SIGNOFF_BUNDLE_OK)
         emit(PHASE5_2_SIGNOFF_BUNDLE_OK)
@@ -519,5 +569,8 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
     with (bundle_dir / "sha256.txt").open("w", encoding="utf-8", newline="\n") as handle:
         for rel, digest in rel_hashes:
             handle.write(f"{digest}  {rel}\n")
+
+    if not no_archive:
+        _build_deterministic_archive(bundle_dir)
 
     return (0 if all_ok else 1), bundle_dir

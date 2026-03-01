@@ -96,6 +96,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
 
     def test_phase5_2_signoff_bundle_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_BUNDLE", self.production_spec)
+        self.assertIn("PHASE5_2_SIGNOFF_ARCHIVE", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_bundle.sh", self.production_spec)
         self.assertIn("index.html", self.production_spec)
 

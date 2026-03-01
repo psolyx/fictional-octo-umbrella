@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 import re
+import tarfile
+import tempfile
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import TextIO
 
 from cli_app.phase5_2_signoff_bundle import (
@@ -171,3 +174,64 @@ def verify_signoff_bundle(evid_dir: str, out=None) -> int:
 
     out_stream.write(f"{PHASE5_2_SIGNOFF_VERIFY_OK}\n")
     return 0
+
+
+def _archive_basename(path: Path) -> str | None:
+    if path.name.endswith(".tgz"):
+        return path.name[: -len(".tgz")]
+    if path.name.endswith(".tar.gz"):
+        return path.name[: -len(".tar.gz")]
+    return None
+
+
+def verify_signoff_archive(archive_path: str, out=None) -> int:
+    out_stream = out if out is not None else os.sys.stdout
+    archive = Path(archive_path).resolve()
+    archive_base = _archive_basename(archive)
+    if archive_base is None:
+        return _fail(out_stream, "archive_extension_invalid")
+    if not archive.is_file():
+        return _fail(out_stream, "archive_missing")
+
+    digest_path = Path(f"{archive.as_posix()}.sha256")
+    if not digest_path.is_file():
+        return _fail(out_stream, "archive_sha256_missing")
+
+    digest_lines = digest_path.read_text(encoding="utf-8").splitlines()
+    if len(digest_lines) != 1:
+        return _fail(out_stream, "archive_sha256_format_invalid")
+    match = re.fullmatch(r"([0-9a-f]{64})  (.+)", digest_lines[0])
+    if match is None:
+        return _fail(out_stream, "archive_sha256_format_invalid")
+    expected_digest, expected_name = match.group(1), match.group(2)
+    if expected_name != archive.name:
+        return _fail(out_stream, "archive_sha256_name_mismatch")
+
+    actual_digest = _sha256(archive)
+    if actual_digest != expected_digest:
+        return _fail(out_stream, "archive_sha256_mismatch")
+
+    with tempfile.TemporaryDirectory(prefix="phase5_2_signoff_verify_") as temp_dir:
+        extract_root = Path(temp_dir)
+        with tarfile.open(str(archive), mode="r:gz") as tar_handle:
+            members = tar_handle.getmembers()
+            for member in members:
+                member_path = PurePosixPath(member.name)
+                if member_path.is_absolute():
+                    return _fail(out_stream, "archive_member_absolute")
+                if ".." in member_path.parts:
+                    return _fail(out_stream, "archive_member_parent_ref")
+                target = (extract_root / Path(*member_path.parts)).resolve()
+                if target != extract_root and extract_root not in target.parents:
+                    return _fail(out_stream, "archive_member_escape")
+                if member.issym() or member.islnk() or member.ischr() or member.isblk() or member.isfifo():
+                    return _fail(out_stream, "archive_member_type_unsupported")
+            tar_handle.extractall(path=temp_dir, members=members)
+
+        top_level = sorted(path for path in extract_root.iterdir())
+        if len(top_level) != 1 or not top_level[0].is_dir():
+            return _fail(out_stream, "archive_root_invalid")
+        if top_level[0].name != archive_base:
+            return _fail(out_stream, "archive_root_name_mismatch")
+
+        return verify_signoff_bundle(str(top_level[0]), out=out_stream)
