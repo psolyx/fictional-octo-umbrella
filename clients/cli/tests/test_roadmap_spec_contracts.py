@@ -97,6 +97,11 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_bundle_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_BUNDLE", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_bundle.sh", self.production_spec)
+        self.assertIn("index.html", self.production_spec)
+
+    def test_phase5_2_signoff_verify_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SIGNOFF_VERIFY", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_verify.sh", self.production_spec)
 
     def test_phase5_2_static_audit_checklist_markers_exist(self):
         self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")

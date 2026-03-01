@@ -5,6 +5,7 @@ import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+PRODUCTION_SPEC = (REPO_ROOT / "clients" / "docs" / "production_clients_exit_criteria.md").read_text(encoding="utf-8")
 
 
 class TestPhase52SignoffBundleContracts(unittest.TestCase):
@@ -37,6 +38,9 @@ class TestPhase52SignoffBundleContracts(unittest.TestCase):
         ]
         for expected in expected_lines:
             self.assertIn(expected, lines)
+
+    def test_docs_list_index_html_in_signoff_bundle_layout(self):
+        self.assertIn("index.html", PRODUCTION_SPEC)
 
 
 if __name__ == "__main__":
