@@ -1,4 +1,7 @@
 import pathlib
+import os
+import re
+import subprocess
 import unittest
 
 
@@ -103,6 +106,37 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_verify_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_VERIFY", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_verify.sh", self.production_spec)
+
+    def test_phase5_2_signoff_compare_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SIGNOFF_COMPARE", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_compare.sh", self.production_spec)
+
+    def test_phase5_2_signoff_compare_dry_run_markers_are_stable(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "clients/cli/src"
+        env["COMPARE_DRY_RUN"] = "1"
+        env["A_EVID_DIR"] = "evidence/a"
+        env["B_EVID_DIR"] = "evidence/b"
+        env.pop("A_ARCHIVE_PATH", None)
+        env.pop("B_ARCHIVE_PATH", None)
+        proc = subprocess.run(
+            ["python", "-m", "cli_app.phase5_2_signoff_compare_main"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn("PHASE5_2_SIGNOFF_COMPARE_BEGIN", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_COMPARE_V1", lines)
+        self.assertIn("mode=dir", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_COMPARE_END", lines)
+        timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(timestamp_pattern.search(line))
 
     def test_phase5_2_static_audit_checklist_markers_exist(self):
         self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")
