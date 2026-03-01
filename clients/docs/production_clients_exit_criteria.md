@@ -188,6 +188,43 @@ Verifier checks:
 - Deterministic `MANIFEST.json` structure and step status/exit-code consistency.
 - Deterministic redaction scan for forbidden token strings across evidence text artifacts.
 
+## PHASE5_2_SIGNOFF_COMPARE
+
+Marker family: `PHASE5_2_SIGNOFF_COMPARE` + `PHASE5_2_SIGNOFF_COMPARE_V1`.
+
+Run deterministic compare between two previously generated signoff bundles:
+
+```bash
+# Compare two evidence directories
+A_EVID_DIR=./evidence/<bundle-a> B_EVID_DIR=./evidence/<bundle-b> ./scripts/phase5_2_signoff_compare.sh
+
+# Compare two archives
+A_ARCHIVE_PATH=./evidence/<bundle-a>.tgz B_ARCHIVE_PATH=./evidence/<bundle-b>.tgz ./scripts/phase5_2_signoff_compare.sh
+
+# or invoke Python module directly
+env PYTHONPATH=clients/cli/src A_EVID_DIR=./evidence/<bundle-a> B_EVID_DIR=./evidence/<bundle-b> python -m cli_app.phase5_2_signoff_compare_main
+env PYTHONPATH=clients/cli/src A_ARCHIVE_PATH=./evidence/<bundle-a>.tgz B_ARCHIVE_PATH=./evidence/<bundle-b>.tgz python -m cli_app.phase5_2_signoff_compare_main
+```
+
+Compare output layout:
+
+- `evidence/<YYYY-MM-DD>-<platform_tag>-compare/phase5_2_signoff_compare_<UTC_TS>/`
+  - `COMPARE_SUMMARY.txt`
+  - `COMPARE_MANIFEST.json`
+  - `compare.html`
+  - `sha256.txt` (covers compare outputs, excludes itself)
+
+Compare semantics:
+- Both inputs are verified with the existing signoff verifier contract before diffing.
+- Step deltas are built from `MANIFEST.json` union of `step_id`, sorted lexicographically.
+- Artifact deltas are built from `sha256.txt` union of relpaths, sorted lexicographically.
+- Changed files are reported as relpath + short digest delta only; file contents are never printed.
+
+Exit code contract:
+- `0`: compare_result=PASS (no regressions and bundle B success=true)
+- `2`: compare_result=FAIL (regression detected and/or bundle B success=false)
+- `1`: verification/extraction/format failure
+
 ## User-flow contracts
 
 ### Account lifecycle
