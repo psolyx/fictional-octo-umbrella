@@ -167,6 +167,11 @@ Archive expectations:
 - Gzip header mtime is normalized for deterministic archive bytes.
 - Set `SIGNOFF_NO_ARCHIVE=1` to skip archive generation.
 
+
+### PHASE5_2_SIGNOFF_HTML_RENDERER
+
+Signoff HTML reports must escape all inserted values and keep deterministic ordering.
+
 ## PHASE5_2_SIGNOFF_VERIFY
 
 Marker family: `PHASE5_2_SIGNOFF_VERIFY` + `PHASE5_2_SIGNOFF_VERIFY_V1`.

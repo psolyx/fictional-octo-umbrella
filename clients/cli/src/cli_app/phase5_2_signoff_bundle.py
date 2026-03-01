@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as _dt
 import gzip
 import hashlib
-import html
 import json
 import os
 import platform
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import Iterable
 
 from cli_app.redact import redact_text
+from cli_app.signoff_html import render_signoff_index
 
 PHASE5_2_SIGNOFF_BUNDLE_BEGIN = "PHASE5_2_SIGNOFF_BUNDLE_BEGIN"
 PHASE5_2_SIGNOFF_BUNDLE_OK = "PHASE5_2_SIGNOFF_BUNDLE_OK"
@@ -331,81 +331,6 @@ def _build_steps() -> list[_Step]:
     ]
 
 
-def _render_index_html(*, manifest: dict[str, object], artifacts: list[str]) -> str:
-    success = bool(manifest.get("success", False))
-    status_text = "PASS" if success else "FAIL"
-    status_class = "pass" if success else "fail"
-    steps = manifest.get("steps")
-    sorted_steps = sorted(steps, key=lambda entry: str(entry.get("step_id", ""))) if isinstance(steps, list) else []
-    rows = []
-    for entry in sorted_steps:
-        if not isinstance(entry, dict):
-            continue
-        row = "".join(
-            [
-                "<tr>",
-                f"<td>{html.escape(str(entry.get('step_id', '')))}</td>",
-                f"<td>{html.escape(str(entry.get('label', '')))}</td>",
-                f"<td>{html.escape(str(entry.get('status', '')))}</td>",
-                f"<td>{html.escape(str(entry.get('duration_s', '')))}</td>",
-                f"<td>{html.escape(str(entry.get('exit_code', '')))}</td>",
-                "</tr>",
-            ]
-        )
-        rows.append(row)
-    links = [f'<li><a href="{html.escape(path)}">{html.escape(path)}</a></li>' for path in artifacts]
-    return "\n".join(
-        [
-            "<!doctype html>",
-            '<html lang="en">',
-            "<head>",
-            '  <meta charset="utf-8">',
-            '  <meta name="viewport" content="width=device-width, initial-scale=1">',
-            "  <title>Phase 5.2 Signoff Evidence Index</title>",
-            "  <style>",
-            "    :root { color-scheme: light dark; }",
-            "    body { font-family: sans-serif; margin: 1rem auto; max-width: 72rem; padding: 0 1rem; line-height: 1.4; }",
-            "    .skip-link { position: absolute; left: -9999px; top: 0; background: #fff; color: #000; padding: 0.5rem; border: 2px solid #000; }",
-            "    .skip-link:focus { left: 0.5rem; z-index: 1000; }",
-            "    a:focus-visible, button:focus-visible { outline: 3px solid #005fcc; outline-offset: 2px; }",
-            "    .status { font-size: 1.15rem; font-weight: 700; }",
-            "    .pass { color: #0f7a2f; }",
-            "    .fail { color: #a10000; }",
-            "    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }",
-            "    th, td { border: 1px solid #999; padding: 0.4rem; text-align: left; }",
-            "    caption { text-align: left; font-weight: 700; margin-bottom: 0.4rem; }",
-            "  </style>",
-            "</head>",
-            "<body>",
-            '  <a class="skip-link" href="#content">Skip to content</a>',
-            "  <header>",
-            "    <h1>Phase 5.2 Signoff Evidence</h1>",
-            f'    <p class="status {status_class}" role="status">Result: {status_text}</p>',
-            "  </header>",
-            '  <main id="content">',
-            "    <section aria-labelledby=\"steps-heading\">",
-            '      <h2 id="steps-heading">Step Summary</h2>',
-            "      <table>",
-            "        <caption>Deterministic step outcomes from MANIFEST.json</caption>",
-            "        <thead><tr><th scope=\"col\">step_id</th><th scope=\"col\">label</th><th scope=\"col\">status</th><th scope=\"col\">duration_s</th><th scope=\"col\">exit_code</th></tr></thead>",
-            "        <tbody>",
-            *[f"          {row}" for row in rows],
-            "        </tbody>",
-            "      </table>",
-            "    </section>",
-            "    <section aria-labelledby=\"artifacts-heading\">",
-            '      <h2 id="artifacts-heading">Artifacts</h2>',
-            "      <ul>",
-            *[f"        {item}" for item in links],
-            "      </ul>",
-            "    </section>",
-            "  </main>",
-            "</body>",
-            "</html>",
-        ]
-    )
-
-
 def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | None = None, dry_run: bool = False, out=None):
     out_stream = out if out is not None else os.sys.stdout
     root = Path(repo_root).resolve()
@@ -556,7 +481,20 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
         handle.write("\n")
 
     with (bundle_dir / "index.html").open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(_render_index_html(manifest=manifest, artifacts=_INDEX_ARTIFACT_ORDER) + "\n")
+        artifact_links = [(path, path) for path in _INDEX_ARTIFACT_ORDER]
+        notes = [
+            "./scripts/phase5_2_signoff_verify.sh EVID_DIR=./evidence/<bundle-path>",
+            "./scripts/phase5_2_signoff_compare.sh A_EVID_DIR=./evidence/<bundle-a> B_EVID_DIR=./evidence/<bundle-b>",
+        ]
+        handle.write(
+            render_signoff_index(
+                manifest=manifest,
+                artifacts=artifact_links,
+                result="PASS" if bool(manifest.get("success", False)) else "FAIL",
+                notes=notes,
+            )
+            + "\n"
+        )
 
     rel_hashes: list[tuple[str, str]] = []
     for path in sorted(bundle_dir.rglob("*")):

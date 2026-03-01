@@ -4,6 +4,8 @@ import re
 import subprocess
 import unittest
 
+from cli_app.signoff_html import render_signoff_compare, render_signoff_index
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 ROADMAP_PATH = REPO_ROOT / "ROADMAP.md"
@@ -102,6 +104,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SIGNOFF_ARCHIVE", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_bundle.sh", self.production_spec)
         self.assertIn("index.html", self.production_spec)
+        self.assertIn("PHASE5_2_SIGNOFF_HTML_RENDERER", self.production_spec)
 
     def test_phase5_2_signoff_verify_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_VERIFY", self.production_spec)
@@ -137,6 +140,94 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         for line in lines:
             with self.subTest(line=line):
                 self.assertIsNone(timestamp_pattern.search(line))
+
+
+    def test_signoff_index_html_has_required_a11y_structure(self):
+        manifest = {
+            "success": True,
+            "steps": [
+                {
+                    "step_id": "t01",
+                    "label": "gateway_test",
+                    "status": "PASS",
+                    "duration_s": 1.234,
+                    "exit_code": 0,
+                }
+            ],
+        }
+        rendered = render_signoff_index(
+            manifest=manifest,
+            artifacts=[("SIGNOFF_SUMMARY.txt", "SIGNOFF_SUMMARY.txt")],
+            result="PASS",
+            notes=["./scripts/phase5_2_signoff_verify.sh EVID_DIR=./evidence/<bundle-path>"],
+        )
+        self.assertIn("<!doctype html>", rendered)
+        self.assertIn('<html lang="en">', rendered)
+        self.assertIn("Skip to content", rendered)
+        self.assertIn("<caption>", rendered)
+        self.assertIn('<th scope="col">', rendered)
+        self.assertIn(":focus-visible", rendered)
+
+    def test_signoff_compare_html_has_required_a11y_structure(self):
+        compare_manifest = {"compare_result": "FAIL", "regression_count": 2}
+        rendered = render_signoff_compare(
+            compare_manifest=compare_manifest,
+            step_rows=[["t01", "PASS", "0", "1.000", "FAIL", "1", "2.000", "1.000"]],
+            artifact_sections={
+                "changed": [["a.txt", "aaa", "bbb"]],
+                "added": [["b.txt", "", ""]],
+                "removed": [["c.txt", "", ""]],
+            },
+        )
+        self.assertIn("<!doctype html>", rendered)
+        self.assertIn('<html lang="en">', rendered)
+        self.assertIn("Skip to content", rendered)
+        self.assertIn("<caption>", rendered)
+        self.assertIn('<th scope="col">', rendered)
+        self.assertIn(":focus-visible", rendered)
+
+    def test_renderer_escapes_untrusted_strings(self):
+        manifest = {
+            "success": False,
+            "steps": [
+                {
+                    "step_id": "<script>alert(1)</script>",
+                    "label": 'A & B "quoted"',
+                    "status": "FAIL",
+                    "duration_s": 0,
+                    "exit_code": 1,
+                }
+            ],
+        }
+        rendered = render_signoff_index(
+            manifest=manifest,
+            artifacts=[('<script>.txt', 'artifact "x" & y')],
+            result="FAIL",
+            notes=['cmd "quoted" & <tag>'],
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertIn("A &amp; B &quot;quoted&quot;", rendered)
+        self.assertIn("artifact &quot;x&quot; &amp; y", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+
+    def test_renderer_output_is_deterministic_for_same_inputs(self):
+        manifest = {
+            "success": True,
+            "steps": [
+                {
+                    "step_id": "t01",
+                    "label": "stable",
+                    "status": "PASS",
+                    "duration_s": 3.210,
+                    "exit_code": 0,
+                }
+            ],
+        }
+        artifacts = [("sha256.txt", "sha256.txt")]
+        notes = ["./scripts/phase5_2_signoff_compare.sh A_EVID_DIR=./evidence/<bundle-a> B_EVID_DIR=./evidence/<bundle-b>"]
+        first = render_signoff_index(manifest=manifest, artifacts=artifacts, result="PASS", notes=notes)
+        second = render_signoff_index(manifest=manifest, artifacts=artifacts, result="PASS", notes=notes)
+        self.assertEqual(first, second)
 
     def test_phase5_2_static_audit_checklist_markers_exist(self):
         self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")
