@@ -198,6 +198,32 @@ Verifier checks:
 - Deterministic `MANIFEST.json` structure and step status/exit-code consistency.
 - Deterministic redaction scan for forbidden token strings across evidence text artifacts.
 
+## PHASE5_2_SIGNOFF_VERIFY_REPORT_V1
+
+Run the verify report evidence writer (portable ticket artifact):
+
+```bash
+EVID_DIR=./evidence/<bundle-path> ./scripts/phase5_2_signoff_verify_report.sh
+ARCHIVE_PATH=./evidence/<bundle-path>.tgz ./scripts/phase5_2_signoff_verify_report.sh
+# or
+env PYTHONPATH=clients/cli/src EVID_DIR=./evidence/<bundle-path> python -m cli_app.phase5_2_signoff_verify_report_main
+env PYTHONPATH=clients/cli/src ARCHIVE_PATH=./evidence/<bundle-path>.tgz python -m cli_app.phase5_2_signoff_verify_report_main
+```
+
+Verify report output layout:
+
+- `evidence/<YYYY-MM-DD>-<platform_tag>-verify/phase5_2_signoff_verify_report_<UTC_TS>/`
+  - `VERIFY_SUMMARY.txt`
+  - `VERIFY_MANIFEST.json`
+  - `verify.html`
+  - `sha256.txt` (covers verify report artifacts; excludes itself)
+
+Path-safe stdout pointers:
+- `verify_dir_name=<basename>`
+- `verify_dir_rel=<repo-relative path>`
+- `verify_html_rel=<repo-relative path to verify.html>`
+- `target_type=<dir|archive>` and `target_name=<basename>`
+
 ## PHASE5_2_SIGNOFF_COMPARE
 
 Marker family: `PHASE5_2_SIGNOFF_COMPARE` + `PHASE5_2_SIGNOFF_COMPARE_V1`.
