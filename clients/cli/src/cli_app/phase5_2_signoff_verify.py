@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import tarfile
 import tempfile
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import TextIO
 
 from cli_app.phase5_2_signoff_bundle import (
@@ -15,6 +12,7 @@ from cli_app.phase5_2_signoff_bundle import (
     PHASE5_2_SIGNOFF_BUNDLE_END,
     PHASE5_2_SIGNOFF_BUNDLE_OK,
 )
+from cli_app.signoff_bundle_io import safe_extract_tgz, verify_sha256_manifest
 
 PHASE5_2_SIGNOFF_VERIFY_BEGIN = "PHASE5_2_SIGNOFF_VERIFY_BEGIN"
 PHASE5_2_SIGNOFF_VERIFY_OK = "PHASE5_2_SIGNOFF_VERIFY_OK"
@@ -69,16 +67,6 @@ _REDACTION_FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(65536)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
 
 def _fail(out: TextIO, message: str) -> int:
     out.write(f"verify_fail {message}\n")
@@ -128,37 +116,10 @@ def verify_signoff_bundle(evid_dir: str, out=None) -> int:
     if bool(manifest_data["success"]) != summary_has_ok:
         return _fail(out_stream, "summary_ok_mismatch")
 
-    sha_lines = (root / "sha256.txt").read_text(encoding="utf-8").splitlines()
-    entries: list[tuple[str, str]] = []
-    for line in sha_lines:
-        if not line.strip():
-            return _fail(out_stream, "sha256_blank_line")
-        parts = line.split("  ", 1)
-        if len(parts) != 2:
-            return _fail(out_stream, "sha256_format_invalid")
-        digest, relpath = parts
-        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
-            return _fail(out_stream, f"sha256_digest_invalid file={relpath}")
-        entries.append((relpath, digest))
-    relpaths = [rel for rel, _ in entries]
-    if relpaths != sorted(relpaths):
-        return _fail(out_stream, "sha256_not_sorted")
-
-    expected_relpaths = sorted(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.relative_to(root).as_posix() != "sha256.txt"
-    )
-    if relpaths != expected_relpaths:
-        return _fail(out_stream, "sha256_file_set_mismatch")
-
-    for relpath, digest in entries:
-        full_path = root / relpath
-        if not full_path.is_file():
-            return _fail(out_stream, f"sha256_referenced_missing file={relpath}")
-        actual = _sha256(full_path)
-        if actual != digest:
-            return _fail(out_stream, f"sha256_mismatch file={relpath}")
+    try:
+        verify_sha256_manifest(root)
+    except ValueError as exc:
+        return _fail(out_stream, str(exc))
 
     transcript_paths = sorted(
         path.relative_to(root).as_posix()
@@ -176,62 +137,16 @@ def verify_signoff_bundle(evid_dir: str, out=None) -> int:
     return 0
 
 
-def _archive_basename(path: Path) -> str | None:
-    if path.name.endswith(".tgz"):
-        return path.name[: -len(".tgz")]
-    if path.name.endswith(".tar.gz"):
-        return path.name[: -len(".tar.gz")]
-    return None
-
 
 def verify_signoff_archive(archive_path: str, out=None) -> int:
     out_stream = out if out is not None else os.sys.stdout
     archive = Path(archive_path).resolve()
-    archive_base = _archive_basename(archive)
-    if archive_base is None:
-        return _fail(out_stream, "archive_extension_invalid")
-    if not archive.is_file():
-        return _fail(out_stream, "archive_missing")
-
-    digest_path = Path(f"{archive.as_posix()}.sha256")
-    if not digest_path.is_file():
-        return _fail(out_stream, "archive_sha256_missing")
-
-    digest_lines = digest_path.read_text(encoding="utf-8").splitlines()
-    if len(digest_lines) != 1:
-        return _fail(out_stream, "archive_sha256_format_invalid")
-    match = re.fullmatch(r"([0-9a-f]{64})  (.+)", digest_lines[0])
-    if match is None:
-        return _fail(out_stream, "archive_sha256_format_invalid")
-    expected_digest, expected_name = match.group(1), match.group(2)
-    if expected_name != archive.name:
-        return _fail(out_stream, "archive_sha256_name_mismatch")
-
-    actual_digest = _sha256(archive)
-    if actual_digest != expected_digest:
-        return _fail(out_stream, "archive_sha256_mismatch")
 
     with tempfile.TemporaryDirectory(prefix="phase5_2_signoff_verify_") as temp_dir:
         extract_root = Path(temp_dir)
-        with tarfile.open(str(archive), mode="r:gz") as tar_handle:
-            members = tar_handle.getmembers()
-            for member in members:
-                member_path = PurePosixPath(member.name)
-                if member_path.is_absolute():
-                    return _fail(out_stream, "archive_member_absolute")
-                if ".." in member_path.parts:
-                    return _fail(out_stream, "archive_member_parent_ref")
-                target = (extract_root / Path(*member_path.parts)).resolve()
-                if target != extract_root and extract_root not in target.parents:
-                    return _fail(out_stream, "archive_member_escape")
-                if member.issym() or member.islnk() or member.ischr() or member.isblk() or member.isfifo():
-                    return _fail(out_stream, "archive_member_type_unsupported")
-            tar_handle.extractall(path=temp_dir, members=members)
+        try:
+            bundle_root = safe_extract_tgz(archive, temp_root=extract_root)
+        except ValueError as exc:
+            return _fail(out_stream, str(exc))
 
-        top_level = sorted(path for path in extract_root.iterdir())
-        if len(top_level) != 1 or not top_level[0].is_dir():
-            return _fail(out_stream, "archive_root_invalid")
-        if top_level[0].name != archive_base:
-            return _fail(out_stream, "archive_root_name_mismatch")
-
-        return verify_signoff_bundle(str(top_level[0]), out=out_stream)
+        return verify_signoff_bundle(str(bundle_root), out=out_stream)
