@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import hashlib
+import io
 import json
 import os
-import re
-import tarfile
 import tempfile
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import TextIO
 
 from cli_app.phase5_2_signoff_verify import verify_signoff_bundle
+from cli_app.signoff_bundle_io import safe_extract_tgz, sha256_file, verify_sha256_manifest
 from cli_app.signoff_html import render_signoff_compare
 
 PHASE5_2_SIGNOFF_COMPARE_BEGIN = "PHASE5_2_SIGNOFF_COMPARE_BEGIN"
@@ -21,75 +19,6 @@ PHASE5_2_SIGNOFF_COMPARE_V1 = "PHASE5_2_SIGNOFF_COMPARE_V1"
 
 class _CompareFailure(Exception):
     pass
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(65536)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _archive_basename(path: Path) -> str | None:
-    if path.name.endswith(".tgz"):
-        return path.name[: -len(".tgz")]
-    if path.name.endswith(".tar.gz"):
-        return path.name[: -len(".tar.gz")]
-    return None
-
-
-def _verify_archive_digest(archive: Path) -> None:
-    digest_path = Path(f"{archive.as_posix()}.sha256")
-    if not digest_path.is_file():
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-
-    digest_lines = digest_path.read_text(encoding="utf-8").splitlines()
-    if len(digest_lines) != 1:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    match = re.fullmatch(r"([0-9a-f]{64})  (.+)", digest_lines[0])
-    if match is None:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    expected_digest, expected_name = match.group(1), match.group(2)
-    if expected_name != archive.name:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    if _sha256(archive) != expected_digest:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-
-
-def _safe_extract_archive(archive: Path, extract_root: Path) -> Path:
-    archive_base = _archive_basename(archive)
-    if archive_base is None:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    if not archive.is_file():
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-
-    _verify_archive_digest(archive)
-
-    with tarfile.open(str(archive), mode="r:gz") as tar_handle:
-        members = tar_handle.getmembers()
-        for member in members:
-            member_path = PurePosixPath(member.name)
-            if member_path.is_absolute():
-                raise _CompareFailure("compare_fail bundle_verify_failed")
-            if ".." in member_path.parts:
-                raise _CompareFailure("compare_fail bundle_verify_failed")
-            target = (extract_root / Path(*member_path.parts)).resolve()
-            if target != extract_root and extract_root not in target.parents:
-                raise _CompareFailure("compare_fail bundle_verify_failed")
-            if member.issym() or member.islnk() or member.ischr() or member.isblk() or member.isfifo():
-                raise _CompareFailure("compare_fail bundle_verify_failed")
-        tar_handle.extractall(path=extract_root, members=members)
-
-    top_level = sorted(path for path in extract_root.iterdir())
-    if len(top_level) != 1 or not top_level[0].is_dir():
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    if top_level[0].name != archive_base:
-        raise _CompareFailure("compare_fail bundle_verify_failed")
-    return top_level[0]
 
 
 def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]]]:
@@ -123,6 +52,7 @@ def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]
 
 
 def _parse_sha256_map(root: Path) -> dict[str, str]:
+    verify_sha256_manifest(root)
     out: dict[str, str] = {}
     for line in (root / "sha256.txt").read_text(encoding="utf-8").splitlines():
         parts = line.split("  ", 1)
@@ -150,7 +80,10 @@ def _resolve_bundle_input(mode: str, value: str, temp_roots: list[tempfile.Tempo
     temp_dir = tempfile.TemporaryDirectory(prefix="phase5_2_signoff_compare_")
     temp_roots.append(temp_dir)
     extract_root = Path(temp_dir.name)
-    return _safe_extract_archive(path, extract_root)
+    try:
+        return safe_extract_tgz(path, temp_root=extract_root)
+    except ValueError as exc:
+        raise _CompareFailure("compare_fail bundle_verify_failed") from exc
 
 
 def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir: str, out: TextIO | None = None) -> int:
@@ -160,8 +93,9 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
         root_a = _resolve_bundle_input(mode, bundle_a, temp_roots)
         root_b = _resolve_bundle_input(mode, bundle_b, temp_roots)
 
-        rc_a = verify_signoff_bundle(str(root_a), out=None)
-        rc_b = verify_signoff_bundle(str(root_b), out=None)
+        verify_log = io.StringIO()
+        rc_a = verify_signoff_bundle(str(root_a), out=verify_log)
+        rc_b = verify_signoff_bundle(str(root_b), out=verify_log)
         if rc_a != 0 or rc_b != 0:
             out_stream.write("compare_fail bundle_verify_failed\n")
             return 1
@@ -330,7 +264,7 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
             rel = path.relative_to(out_path).as_posix()
             if rel == "sha256.txt":
                 continue
-            hashes.append((rel, _sha256(path)))
+            hashes.append((rel, sha256_file(path)))
         with (out_path / "sha256.txt").open("w", encoding="utf-8", newline="\n") as handle:
             for rel, digest in hashes:
                 handle.write(f"{digest}  {rel}\n")

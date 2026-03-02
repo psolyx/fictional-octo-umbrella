@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import gzip
-import hashlib
 import json
 import os
 import platform
@@ -10,7 +8,6 @@ import re
 import shutil
 import socket
 import subprocess
-import tarfile
 import tempfile
 import time
 import urllib.error
@@ -20,6 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 from cli_app.redact import redact_text
+from cli_app.signoff_bundle_io import build_deterministic_tgz, write_sha256_manifest
 from cli_app.signoff_html import render_signoff_index
 
 PHASE5_2_SIGNOFF_BUNDLE_BEGIN = "PHASE5_2_SIGNOFF_BUNDLE_BEGIN"
@@ -107,57 +105,6 @@ def _write_redacted_lines(path: Path, lines: Iterable[str]) -> None:
         for line in lines:
             rendered = redact_text(line.rstrip("\n"))
             handle.write(rendered + "\n")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(65536)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _build_deterministic_archive(bundle_dir: Path) -> tuple[Path, Path]:
-    archive_path = bundle_dir.parent / f"{bundle_dir.name}.tgz"
-    archive_sha_path = bundle_dir.parent / f"{bundle_dir.name}.tgz.sha256"
-
-    rel_dirs = sorted(path.relative_to(bundle_dir).as_posix() for path in bundle_dir.rglob("*") if path.is_dir())
-    rel_files = sorted(path.relative_to(bundle_dir).as_posix() for path in bundle_dir.rglob("*") if path.is_file())
-
-    with archive_path.open("wb") as archive_handle:
-        with gzip.GzipFile(fileobj=archive_handle, mode="wb", mtime=0) as gzip_handle:
-            with tarfile.open(fileobj=gzip_handle, mode="w|") as tar_handle:
-                members: list[tuple[str, Path, bool]] = [(bundle_dir.name, bundle_dir, True)]
-                for rel_dir in rel_dirs:
-                    members.append((f"{bundle_dir.name}/{rel_dir}", bundle_dir / rel_dir, True))
-                for rel_file in rel_files:
-                    members.append((f"{bundle_dir.name}/{rel_file}", bundle_dir / rel_file, False))
-
-                for member_name, source_path, is_dir in members:
-                    info = tarfile.TarInfo(name=member_name)
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    info.mtime = 0
-                    if is_dir:
-                        info.type = tarfile.DIRTYPE
-                        info.mode = 0o755
-                        info.size = 0
-                        tar_handle.addfile(info)
-                    else:
-                        info.mode = 0o644
-                        info.size = source_path.stat().st_size
-                        with source_path.open("rb") as file_handle:
-                            tar_handle.addfile(info, fileobj=file_handle)
-
-    archive_digest = _sha256(archive_path)
-    with archive_sha_path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(f"{archive_digest}  {archive_path.name}\n")
-    return archive_path, archive_sha_path
 
 
 def _run_subprocess(step: _Step, repo_root: Path, output_path: Path) -> tuple[int, float]:
@@ -496,19 +443,9 @@ def run_signoff_bundle(*, repo_root: str, out_evid_root: str, base_url: str | No
             + "\n"
         )
 
-    rel_hashes: list[tuple[str, str]] = []
-    for path in sorted(bundle_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(bundle_dir).as_posix()
-        if rel == "sha256.txt":
-            continue
-        rel_hashes.append((rel, _sha256(path)))
-    with (bundle_dir / "sha256.txt").open("w", encoding="utf-8", newline="\n") as handle:
-        for rel, digest in rel_hashes:
-            handle.write(f"{digest}  {rel}\n")
+    write_sha256_manifest(bundle_dir)
 
     if not no_archive:
-        _build_deterministic_archive(bundle_dir)
+        build_deterministic_tgz(bundle_dir)
 
     return (0 if all_ok else 1), bundle_dir

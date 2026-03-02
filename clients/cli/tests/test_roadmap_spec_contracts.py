@@ -1,9 +1,14 @@
-import pathlib
+import hashlib
+import io
 import os
+import pathlib
 import re
 import subprocess
+import tarfile
+import tempfile
 import unittest
 
+from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
 from cli_app.signoff_html import render_signoff_compare, render_signoff_index
 
 
@@ -141,6 +146,85 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNone(timestamp_pattern.search(line))
 
+
+    def test_phase5_2_signoff_io_hardening_marker_exists(self):
+        self.assertIn("PHASE5_2_SIGNOFF_IO_HARDENING", self.production_spec)
+
+    def test_safe_extract_rejects_parent_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            archive = tmp_path / "bundle.tgz"
+            with tarfile.open(archive, "w:gz") as tf:
+                payload = b"x"
+                info = tarfile.TarInfo("bundle/../evil.txt")
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (tmp_path / "bundle.tgz.sha256").write_text(f"{digest}  bundle.tgz\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "archive_member_parent_ref"):
+                safe_extract_tgz(archive, temp_root=tmp_path / "extract")
+
+    def test_safe_extract_rejects_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            archive = tmp_path / "bundle.tgz"
+            with tarfile.open(archive, "w:gz") as tf:
+                payload = b"x"
+                info = tarfile.TarInfo("/abs.txt")
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (tmp_path / "bundle.tgz.sha256").write_text(f"{digest}  bundle.tgz\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "archive_member_absolute"):
+                safe_extract_tgz(archive, temp_root=tmp_path / "extract")
+
+    def test_safe_extract_rejects_symlink_or_hardlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            archive = tmp_path / "bundle.tgz"
+            with tarfile.open(archive, "w:gz") as tf:
+                info = tarfile.TarInfo("bundle/link")
+                info.type = tarfile.SYMTYPE
+                info.linkname = "target"
+                tf.addfile(info)
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (tmp_path / "bundle.tgz.sha256").write_text(f"{digest}  bundle.tgz\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "archive_member_type_unsupported"):
+                safe_extract_tgz(archive, temp_root=tmp_path / "extract")
+
+    def test_build_deterministic_tgz_is_byte_stable_for_same_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bundle = tmp_path / "bundle"
+            (bundle / "dir").mkdir(parents=True)
+            (bundle / "a.txt").write_text("alpha\n", encoding="utf-8")
+            (bundle / "dir" / "b.txt").write_text("beta\n", encoding="utf-8")
+
+            out1 = tmp_path / "out1"
+            out2 = tmp_path / "out2"
+            out1.mkdir()
+            out2.mkdir()
+            archive1, sha1 = build_deterministic_tgz(bundle, out_dir=out1)
+            archive2, sha2 = build_deterministic_tgz(bundle, out_dir=out2)
+
+            self.assertEqual(hashlib.sha256(archive1.read_bytes()).hexdigest(), hashlib.sha256(archive2.read_bytes()).hexdigest())
+            self.assertRegex(sha1.read_text(encoding="utf-8").strip(), r"^[0-9a-f]{64}  bundle\.tgz$")
+            self.assertRegex(sha2.read_text(encoding="utf-8").strip(), r"^[0-9a-f]{64}  bundle\.tgz$")
+
+    def test_verify_sha256_manifest_rejects_unsorted_or_mismatched_file_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+            (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+            da = hashlib.sha256((tmp_path / "a.txt").read_bytes()).hexdigest()
+            db = hashlib.sha256((tmp_path / "b.txt").read_bytes()).hexdigest()
+            (tmp_path / "sha256.txt").write_text(f"{db}  b.txt\n{da}  a.txt\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sha256_not_sorted"):
+                verify_sha256_manifest(tmp_path)
+
+            (tmp_path / "sha256.txt").write_text(f"{da}  a.txt\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sha256_file_set_mismatch"):
+                verify_sha256_manifest(tmp_path)
 
     def test_signoff_index_html_has_required_a11y_structure(self):
         manifest = {

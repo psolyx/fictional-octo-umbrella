@@ -167,6 +167,11 @@ Archive expectations:
 - Gzip header mtime is normalized for deterministic archive bytes.
 - Set `SIGNOFF_NO_ARCHIVE=1` to skip archive generation.
 
+PHASE5_2_SIGNOFF_IO_HARDENING
+- Shared stdlib-only signoff bundle IO enforces deterministic tgz normalization (`uid=0`, `gid=0`, tar `mtime=0`, gzip `mtime=0`, fixed file/dir modes).
+- Safe extraction rejects absolute paths, parent traversal (`..`), and link/device/fifo entries before extracting any members.
+- `sha256.txt` parsing/verification is centralized with strict sorted ordering and exact file-set matching.
+
 
 ### PHASE5_2_SIGNOFF_HTML_RENDERER
 
