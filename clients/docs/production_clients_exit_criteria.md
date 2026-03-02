@@ -235,6 +235,32 @@ Exit code contract:
 - `2`: compare_result=FAIL (regression detected and/or bundle B success=false)
 - `1`: verification/extraction/format failure
 
+
+## PHASE5_2_SIGNOFF_CATALOG
+
+Marker family: `PHASE5_2_SIGNOFF_CATALOG` + `PHASE5_2_SIGNOFF_CATALOG_V1`.
+
+Build a deterministic signoff evidence catalog across existing bundle/compare runs:
+
+```bash
+./scripts/phase5_2_signoff_catalog.sh
+# or
+env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_signoff_catalog_main
+```
+
+Catalog output layout:
+
+- `evidence/<YYYY-MM-DD>-<platform_tag>-catalog/phase5_2_signoff_catalog_<UTC_TS>/`
+  - `CATALOG_SUMMARY.txt`
+  - `CATALOG_MANIFEST.json`
+  - `catalog.html`
+  - `sha256.txt` (covers the three catalog artifacts above; excludes itself)
+
+Catalog semantics:
+- Index-only operation: scans existing complete bundle/compare directories and ignores incomplete trees deterministically.
+- Deterministic ordering: bundles/compares are sorted by `created_utc` descending with a directory-name tie-break.
+- Metadata-only and redacted posture: emits status/count/link metadata only, never transcript contents or secret material.
+
 ## User-flow contracts
 
 ### Account lifecycle
