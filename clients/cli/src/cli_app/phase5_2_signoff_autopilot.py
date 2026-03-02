@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import io
 import json
 import os
 import platform
 import sys
-import tempfile
 from pathlib import Path
 from typing import IO
 
@@ -15,6 +13,8 @@ from cli_app.phase5_2_signoff_bundle import run_signoff_bundle
 from cli_app.phase5_2_signoff_catalog import discover_signoff_bundle_entries
 from cli_app.phase5_2_signoff_compare import compare_signoff_bundles
 from cli_app.phase5_2_signoff_verify import verify_signoff_archive, verify_signoff_bundle
+from cli_app.signoff_bundle_io import write_sha256_manifest
+from cli_app.signoff_html import render_signoff_autopilot
 from cli_app.redact import redact_text
 
 PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN = "PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN"
@@ -29,15 +29,22 @@ def _platform_tag() -> str:
     return f"{system}-{machine}"
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+def _rel_href(from_dir: Path, target: Path) -> str:
+    return os.path.relpath(target, from_dir).replace("\\", "/")
+
+
+def _discover_latest_catalog_html(evidence_root: Path) -> Path | None:
+    candidates: list[Path] = []
+    for path in evidence_root.rglob("catalog.html"):
+        if not path.is_file():
+            continue
+        if not (path.parent / "CATALOG_MANIFEST.json").is_file():
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda value: value.as_posix())
+    return candidates[-1]
 
 
 def run_autopilot(
@@ -88,10 +95,16 @@ def run_autopilot(
             baseline = entry
             break
 
+    day = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    utc_stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    autopilot_dir = out_evid_root / f"{day}-{_platform_tag()}-autopilot" / f"phase5_2_signoff_autopilot_{utc_stamp}"
+    autopilot_dir.mkdir(parents=True, exist_ok=True)
+
     compare_mode = "skipped"
     compare_result = "SKIPPED"
     regression_count = 0
     compare_rc = 0
+    compare_dir: Path | None = None
 
     if baseline is not None and verify_rc == 0:
         baseline_dir = baseline.get("bundle_dir")
@@ -111,14 +124,14 @@ def run_autopilot(
                 source_a = str(baseline_dir)
                 source_b = str(bundle_dir)
             compare_log = io.StringIO()
-            with tempfile.TemporaryDirectory(prefix="phase5_2_autopilot_compare_") as temp_dir:
-                compare_rc = compare_signoff_bundles(
-                    mode=compare_mode,
-                    bundle_a=source_a,
-                    bundle_b=source_b,
-                    out_dir=temp_dir,
-                    out=compare_log,
-                )
+            compare_dir = autopilot_dir / "COMPARE"
+            compare_rc = compare_signoff_bundles(
+                mode=compare_mode,
+                bundle_a=source_a,
+                bundle_b=source_b,
+                out_dir=str(compare_dir),
+                out=compare_log,
+            )
             for line in compare_log.getvalue().splitlines():
                 line_clean = redact_text(line.strip())
                 if line_clean.startswith("regression_count="):
@@ -135,11 +148,6 @@ def run_autopilot(
         exit_code = 1
     else:
         exit_code = 0
-
-    day = dt.datetime.utcnow().strftime("%Y-%m-%d")
-    utc_stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    autopilot_dir = out_evid_root / f"{day}-{_platform_tag()}-autopilot" / f"phase5_2_signoff_autopilot_{utc_stamp}"
-    autopilot_dir.mkdir(parents=True, exist_ok=True)
 
     baseline_name = str(baseline.get("bundle_dir_name")) if isinstance(baseline, dict) else "none"
     archive_name = archive.name if archive is not None else "none"
@@ -175,11 +183,40 @@ def run_autopilot(
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8", newline="\n")
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
-    with (autopilot_dir / "sha256.txt").open("w", encoding="utf-8", newline="\n") as handle:
-        for rel, digest in [
-            ("AUTOPILOT_MANIFEST.json", _sha256(manifest_path)),
-            ("AUTOPILOT_SUMMARY.txt", _sha256(summary_path)),
-        ]:
-            handle.write(f"{digest}  {rel}\n")
+    artifact_links: list[tuple[str, str]] = [
+        (_rel_href(autopilot_dir, bundle_dir / "index.html"), "new bundle index.html"),
+        (_rel_href(autopilot_dir, summary_path), summary_path.name),
+        (_rel_href(autopilot_dir, manifest_path), manifest_path.name),
+    ]
+    if verify_mode == "archive" and archive is not None:
+        archive_sha = Path(f"{archive.as_posix()}.sha256")
+        artifact_links.append((_rel_href(autopilot_dir, archive), archive.name))
+        if archive_sha.is_file():
+            artifact_links.append((_rel_href(autopilot_dir, archive_sha), archive_sha.name))
+    else:
+        artifact_links.append((_rel_href(autopilot_dir, bundle_dir / "sha256.txt"), "new bundle sha256.txt"))
+        artifact_links.append((_rel_href(autopilot_dir, bundle_dir / "MANIFEST.json"), "new bundle MANIFEST.json"))
+
+    if compare_dir is not None and compare_dir.is_dir():
+        artifact_links.append(("COMPARE/compare.html", "COMPARE/compare.html"))
+        artifact_links.append(("COMPARE/sha256.txt", "COMPARE/sha256.txt"))
+        artifact_links.append(("COMPARE/COMPARE_MANIFEST.json", "COMPARE/COMPARE_MANIFEST.json"))
+
+    if isinstance(baseline, dict):
+        baseline_dir = baseline.get("bundle_dir")
+        if isinstance(baseline_dir, Path):
+            artifact_links.append((_rel_href(autopilot_dir, baseline_dir / "index.html"), "baseline bundle index.html"))
+
+    latest_catalog = _discover_latest_catalog_html(evidence_root)
+    if latest_catalog is not None:
+        artifact_links.append((_rel_href(autopilot_dir, latest_catalog), "latest catalog.html"))
+
+    autopilot_html = render_signoff_autopilot(
+        manifest=manifest,
+        summary_lines=summary_lines,
+        artifact_links=artifact_links,
+    )
+    (autopilot_dir / "autopilot.html").write_text(autopilot_html + "\n", encoding="utf-8", newline="\n")
+    write_sha256_manifest(autopilot_dir)
 
     return manifest

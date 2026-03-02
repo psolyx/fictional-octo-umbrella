@@ -266,3 +266,57 @@ def render_signoff_catalog(catalog: dict) -> str:
         ]
     )
     return render_page("Phase 5.2 Signoff Catalog", body)
+
+
+def render_signoff_autopilot(
+    *,
+    manifest: dict,
+    summary_lines: list[str],
+    artifact_links: list[tuple[str, str]],
+) -> str:
+    result = "PASS" if bool(manifest.get("success")) else "FAIL"
+    status_class = "pass" if result == "PASS" else "fail"
+    summary_rows = [[line] for line in summary_lines]
+    links_lines = ["<ul>"]
+    for href, label in artifact_links:
+        links_lines.append(
+            f'  <li><a href="{html_escape(href)}">{html_escape(label)}</a></li>'
+        )
+    links_lines.append("</ul>")
+
+    body = "\n".join(
+        [
+            "    <header>",
+            "      <h1>Phase 5.2 Signoff Autopilot</h1>",
+            f'      <p class="status {status_class}" role="status">Result: {html_escape(result)}</p>',
+            "    </header>",
+            "    <section aria-labelledby=\"summary-heading\">",
+            '      <h2 id="summary-heading">Summary</h2>',
+            "      "
+            + render_table(
+                caption="Deterministic AUTOPILOT_SUMMARY markers",
+                headers=["line"],
+                rows=summary_rows,
+            ).replace("\n", "\n      "),
+            "    </section>",
+            "    <section aria-labelledby=\"artifacts-heading\">",
+            '      <h2 id="artifacts-heading">Artifacts</h2>',
+            "      " + "\n      ".join(links_lines),
+            "    </section>",
+            "    <section aria-labelledby=\"manifest-heading\">",
+            '      <h2 id="manifest-heading">Manifest fields</h2>',
+            "      "
+            + render_kv_list(
+                [
+                    ("autopilot_version", str(manifest.get("autopilot_version", ""))),
+                    ("bundle_dir_name", str(manifest.get("bundle_dir_name", ""))),
+                    ("baseline_bundle_dir_name", str(manifest.get("baseline_bundle_dir_name", ""))),
+                    ("verify_mode", str(manifest.get("verify_mode", ""))),
+                    ("compare_mode", str(manifest.get("compare_mode", ""))),
+                    ("compare_result", str(manifest.get("compare_result", ""))),
+                ]
+            ).replace("\n", "\n      "),
+            "    </section>",
+        ]
+    )
+    return render_page("Phase 5.2 Signoff Autopilot", body)
