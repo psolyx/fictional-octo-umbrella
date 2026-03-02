@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.archive_path:
             archive_path = pathlib.Path(args.archive_path).resolve()
             sys.stdout.write("mode=archive\n")
-            sys.stdout.write(f"run archive_path={archive_path.as_posix()}\n")
+            sys.stdout.write(f"run archive_name={archive_path.name}\n")
             return verify_signoff_archive(str(archive_path), out=sys.stdout)
 
         if not args.evid_dir:
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
 
         evid_dir = pathlib.Path(args.evid_dir).resolve()
         sys.stdout.write("mode=dir\n")
-        sys.stdout.write(f"run evid_dir={evid_dir.as_posix()}\n")
+        sys.stdout.write(f"run evid_dir_name={evid_dir.name}\n")
         return verify_signoff_bundle(str(evid_dir), out=sys.stdout)
     finally:
         sys.stdout.write(f"{PHASE5_2_SIGNOFF_VERIFY_END}\n")

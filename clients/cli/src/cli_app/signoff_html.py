@@ -320,3 +320,95 @@ def render_signoff_autopilot(
         ]
     )
     return render_page("Phase 5.2 Signoff Autopilot", body)
+
+
+def render_signoff_verify(report: dict, summary_lines: list[str], artifact_links: list[tuple[str, str]]) -> str:
+    overall_ok = bool(report.get("overall_ok"))
+    status = "PASS" if overall_ok else "FAIL"
+    status_class = "pass" if overall_ok else "fail"
+
+    required_rows: list[list[str]] = []
+    for entry in report.get("required_files", []):
+        if not isinstance(entry, dict):
+            continue
+        required_rows.append([
+            str(entry.get("relpath", "")),
+            "present" if bool(entry.get("present")) else "missing",
+        ])
+
+    violations_rows: list[list[str]] = []
+    redaction = report.get("redaction_scan", {}) if isinstance(report.get("redaction_scan"), dict) else {}
+    for violation in redaction.get("violations", []):
+        if not isinstance(violation, dict):
+            continue
+        violations_rows.append([str(violation.get("file", "")), str(violation.get("token", ""))])
+
+    issue_rows: list[list[str]] = []
+    manifest_checks = report.get("manifest_checks", {}) if isinstance(report.get("manifest_checks"), dict) else {}
+    sha_checks = report.get("sha256_checks", {}) if isinstance(report.get("sha256_checks"), dict) else {}
+    for problem in manifest_checks.get("problems", []):
+        issue_rows.append(["manifest", str(problem)])
+    for problem in sha_checks.get("problems", []):
+        issue_rows.append(["sha256", str(problem)])
+
+    links_lines = ["<ul>"]
+    for href, label in artifact_links:
+        links_lines.append(f'  <li><a href="{html_escape(href)}">{html_escape(label)}</a></li>')
+    links_lines.append("</ul>")
+
+    summary_rows = [[line] for line in summary_lines]
+
+    body_lines = [
+        "    <header>",
+        "      <h1>Phase 5.2 Signoff Verify Report</h1>",
+        f'      <p class="status {status_class}" role="status">Result: {html_escape(status)}</p>',
+        "    </header>",
+        "    <section aria-labelledby=\"target-heading\">",
+        '      <h2 id="target-heading">Target</h2>',
+        "      "
+        + render_kv_list(
+            [
+                ("target_type", str(report.get("target_type", ""))),
+                ("target_name", str(report.get("target_name", ""))),
+                ("overall_ok", str(report.get("overall_ok", False))),
+                ("exit_code", str(report.get("exit_code", ""))),
+            ]
+        ).replace("\n", "\n      "),
+        "    </section>",
+        "    <section aria-labelledby=\"required-heading\">",
+        '      <h2 id="required-heading">Required files</h2>',
+        "      "
+        + render_table(
+            caption="Required artifact presence",
+            headers=["relpath", "status"],
+            rows=required_rows,
+        ).replace("\n", "\n      "),
+        "    </section>",
+        "    <section aria-labelledby=\"problems-heading\">",
+        '      <h2 id="problems-heading">Problems</h2>',
+        "      "
+        + render_table(
+            caption="Manifest/SHA256 problems",
+            headers=["category", "problem"],
+            rows=issue_rows,
+        ).replace("\n", "\n      "),
+        "    </section>",
+        "    <section aria-labelledby=\"redaction-heading\">",
+        '      <h2 id="redaction-heading">Redaction violations</h2>',
+        "      "
+        + render_table(
+            caption="Forbidden token findings",
+            headers=["file", "token"],
+            rows=violations_rows,
+        ).replace("\n", "\n      "),
+        "    </section>",
+        "    <section aria-labelledby=\"summary-heading\">",
+        '      <h2 id="summary-heading">Summary markers</h2>',
+        "      " + render_table(caption="VERIFY_SUMMARY lines", headers=["line"], rows=summary_rows).replace("\n", "\n      "),
+        "    </section>",
+        "    <section aria-labelledby=\"links-heading\">",
+        '      <h2 id="links-heading">Links</h2>',
+        "      " + "\n      ".join(links_lines),
+        "    </section>",
+    ]
+    return render_page("Phase 5.2 Signoff Verify Report", "\n".join(body_lines))

@@ -11,7 +11,13 @@ import unittest
 from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
 from cli_app.phase5_2_signoff_finalize import render_phase5_2_signoff_txt
 from cli_app.phase5_2_signoff_catalog import scan_signoff_catalog
-from cli_app.signoff_html import render_signoff_autopilot, render_signoff_catalog, render_signoff_compare, render_signoff_index
+from cli_app.signoff_html import (
+    render_signoff_autopilot,
+    render_signoff_catalog,
+    render_signoff_compare,
+    render_signoff_index,
+    render_signoff_verify,
+)
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -116,6 +122,9 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_verify_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_VERIFY", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_verify.sh", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_verify_report.sh", self.production_spec)
+        self.assertIn("PHASE5_2_SIGNOFF_VERIFY_REPORT_V1", self.production_spec)
+        self.assertIn("verify.html", self.production_spec)
 
     def test_phase5_2_signoff_compare_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_COMPARE", self.production_spec)
@@ -439,6 +448,28 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn('<main id="content">', rendered)
         self.assertIn(":focus-visible", rendered)
 
+    def test_signoff_verify_html_has_required_a11y_structure(self):
+        rendered = render_signoff_verify(
+            report={
+                "target_type": "dir",
+                "target_name": "bundle",
+                "required_files": [{"relpath": "SIGNOFF_SUMMARY.txt", "present": True}],
+                "manifest_checks": {"ok": True, "problems": []},
+                "sha256_checks": {"ok": True, "problems": [], "file_count": 4},
+                "redaction_scan": {"ok": True, "violations": [], "scanned_count": 4},
+                "overall_ok": True,
+                "exit_code": 0,
+            },
+            summary_lines=["PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN", "PHASE5_2_SIGNOFF_VERIFY_REPORT_END"],
+            artifact_links=[("VERIFY_MANIFEST.json", "VERIFY_MANIFEST.json")],
+        )
+        self.assertIn("<!doctype html>", rendered)
+        self.assertIn('<html lang="en">', rendered)
+        self.assertIn("Skip to content", rendered)
+        self.assertIn("<caption>", rendered)
+        self.assertIn('<main id="content">', rendered)
+        self.assertIn(":focus-visible", rendered)
+
     def test_renderer_escapes_untrusted_strings(self):
         manifest = {
             "success": False,
@@ -471,6 +502,27 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", autopilot_rendered)
         self.assertNotIn("<script>alert(1)</script>", autopilot_rendered)
 
+        verify_rendered = render_signoff_verify(
+            report={
+                "target_type": "dir",
+                "target_name": "bundle",
+                "required_files": [{"relpath": "<script>alert(1)</script>", "present": False}],
+                "manifest_checks": {"ok": False, "problems": ['<script>alert(1)</script>']},
+                "sha256_checks": {"ok": False, "problems": ['<script>alert(1)</script>'], "file_count": 0},
+                "redaction_scan": {
+                    "ok": False,
+                    "violations": [{"file": "<script>alert(1)</script>", "token": "<script>alert(1)</script>"}],
+                    "scanned_count": 0,
+                },
+                "overall_ok": False,
+                "exit_code": 1,
+            },
+            summary_lines=["line=<script>alert(1)</script>"],
+            artifact_links=[('<script>.html', '<script>alert(1)</script>')],
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", verify_rendered)
+        self.assertNotIn("<script>alert(1)</script>", verify_rendered)
+
     def test_renderer_output_is_deterministic_for_same_inputs(self):
         manifest = {
             "success": True,
@@ -501,6 +553,94 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             artifact_links=[("autopilot.html", "autopilot.html"), ("COMPARE/compare.html", "COMPARE/compare.html")],
         )
         self.assertEqual(auto_first, auto_second)
+
+        verify_first = render_signoff_verify(
+            report={
+                "target_type": "archive",
+                "target_name": "bundle.tgz",
+                "required_files": [{"relpath": "SIGNOFF_SUMMARY.txt", "present": True}],
+                "manifest_checks": {"ok": True, "problems": []},
+                "sha256_checks": {"ok": True, "problems": [], "file_count": 3},
+                "redaction_scan": {"ok": True, "violations": [], "scanned_count": 3},
+                "overall_ok": True,
+                "exit_code": 0,
+            },
+            summary_lines=["PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN", "PHASE5_2_SIGNOFF_VERIFY_REPORT_END"],
+            artifact_links=[("verify.html", "verify.html")],
+        )
+        verify_second = render_signoff_verify(
+            report={
+                "target_type": "archive",
+                "target_name": "bundle.tgz",
+                "required_files": [{"relpath": "SIGNOFF_SUMMARY.txt", "present": True}],
+                "manifest_checks": {"ok": True, "problems": []},
+                "sha256_checks": {"ok": True, "problems": [], "file_count": 3},
+                "redaction_scan": {"ok": True, "violations": [], "scanned_count": 3},
+                "overall_ok": True,
+                "exit_code": 0,
+            },
+            summary_lines=["PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN", "PHASE5_2_SIGNOFF_VERIFY_REPORT_END"],
+            artifact_links=[("verify.html", "verify.html")],
+        )
+        self.assertEqual(verify_first, verify_second)
+
+    def test_phase5_2_signoff_verify_report_dry_run_markers_are_stable(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "clients/cli/src"
+        env["VERIFY_REPORT_DRY_RUN"] = "1"
+        env["EVID_DIR"] = "evidence/bundle"
+        proc = subprocess.run(
+            ["python", "-m", "cli_app.phase5_2_signoff_verify_report_main"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn("PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_VERIFY_REPORT_V1", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_VERIFY_REPORT_END", lines)
+        timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(timestamp_pattern.search(line))
+
+    def test_phase5_2_signoff_verify_report_output_is_path_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "clients/cli/src"
+            env["EVID_DIR"] = tmp
+            env["OUT_EVID_ROOT"] = str(pathlib.Path(tmp) / "out")
+            proc = subprocess.run(
+                ["python", "-m", "cli_app.phase5_2_signoff_verify_report_main"],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotRegex(proc.stdout, r"/mnt/")
+            self.assertNotRegex(proc.stdout, r"[A-Za-z]:\\")
+
+    def test_phase5_2_signoff_verify_main_no_longer_prints_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "clients/cli/src"
+            env["EVID_DIR"] = tmp
+            proc = subprocess.run(
+                ["python", "-m", "cli_app.phase5_2_signoff_verify_main"],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("run evid_dir_name=", proc.stdout)
+            self.assertNotIn("run evid_dir=", proc.stdout)
+            self.assertNotRegex(proc.stdout, r"/mnt/")
+            self.assertNotRegex(proc.stdout, r"[A-Za-z]:\\")
 
     def test_signoff_catalog_compare_created_utc_fallback_from_dir_name(self):
         with tempfile.TemporaryDirectory() as tmp:
