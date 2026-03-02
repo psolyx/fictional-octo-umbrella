@@ -136,6 +136,30 @@ def scan_signoff_catalog(evidence_root: Path, max_entries: int = 200) -> dict[st
     }
 
 
+def discover_signoff_bundle_entries(evidence_root: Path) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    directories = sorted([path for path in evidence_root.rglob("*") if path.is_dir()], key=lambda p: p.as_posix())
+    for candidate in directories:
+        if not _is_bundle_dir(candidate):
+            continue
+        try:
+            manifest = json.loads((candidate / "MANIFEST.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        parent = candidate.parent
+        archive = parent / f"{candidate.name}.tgz"
+        entries.append(
+            {
+                "bundle_dir": candidate,
+                "bundle_dir_name": candidate.name,
+                "created_utc": _created_key(manifest.get("created_utc")),
+                "success": bool(manifest.get("success")),
+                "archive_path": archive if archive.is_file() else None,
+            }
+        )
+    return entries
+
+
 def write_signoff_catalog_outputs(catalog: dict[str, object], *, evidence_root: Path, out_dir: Path) -> None:
     bundles = catalog.get("bundles")
     compares = catalog.get("compares")

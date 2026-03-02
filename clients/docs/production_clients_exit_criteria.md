@@ -261,6 +261,38 @@ Catalog semantics:
 - Deterministic ordering: bundles/compares are sorted by `created_utc` descending with a directory-name tie-break.
 - Metadata-only and redacted posture: emits status/count/link metadata only, never transcript contents or secret material.
 
+## PHASE5_2_SIGNOFF_AUTOPILOT
+
+Marker family: `PHASE5_2_SIGNOFF_AUTOPILOT` + `PHASE5_2_SIGNOFF_AUTOPILOT_V1`.
+
+Run the single-command deterministic operational loop:
+
+```bash
+./scripts/phase5_2_signoff_autopilot.sh
+# or
+env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_signoff_autopilot_main
+```
+
+Autopilot behavior:
+- Generate a new signoff bundle (archive enabled by default).
+- Verify the new artifact (prefer archive mode when available).
+- Compare against the most recent PASS signoff bundle under `EVIDENCE_ROOT` (if any).
+- Emit deterministic autopilot evidence:
+  - `AUTOPILOT_SUMMARY.txt`
+  - `AUTOPILOT_MANIFEST.json`
+  - `sha256.txt` (covers summary + manifest; excludes itself)
+
+Deterministic baseline selection rule:
+- sort candidate bundles by `created_utc` descending,
+- tie-break by `bundle_dir.name` ascending,
+- exclude the newly generated bundle,
+- choose the first candidate where `success=true`.
+
+Exit code contract:
+- `0`: success (verification passed and compare step reports no regressions),
+- `2`: compare regression result,
+- `1`: infrastructure/verification/format failure.
+
 ## User-flow contracts
 
 ### Account lifecycle

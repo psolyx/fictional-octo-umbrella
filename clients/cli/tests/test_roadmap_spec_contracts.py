@@ -123,6 +123,10 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SIGNOFF_CATALOG", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_catalog.sh", self.production_spec)
 
+    def test_phase5_2_signoff_autopilot_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_autopilot.sh", self.production_spec)
+
 
     def test_phase5_2_signoff_compare_dry_run_markers_are_stable(self):
         env = os.environ.copy()
@@ -171,6 +175,30 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SIGNOFF_CATALOG_V1", lines)
         self.assertIn("PHASE5_2_SIGNOFF_CATALOG_END", lines)
         self.assertIn("evidence_root_basename=evidence", lines)
+        timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(timestamp_pattern.search(line))
+
+    def test_phase5_2_signoff_autopilot_dry_run_markers_are_stable(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "clients/cli/src"
+        env["AUTOPILOT_DRY_RUN"] = "1"
+        env["EVIDENCE_ROOT"] = "evidence"
+        proc = subprocess.run(
+            ["python", "-m", "cli_app.phase5_2_signoff_autopilot_main"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT_V1", lines)
+        self.assertIn("evidence_root_basename=evidence", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT_END", lines)
         timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
         for line in lines:
             with self.subTest(line=line):
