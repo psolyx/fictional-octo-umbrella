@@ -184,3 +184,85 @@ def render_signoff_compare(
         ]
     )
     return render_page("Phase 5.2 Signoff Compare Report", body)
+
+
+def render_signoff_catalog(catalog: dict) -> str:
+    bundles_raw = catalog.get("bundles")
+    compares_raw = catalog.get("compares")
+    bundles = bundles_raw if isinstance(bundles_raw, list) else []
+    compares = compares_raw if isinstance(compares_raw, list) else []
+
+    def _table_with_html_cells(caption: str, headers: list[str], rows: list[list[str]]) -> str:
+        header_cells = "".join(f'<th scope="col">{html_escape(header)}</th>' for header in headers)
+        lines = ["<table>", f"  <caption>{html_escape(caption)}</caption>", f"  <thead><tr>{header_cells}</tr></thead>", "  <tbody>"]
+        for row in rows:
+            row_cells = "".join(f"<td>{cell}</td>" for cell in row)
+            lines.append(f"    <tr>{row_cells}</tr>")
+        lines.extend(["  </tbody>", "</table>"])
+        return "\n".join(lines)
+
+    bundle_rows: list[list[str]] = []
+    for item in bundles:
+        if not isinstance(item, dict):
+            continue
+        links = [
+            f'<a href="{html_escape(str(item.get("index_href", "")))}">index.html</a>',
+            f'<a href="{html_escape(str(item.get("sha256_href", "")))}">sha256.txt</a>',
+            f'<a href="{html_escape(str(item.get("manifest_href", "")))}">MANIFEST.json</a>',
+        ]
+        if item.get("archive_href"):
+            links.append(f'<a href="{html_escape(str(item.get("archive_href", "")))}">archive.tgz</a>')
+        bundle_rows.append(
+            [
+                html_escape(str(item.get("created_utc", ""))),
+                html_escape(str(item.get("result", ""))),
+                html_escape(str(item.get("total_duration_s", ""))),
+                "<br>".join(links),
+            ]
+        )
+
+    compare_rows: list[list[str]] = []
+    for item in compares:
+        if not isinstance(item, dict):
+            continue
+        links = [
+            f'<a href="{html_escape(str(item.get("compare_href", "")))}">compare.html</a>',
+            f'<a href="{html_escape(str(item.get("manifest_href", "")))}">COMPARE_MANIFEST.json</a>',
+        ]
+        compare_rows.append(
+            [
+                html_escape(str(item.get("created_utc", ""))),
+                html_escape(str(item.get("result", ""))),
+                html_escape(str(item.get("regression_count", "0"))),
+                "<br>".join(links),
+            ]
+        )
+
+    body = "\n".join(
+        [
+            "    <header>",
+            "      <h1>Phase 5.2 Signoff Catalog</h1>",
+            f"      <p>evidence_root_basename={html_escape(str(catalog.get('evidence_root_basename', '')))}</p>",
+            f"      <p>bundle_count={html_escape(str(catalog.get('bundle_count', 0)))} compare_count={html_escape(str(catalog.get('compare_count', 0)))}</p>",
+            "    </header>",
+            "    <section aria-labelledby=\"bundles-heading\">",
+            '      <h2 id="bundles-heading">Bundles</h2>',
+            "      "
+            + _table_with_html_cells(
+                caption="Bundles",
+                headers=["created_utc", "result", "total_duration_s", "links"],
+                rows=bundle_rows,
+            ).replace("\n", "\n      "),
+            "    </section>",
+            "    <section aria-labelledby=\"compares-heading\">",
+            '      <h2 id="compares-heading">Compares</h2>',
+            "      "
+            + _table_with_html_cells(
+                caption="Compares",
+                headers=["created_utc", "result", "regression_count", "links"],
+                rows=compare_rows,
+            ).replace("\n", "\n      "),
+            "    </section>",
+        ]
+    )
+    return render_page("Phase 5.2 Signoff Catalog", body)

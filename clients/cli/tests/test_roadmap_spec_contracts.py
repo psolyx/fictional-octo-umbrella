@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
-from cli_app.signoff_html import render_signoff_compare, render_signoff_index
+from cli_app.signoff_html import render_signoff_catalog, render_signoff_compare, render_signoff_index
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -119,6 +119,11 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SIGNOFF_COMPARE", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_compare.sh", self.production_spec)
 
+    def test_phase5_2_signoff_catalog_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SIGNOFF_CATALOG", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_catalog.sh", self.production_spec)
+
+
     def test_phase5_2_signoff_compare_dry_run_markers_are_stable(self):
         env = os.environ.copy()
         env["PYTHONPATH"] = "clients/cli/src"
@@ -146,6 +151,30 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNone(timestamp_pattern.search(line))
 
+
+    def test_phase5_2_signoff_catalog_dry_run_markers_are_stable(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "clients/cli/src"
+        env["CATALOG_DRY_RUN"] = "1"
+        env["EVIDENCE_ROOT"] = "evidence"
+        proc = subprocess.run(
+            ["python", "-m", "cli_app.phase5_2_signoff_catalog_main"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn("PHASE5_2_SIGNOFF_CATALOG_BEGIN", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_CATALOG_V1", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_CATALOG_END", lines)
+        self.assertIn("evidence_root_basename=evidence", lines)
+        timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(timestamp_pattern.search(line))
 
     def test_phase5_2_signoff_io_hardening_marker_exists(self):
         self.assertIn("PHASE5_2_SIGNOFF_IO_HARDENING", self.production_spec)
@@ -251,6 +280,39 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("<caption>", rendered)
         self.assertIn('<th scope="col">', rendered)
         self.assertIn(":focus-visible", rendered)
+
+    def test_signoff_catalog_html_has_required_a11y_structure(self):
+        rendered = render_signoff_catalog(
+            {
+                "evidence_root_basename": "evidence",
+                "bundle_count": 1,
+                "compare_count": 1,
+                "bundles": [
+                    {
+                        "created_utc": "2026-01-01T00:00:00Z",
+                        "result": "PASS",
+                        "total_duration_s": 1.0,
+                        "index_href": "../bundle/index.html",
+                        "sha256_href": "../bundle/sha256.txt",
+                        "manifest_href": "../bundle/MANIFEST.json",
+                    }
+                ],
+                "compares": [
+                    {
+                        "created_utc": "2026-01-01T00:00:00Z",
+                        "result": "FAIL",
+                        "regression_count": 1,
+                        "compare_href": "../compare/compare.html",
+                        "manifest_href": "../compare/COMPARE_MANIFEST.json",
+                    }
+                ],
+            }
+        )
+        self.assertIn("<!doctype html>", rendered)
+        self.assertIn('<html lang="en">', rendered)
+        self.assertIn("Skip to content", rendered)
+        self.assertIn("<caption>", rendered)
+        self.assertIn(':focus-visible', rendered)
 
     def test_signoff_compare_html_has_required_a11y_structure(self):
         compare_manifest = {"compare_result": "FAIL", "regression_count": 2}
