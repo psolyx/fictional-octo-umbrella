@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
+from cli_app.phase5_2_signoff_finalize import render_phase5_2_signoff_txt
 from cli_app.phase5_2_signoff_catalog import scan_signoff_catalog
 from cli_app.signoff_html import render_signoff_autopilot, render_signoff_catalog, render_signoff_compare, render_signoff_index
 
@@ -129,6 +130,11 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("./scripts/phase5_2_signoff_autopilot.sh", self.production_spec)
         self.assertIn("autopilot.html", self.production_spec)
 
+    def test_phase5_2_signoff_finalize_doc_markers_exist(self):
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_V1", self.production_spec)
+        self.assertIn("./scripts/phase5_2_signoff_finalize.sh", self.production_spec)
+        self.assertIn("PHASE5_2_SIGNOFF.txt", self.production_spec)
+
 
     def test_phase5_2_signoff_compare_dry_run_markers_are_stable(self):
         env = os.environ.copy()
@@ -205,6 +211,64 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         for line in lines:
             with self.subTest(line=line):
                 self.assertIsNone(timestamp_pattern.search(line))
+
+    def test_phase5_2_signoff_finalize_dry_run_markers_are_stable(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "clients/cli/src"
+        env["FINALIZE_DRY_RUN"] = "1"
+        env["EVIDENCE_ROOT"] = "evidence"
+        proc = subprocess.run(
+            ["python", "-m", "cli_app.phase5_2_signoff_finalize_main"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_BEGIN", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_V1", lines)
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_END", lines)
+        timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{8}T\d{6}Z")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(timestamp_pattern.search(line))
+
+    def test_render_phase5_2_signoff_txt_is_deterministic_and_path_safe(self):
+        manifest = {
+            "autopilot_html_name": "autopilot.html",
+            "signoff_txt_name": "PHASE5_2_SIGNOFF.txt",
+            "bundle_dir_name": "phase5_2_signoff_bundle_20260101T010101Z",
+            "archive_name": "phase5_2_signoff_bundle_20260101T010101Z.tgz",
+            "archive_sha256_name": "phase5_2_signoff_bundle_20260101T010101Z.tgz.sha256",
+            "baseline_bundle_dir_name": "phase5_2_signoff_bundle_20251231T235959Z",
+            "compare_result": "PASS",
+            "regression_count": 0,
+        }
+        rendered_a = render_phase5_2_signoff_txt(
+            manifest=manifest,
+            sha256_manifest_rel="sha256.txt",
+            autopilot_dir_name="phase5_2_signoff_autopilot_20260101T010102Z",
+            compare_dir_name="COMPARE",
+        )
+        rendered_b = render_phase5_2_signoff_txt(
+            manifest=manifest,
+            sha256_manifest_rel="sha256.txt",
+            autopilot_dir_name="phase5_2_signoff_autopilot_20260101T010102Z",
+            compare_dir_name="COMPARE",
+        )
+        self.assertEqual(rendered_a.encode("utf-8"), rendered_b.encode("utf-8"))
+        self.assertTrue(rendered_a.endswith("\n"))
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_BEGIN", rendered_a)
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_V1", rendered_a)
+        self.assertIn("autopilot_html_name=autopilot.html", rendered_a)
+        self.assertIn("signoff_txt_name=PHASE5_2_SIGNOFF.txt", rendered_a)
+        self.assertIn("autopilot_sha256_rel=sha256.txt", rendered_a)
+        self.assertIn("compare_manifest_rel=COMPARE/COMPARE_MANIFEST.json", rendered_a)
+        self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_END", rendered_a)
+        self.assertIsNone(re.search(r"(^|\s)/[A-Za-z]", rendered_a, flags=re.MULTILINE))
+        self.assertIsNone(re.search(r"[A-Za-z]:\\", rendered_a))
 
     def test_phase5_2_signoff_io_hardening_marker_exists(self):
         self.assertIn("PHASE5_2_SIGNOFF_IO_HARDENING", self.production_spec)

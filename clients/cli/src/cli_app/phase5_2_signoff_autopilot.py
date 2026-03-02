@@ -99,6 +99,7 @@ def run_autopilot(
     utc_stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     autopilot_dir = out_evid_root / f"{day}-{_platform_tag()}-autopilot" / f"phase5_2_signoff_autopilot_{utc_stamp}"
     autopilot_dir.mkdir(parents=True, exist_ok=True)
+    autopilot_dir_rel = os.path.relpath(autopilot_dir, repo_root).replace("\\", "/")
 
     compare_mode = "skipped"
     compare_result = "SKIPPED"
@@ -151,6 +152,7 @@ def run_autopilot(
 
     baseline_name = str(baseline.get("bundle_dir_name")) if isinstance(baseline, dict) else "none"
     archive_name = archive.name if archive is not None else "none"
+    archive_sha_name = f"{archive.name}.sha256" if archive is not None else "none"
 
     summary_lines = [
         PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN,
@@ -167,13 +169,20 @@ def run_autopilot(
 
     manifest = {
         "autopilot_version": PHASE5_2_SIGNOFF_AUTOPILOT_V1,
+        "autopilot_dir_name": autopilot_dir.name,
+        "autopilot_dir_rel": autopilot_dir_rel,
+        "autopilot_html_name": "autopilot.html",
         "archive_name": archive_name,
+        "archive_sha256_name": archive_sha_name,
         "baseline_bundle_dir_name": baseline_name,
+        "bundle_manifest_name": "MANIFEST.json",
+        "bundle_sha256_name": "sha256.txt",
         "bundle_dir_name": bundle_dir.name,
         "compare_mode": compare_mode,
         "compare_result": compare_result,
         "exit_code": exit_code,
         "regression_count": regression_count,
+        "signoff_txt_name": "PHASE5_2_SIGNOFF.txt",
         "success": success,
         "verify_mode": verify_mode,
     }
