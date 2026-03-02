@@ -9,7 +9,8 @@ import tempfile
 import unittest
 
 from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
-from cli_app.signoff_html import render_signoff_catalog, render_signoff_compare, render_signoff_index
+from cli_app.phase5_2_signoff_catalog import scan_signoff_catalog
+from cli_app.signoff_html import render_signoff_autopilot, render_signoff_catalog, render_signoff_compare, render_signoff_index
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -126,6 +127,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_autopilot_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_autopilot.sh", self.production_spec)
+        self.assertIn("autopilot.html", self.production_spec)
 
 
     def test_phase5_2_signoff_compare_dry_run_markers_are_stable(self):
@@ -360,6 +362,19 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn('<th scope="col">', rendered)
         self.assertIn(":focus-visible", rendered)
 
+    def test_signoff_autopilot_html_has_required_a11y_structure(self):
+        rendered = render_signoff_autopilot(
+            manifest={"success": True, "autopilot_version": "PHASE5_2_SIGNOFF_AUTOPILOT_V1"},
+            summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
+            artifact_links=[("COMPARE/compare.html", "COMPARE/compare.html")],
+        )
+        self.assertIn("<!doctype html>", rendered)
+        self.assertIn('<html lang="en">', rendered)
+        self.assertIn("Skip to content", rendered)
+        self.assertIn("<caption>", rendered)
+        self.assertIn('<main id="content">', rendered)
+        self.assertIn(":focus-visible", rendered)
+
     def test_renderer_escapes_untrusted_strings(self):
         manifest = {
             "success": False,
@@ -384,6 +399,14 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("artifact &quot;x&quot; &amp; y", rendered)
         self.assertNotIn("<script>alert(1)</script>", rendered)
 
+        autopilot_rendered = render_signoff_autopilot(
+            manifest={"success": False, "bundle_dir_name": '<script>alert(1)</script>'},
+            summary_lines=["line=<script>alert(1)</script>"],
+            artifact_links=[('<script>.html', 'label <script>alert(1)</script>')],
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", autopilot_rendered)
+        self.assertNotIn("<script>alert(1)</script>", autopilot_rendered)
+
     def test_renderer_output_is_deterministic_for_same_inputs(self):
         manifest = {
             "success": True,
@@ -402,6 +425,34 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         first = render_signoff_index(manifest=manifest, artifacts=artifacts, result="PASS", notes=notes)
         second = render_signoff_index(manifest=manifest, artifacts=artifacts, result="PASS", notes=notes)
         self.assertEqual(first, second)
+
+        auto_first = render_signoff_autopilot(
+            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1"},
+            summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "compare_result=PASS", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
+            artifact_links=[("autopilot.html", "autopilot.html"), ("COMPARE/compare.html", "COMPARE/compare.html")],
+        )
+        auto_second = render_signoff_autopilot(
+            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1"},
+            summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "compare_result=PASS", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
+            artifact_links=[("autopilot.html", "autopilot.html"), ("COMPARE/compare.html", "COMPARE/compare.html")],
+        )
+        self.assertEqual(auto_first, auto_second)
+
+    def test_signoff_catalog_compare_created_utc_fallback_from_dir_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            compare_dir = root / "2026-01-02-linux-x86_64-compare" / "phase5_2_signoff_compare_20260102T030405Z"
+            compare_dir.mkdir(parents=True)
+            (compare_dir / "COMPARE_SUMMARY.txt").write_text("compare_result=PASS\n", encoding="utf-8")
+            (compare_dir / "COMPARE_MANIFEST.json").write_text(
+                '{"compare_result":"PASS","regression_count":0,"bundle_a_name":"a","bundle_b_name":"b"}\n',
+                encoding="utf-8",
+            )
+            (compare_dir / "compare.html").write_text("<!doctype html>\n", encoding="utf-8")
+            (compare_dir / "sha256.txt").write_text("", encoding="utf-8")
+            catalog = scan_signoff_catalog(root)
+            self.assertEqual(1, catalog["compare_count"])
+            self.assertEqual("2026-01-02T03:04:05Z", catalog["compares"][0]["created_utc"])
 
     def test_phase5_2_static_audit_checklist_markers_exist(self):
         self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")

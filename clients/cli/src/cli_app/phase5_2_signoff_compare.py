@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import io
 import json
 import os
@@ -209,6 +210,7 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
 
         manifest = {
             "compare_version": PHASE5_2_SIGNOFF_COMPARE_V1,
+            "created_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "bundle_a_name": root_a.name,
             "bundle_b_name": root_b.name,
             "regression_count": regression_count,

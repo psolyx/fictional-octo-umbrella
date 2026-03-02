@@ -280,7 +280,13 @@ Autopilot behavior:
 - Emit deterministic autopilot evidence:
   - `AUTOPILOT_SUMMARY.txt`
   - `AUTOPILOT_MANIFEST.json`
-  - `sha256.txt` (covers summary + manifest; excludes itself)
+  - `autopilot.html` (human-friendly landing page with deep links)
+  - `sha256.txt` (covers all autopilot output files/subtrees; excludes itself)
+- If a baseline PASS bundle exists and verification succeeds, persist compare evidence under:
+  - `COMPARE/COMPARE_SUMMARY.txt`
+  - `COMPARE/COMPARE_MANIFEST.json`
+  - `COMPARE/compare.html`
+  - `COMPARE/sha256.txt`
 
 Deterministic baseline selection rule:
 - sort candidate bundles by `created_utc` descending,

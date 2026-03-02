@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from cli_app.signoff_bundle_io import write_sha256_manifest
@@ -34,6 +35,16 @@ def _sum_durations(steps: list[dict[str, object]]) -> float:
 
 def _created_key(value: object) -> str:
     return str(value) if isinstance(value, str) else ""
+
+
+def _compare_created_fallback(created_utc: str, dir_name: str) -> str:
+    if created_utc:
+        return created_utc
+    match = re.search(r"(\d{8}T\d{6}Z)", dir_name)
+    if not match:
+        return ""
+    stamp = match.group(1)
+    return f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z"
 
 
 def _safe_relpath(base: Path, target: Path, evidence_root: Path) -> str:
@@ -92,11 +103,12 @@ def scan_signoff_catalog(evidence_root: Path, max_entries: int = 200) -> dict[st
                 continue
             regression_count = int(manifest.get("regression_count", 0))
             compare_result = str(manifest.get("compare_result", "FAIL"))
+            created_utc = _compare_created_fallback(_created_key(manifest.get("created_utc")), candidate.name)
             compares.append(
                 {
                     "dir_name": candidate.name,
                     "dir_relpath": candidate.relative_to(evidence_root).as_posix(),
-                    "created_utc": _created_key(manifest.get("created_utc")),
+                    "created_utc": created_utc,
                     "result": "PASS" if compare_result == "PASS" and regression_count == 0 else "FAIL",
                     "regression_count": regression_count,
                     "compare_html": "compare.html",
