@@ -299,6 +299,24 @@ Exit code contract:
 - `2`: compare regression result,
 - `1`: infrastructure/verification/format failure.
 
+## PHASE5_2_SIGNOFF_FINALIZE
+
+Marker family: `PHASE5_2_SIGNOFF_FINALIZE` + `PHASE5_2_SIGNOFF_FINALIZE_V1`.
+
+Run finalize as a one-command signoff wrapper:
+
+```bash
+./scripts/phase5_2_signoff_finalize.sh
+# or
+env PYTHONPATH=clients/cli/src python -m cli_app.phase5_2_signoff_finalize_main
+```
+
+Finalize behavior:
+- Runs the existing autopilot loop unchanged (bundle/verify/compare).
+- Writes `PHASE5_2_SIGNOFF.txt` into the autopilot evidence directory beside `autopilot.html`.
+- Emits path-safe output pointers only (relative paths and basenames; no absolute filesystem paths).
+- Prints deterministic pointer lines for `autopilot_dir_name`, `autopilot_dir_rel`, `autopilot_html_rel`, and `signoff_txt_rel`.
+
 ## User-flow contracts
 
 ### Account lifecycle

@@ -4,12 +4,13 @@ import os
 import pathlib
 import sys
 
-from cli_app.phase5_2_signoff_autopilot import (
-    PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN,
-    PHASE5_2_SIGNOFF_AUTOPILOT_END,
-    PHASE5_2_SIGNOFF_AUTOPILOT_OK,
-    PHASE5_2_SIGNOFF_AUTOPILOT_V1,
-    run_autopilot,
+from cli_app.phase5_2_signoff_autopilot import run_autopilot
+from cli_app.phase5_2_signoff_finalize import (
+    PHASE5_2_SIGNOFF_FINALIZE_BEGIN,
+    PHASE5_2_SIGNOFF_FINALIZE_END,
+    PHASE5_2_SIGNOFF_FINALIZE_OK,
+    PHASE5_2_SIGNOFF_FINALIZE_V1,
+    write_phase5_2_signoff_txt,
 )
 from cli_app.redact import redact_text
 
@@ -29,22 +30,21 @@ def main() -> int:
     no_archive = _env_true("SIGNOFF_NO_ARCHIVE", default=False)
     prefer_archive = _env_true("AUTOPILOT_PREFER_ARCHIVE", default=True)
     compare_prefer_archive = _env_true("AUTOPILOT_COMPARE_PREFER_ARCHIVE", default=True)
-    dry_run = _env_true("AUTOPILOT_DRY_RUN", default=False)
+    dry_run = _env_true("FINALIZE_DRY_RUN", default=False)
 
     def emit(line: str) -> None:
         sys.stdout.write(f"{redact_text(line)}\n")
 
-    emit(PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN)
-    emit(PHASE5_2_SIGNOFF_AUTOPILOT_V1)
+    emit(PHASE5_2_SIGNOFF_FINALIZE_BEGIN)
+    emit(PHASE5_2_SIGNOFF_FINALIZE_V1)
     try:
         emit(f"mode={'dry_run' if dry_run else 'run'}")
         emit(f"evidence_root_basename={evidence_root.name}")
         if dry_run:
-            emit("plan bundle_generate_and_archive")
-            emit("plan verify_new_bundle_prefer_archive")
-            emit("plan compare_against_latest_pass_bundle")
-            emit("plan write_autopilot_summary_manifest_sha256")
-            emit(PHASE5_2_SIGNOFF_AUTOPILOT_OK)
+            emit("plan run_autopilot")
+            emit("plan write_phase5_2_signoff_txt")
+            emit("plan print_path_safe_output_pointers")
+            emit(PHASE5_2_SIGNOFF_FINALIZE_OK)
             return 0
 
         manifest = run_autopilot(
@@ -57,16 +57,24 @@ def main() -> int:
             no_archive=no_archive,
             out=sys.stdout,
         )
-        autopilot_dir_rel = str(manifest.get("autopilot_dir_rel", "none"))
+        autopilot_dir_rel = str(manifest.get("autopilot_dir_rel", ""))
+        autopilot_dir_name = str(manifest.get("autopilot_dir_name", ""))
         autopilot_html_name = str(manifest.get("autopilot_html_name", "autopilot.html"))
+
+        autopilot_dir = (repo_root / autopilot_dir_rel).resolve()
+        signoff_path = write_phase5_2_signoff_txt(autopilot_dir=autopilot_dir, manifest=manifest)
+
+        emit(f"autopilot_dir_name={autopilot_dir_name}")
         emit(f"autopilot_dir_rel={autopilot_dir_rel}")
         emit(f"autopilot_html_rel={autopilot_dir_rel}/{autopilot_html_name}")
+        emit(f"signoff_txt_rel={autopilot_dir_rel}/{signoff_path.name}")
+
         exit_code = int(manifest.get("exit_code", 1))
         if exit_code == 0:
-            emit(PHASE5_2_SIGNOFF_AUTOPILOT_OK)
+            emit(PHASE5_2_SIGNOFF_FINALIZE_OK)
         return exit_code
     finally:
-        emit(PHASE5_2_SIGNOFF_AUTOPILOT_END)
+        emit(PHASE5_2_SIGNOFF_FINALIZE_END)
 
 
 if __name__ == "__main__":
