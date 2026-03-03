@@ -286,9 +286,11 @@ Catalog output layout:
   - `sha256.txt` (covers the three catalog artifacts above; excludes itself)
 
 Catalog semantics:
-- Index-only operation: scans existing complete bundle/compare directories and ignores incomplete trees deterministically.
-- Deterministic ordering: bundles/compares are sorted by `created_utc` descending with a directory-name tie-break.
+- Index-only operation: scans existing complete bundle/compare/autopilot/verify-report directories and ignores incomplete trees deterministically.
+- Deterministic ordering: bundles/compares/autopilots/verify reports are sorted by `created_utc` descending with a directory-name tie-break.
+- Catalog includes a top-level deterministic **Latest** section with shortcut links for newest PASS/OK entries per run type.
 - Metadata-only and redacted posture: emits status/count/link metadata only, never transcript contents or secret material.
+- SIGNOFF_CATALOG_RUN_TYPES_V1
 
 ## PHASE5_2_SIGNOFF_AUTOPILOT
 

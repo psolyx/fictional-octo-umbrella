@@ -135,6 +135,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_catalog_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_CATALOG", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_catalog.sh", self.production_spec)
+        self.assertIn("SIGNOFF_CATALOG_RUN_TYPES_V1", self.production_spec)
 
     def test_phase5_2_signoff_autopilot_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT", self.production_spec)
@@ -397,8 +398,11 @@ class TestRoadmapSpecContracts(unittest.TestCase):
                 "evidence_root_basename": "evidence",
                 "bundle_count": 1,
                 "compare_count": 1,
+                "autopilot_count": 1,
+                "verify_report_count": 1,
                 "bundles": [
                     {
+                        "dir_name": "bundle_1",
                         "created_utc": "2026-01-01T00:00:00Z",
                         "result": "PASS",
                         "total_duration_s": 1.0,
@@ -409,11 +413,43 @@ class TestRoadmapSpecContracts(unittest.TestCase):
                 ],
                 "compares": [
                     {
+                        "dir_name": "compare_1",
                         "created_utc": "2026-01-01T00:00:00Z",
-                        "result": "FAIL",
-                        "regression_count": 1,
+                        "result": "PASS",
+                        "regression_count": 0,
                         "compare_href": "../compare/compare.html",
                         "manifest_href": "../compare/COMPARE_MANIFEST.json",
+                    }
+                ],
+                "autopilots": [
+                    {
+                        "dir_name": "autopilot_1",
+                        "created_utc": "2026-01-01T01:00:00Z",
+                        "result": "PASS",
+                        "success": True,
+                        "verify_overall_ok": True,
+                        "compare_result": "PASS",
+                        "regression_count": 0,
+                        "bundle_dir_name": "bundle_1",
+                        "baseline_bundle_dir_name": "bundle_0",
+                        "autopilot_href": "../autopilot/autopilot.html",
+                        "autopilot_manifest_href": "../autopilot/AUTOPILOT_MANIFEST.json",
+                        "signoff_txt_href": "../autopilot/PHASE5_2_SIGNOFF.txt",
+                        "verify_href": "../autopilot/VERIFY/verify.html",
+                        "compare_href": "../autopilot/COMPARE/compare.html",
+                    }
+                ],
+                "verify_reports": [
+                    {
+                        "dir_name": "verify_1",
+                        "created_utc": "2026-01-01T01:05:00Z",
+                        "result": "PASS",
+                        "overall_ok": True,
+                        "target_type": "dir",
+                        "target_name": "bundle_1",
+                        "exit_code": 0,
+                        "verify_href": "../verify/verify.html",
+                        "verify_manifest_href": "../verify/VERIFY_MANIFEST.json",
                     }
                 ],
             }
@@ -423,6 +459,16 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("Skip to content", rendered)
         self.assertIn("<caption>", rendered)
         self.assertIn(':focus-visible', rendered)
+        self.assertIn("Latest", rendered)
+        self.assertIn("Autopilots", rendered)
+        self.assertIn("Verify reports", rendered)
+        self.assertIn('<th scope="col">verify_status</th>', rendered)
+        self.assertIn('<th scope="col">compare_result</th>', rendered)
+        self.assertIn('<th scope="col">bundle_dir_name</th>', rendered)
+        self.assertIn('<th scope="col">baseline_bundle_dir_name</th>', rendered)
+        self.assertIn('<th scope="col">target_type</th>', rendered)
+        self.assertIn('<th scope="col">target_name</th>', rendered)
+        self.assertIn('<th scope="col">exit_code</th>', rendered)
 
     def test_signoff_compare_html_has_required_a11y_structure(self):
         compare_manifest = {
@@ -570,6 +616,51 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", verify_rendered)
         self.assertNotIn("<script>alert(1)</script>", verify_rendered)
 
+        catalog_rendered = render_signoff_catalog(
+            {
+                "evidence_root_basename": "evidence",
+                "bundle_count": 0,
+                "compare_count": 0,
+                "autopilot_count": 1,
+                "verify_report_count": 1,
+                "bundles": [],
+                "compares": [],
+                "autopilots": [
+                    {
+                        "dir_name": "auto",
+                        "created_utc": "2026-01-01T00:00:00Z",
+                        "result": "PASS",
+                        "success": True,
+                        "verify_overall_ok": True,
+                        "compare_result": "PASS",
+                        "regression_count": 0,
+                        "bundle_dir_name": '<script>alert(1)</script>',
+                        "baseline_bundle_dir_name": '<script>alert(1)</script>',
+                        "autopilot_href": '<script>alert(1)</script>',
+                        "autopilot_manifest_href": '<script>alert(1)</script>',
+                        "signoff_txt_href": '<script>alert(1)</script>',
+                        "verify_href": '<script>alert(1)</script>',
+                        "compare_href": '<script>alert(1)</script>',
+                    }
+                ],
+                "verify_reports": [
+                    {
+                        "dir_name": "verify",
+                        "created_utc": "2026-01-01T00:00:00Z",
+                        "result": "FAIL",
+                        "overall_ok": False,
+                        "target_type": "dir",
+                        "target_name": '<script>alert(1)</script>',
+                        "exit_code": 1,
+                        "verify_href": '<script>alert(1)</script>',
+                        "verify_manifest_href": '<script>alert(1)</script>',
+                    }
+                ],
+            }
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", catalog_rendered)
+        self.assertNotIn('<script>alert(1)</script>', catalog_rendered)
+
     def test_renderer_output_is_deterministic_for_same_inputs(self):
         manifest = {
             "success": True,
@@ -658,6 +749,69 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         )
         self.assertEqual(compare_first, compare_second)
 
+        catalog_payload = {
+            "evidence_root_basename": "evidence",
+            "bundle_count": 1,
+            "compare_count": 1,
+            "autopilot_count": 1,
+            "verify_report_count": 1,
+            "bundles": [
+                {
+                    "dir_name": "bundle_1",
+                    "created_utc": "2026-01-01T00:00:00Z",
+                    "result": "PASS",
+                    "total_duration_s": 1.0,
+                    "index_href": "../bundle/index.html",
+                    "sha256_href": "../bundle/sha256.txt",
+                    "manifest_href": "../bundle/MANIFEST.json",
+                }
+            ],
+            "compares": [
+                {
+                    "dir_name": "compare_1",
+                    "created_utc": "2026-01-01T00:00:00Z",
+                    "result": "PASS",
+                    "regression_count": 0,
+                    "compare_href": "../compare/compare.html",
+                    "manifest_href": "../compare/COMPARE_MANIFEST.json",
+                }
+            ],
+            "autopilots": [
+                {
+                    "dir_name": "autopilot_1",
+                    "created_utc": "2026-01-01T01:00:00Z",
+                    "result": "PASS",
+                    "success": True,
+                    "verify_overall_ok": True,
+                    "compare_result": "PASS",
+                    "regression_count": 0,
+                    "bundle_dir_name": "bundle_1",
+                    "baseline_bundle_dir_name": "bundle_0",
+                    "autopilot_href": "../autopilot/autopilot.html",
+                    "autopilot_manifest_href": "../autopilot/AUTOPILOT_MANIFEST.json",
+                    "signoff_txt_href": "../autopilot/PHASE5_2_SIGNOFF.txt",
+                    "verify_href": "../autopilot/VERIFY/verify.html",
+                    "compare_href": "../autopilot/COMPARE/compare.html",
+                }
+            ],
+            "verify_reports": [
+                {
+                    "dir_name": "verify_1",
+                    "created_utc": "2026-01-01T01:05:00Z",
+                    "result": "PASS",
+                    "overall_ok": True,
+                    "target_type": "dir",
+                    "target_name": "bundle_1",
+                    "exit_code": 0,
+                    "verify_href": "../verify/verify.html",
+                    "verify_manifest_href": "../verify/VERIFY_MANIFEST.json",
+                }
+            ],
+        }
+        catalog_first = render_signoff_catalog(catalog_payload)
+        catalog_second = render_signoff_catalog(catalog_payload)
+        self.assertEqual(catalog_first, catalog_second)
+
         self.assertEqual(verify_first, verify_second)
 
     def test_phase5_2_signoff_verify_report_dry_run_markers_are_stable(self):
@@ -733,6 +887,38 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             catalog = scan_signoff_catalog(root)
             self.assertEqual(1, catalog["compare_count"])
             self.assertEqual("2026-01-02T03:04:05Z", catalog["compares"][0]["created_utc"])
+
+    def test_signoff_catalog_autopilot_created_utc_fallback_from_dir_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            autopilot_dir = root / "2026-01-02-linux-x86_64-autopilot" / "phase5_2_signoff_autopilot_20260102T030405Z"
+            autopilot_dir.mkdir(parents=True)
+            (autopilot_dir / "AUTOPILOT_SUMMARY.txt").write_text("success=true\n", encoding="utf-8")
+            (autopilot_dir / "AUTOPILOT_MANIFEST.json").write_text(
+                '{"success":true,"exit_code":0,"bundle_dir_name":"bundle","baseline_bundle_dir_name":"base","compare_result":"PASS","regression_count":0,"verify_overall_ok":true,"verify_exit_code":0,"verify_report_dir":"VERIFY","verify_html_rel":"VERIFY/verify.html","signoff_txt_name":"PHASE5_2_SIGNOFF.txt"}\n',
+                encoding="utf-8",
+            )
+            (autopilot_dir / "autopilot.html").write_text("<!doctype html>\n", encoding="utf-8")
+            (autopilot_dir / "sha256.txt").write_text("", encoding="utf-8")
+            catalog = scan_signoff_catalog(root)
+            self.assertEqual(1, catalog["autopilot_count"])
+            self.assertEqual("2026-01-02T03:04:05Z", catalog["autopilots"][0]["created_utc"])
+
+    def test_signoff_catalog_autopilot_created_utc_empty_when_dir_has_no_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            autopilot_dir = root / "autopilot" / "phase5_2_signoff_autopilot_latest"
+            autopilot_dir.mkdir(parents=True)
+            (autopilot_dir / "AUTOPILOT_SUMMARY.txt").write_text("success=true\n", encoding="utf-8")
+            (autopilot_dir / "AUTOPILOT_MANIFEST.json").write_text(
+                '{"success":true,"exit_code":0,"bundle_dir_name":"bundle"}\n',
+                encoding="utf-8",
+            )
+            (autopilot_dir / "autopilot.html").write_text("<!doctype html>\n", encoding="utf-8")
+            (autopilot_dir / "sha256.txt").write_text("", encoding="utf-8")
+            catalog = scan_signoff_catalog(root)
+            self.assertEqual(1, catalog["autopilot_count"])
+            self.assertEqual("", catalog["autopilots"][0]["created_utc"])
 
     def test_expected_churn_classifier_is_deterministic(self):
         churn_relpaths = [
