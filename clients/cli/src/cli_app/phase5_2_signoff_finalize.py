@@ -53,6 +53,17 @@ def render_phase5_2_signoff_txt(
             ]
         )
 
+    verify_html_rel = redact_text(str(manifest.get("verify_html_rel", "")))
+    if verify_html_rel:
+        verify_dir_rel = verify_html_rel.rsplit("/", 1)[0]
+        lines.extend(
+            [
+                _line("verify_html_rel", verify_html_rel),
+                _line("verify_manifest_rel", f"{verify_dir_rel}/VERIFY_MANIFEST.json"),
+                _line("verify_sha256_rel", f"{verify_dir_rel}/sha256.txt"),
+            ]
+        )
+
     lines.extend([PHASE5_2_SIGNOFF_FINALIZE_OK, PHASE5_2_SIGNOFF_FINALIZE_END])
     return "\n".join(lines) + "\n"
 

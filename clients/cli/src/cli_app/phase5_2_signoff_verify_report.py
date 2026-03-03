@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import tempfile
 from pathlib import Path
 
@@ -10,7 +11,9 @@ from cli_app.phase5_2_signoff_verify import (
     validate_manifest,
     validate_sha256,
 )
-from cli_app.signoff_bundle_io import safe_extract_tgz
+from cli_app.redact import redact_text
+from cli_app.signoff_bundle_io import safe_extract_tgz, write_sha256_manifest
+from cli_app.signoff_html import render_signoff_verify
 
 PHASE5_2_SIGNOFF_VERIFY_REPORT_V1 = "PHASE5_2_SIGNOFF_VERIFY_REPORT_V1"
 
@@ -82,3 +85,36 @@ def build_verify_report_for_archive(archive: Path) -> tuple[int, dict, list[str]
     with tempfile.TemporaryDirectory(prefix="phase5_2_signoff_verify_report_") as temp_dir:
         bundle_root = safe_extract_tgz(resolved, temp_root=Path(temp_dir))
         return _build_report(root=bundle_root, target_type="archive", target_name=resolved.name)
+
+
+def write_verify_report_evidence(*, out_dir: Path, repo_root: Path, target_type: str, target_path: Path) -> dict:
+    resolved_target = target_path.resolve()
+    if target_type == "dir":
+        rc, report, summary_lines = build_verify_report_for_dir(resolved_target)
+    elif target_type == "archive":
+        rc, report, summary_lines = build_verify_report_for_archive(resolved_target)
+    else:
+        raise ValueError("unsupported_target_type")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "VERIFY_SUMMARY.txt").write_text(
+        "\n".join(redact_text(line) for line in summary_lines) + "\n", encoding="utf-8", newline="\n"
+    )
+    with (out_dir / "VERIFY_MANIFEST.json").open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(report, indent=2, sort_keys=True))
+        handle.write("\n")
+
+    del repo_root
+    artifact_links = [
+        ("VERIFY_SUMMARY.txt", "VERIFY_SUMMARY.txt"),
+        ("VERIFY_MANIFEST.json", "VERIFY_MANIFEST.json"),
+        ("sha256.txt", "sha256.txt"),
+    ]
+    (out_dir / "verify.html").write_text(
+        render_signoff_verify(report=report, summary_lines=summary_lines, artifact_links=artifact_links) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    write_sha256_manifest(out_dir, manifest_name="sha256.txt")
+    report["exit_code"] = rc
+    return report

@@ -289,7 +289,7 @@ Catalog semantics:
 
 ## PHASE5_2_SIGNOFF_AUTOPILOT
 
-Marker family: `PHASE5_2_SIGNOFF_AUTOPILOT` + `PHASE5_2_SIGNOFF_AUTOPILOT_V1`.
+Marker family: `PHASE5_2_SIGNOFF_AUTOPILOT` + `PHASE5_2_SIGNOFF_AUTOPILOT_V1` + `AUTOPILOT_VERIFY_REPORT_V1`.
 
 Run the single-command deterministic operational loop:
 
@@ -308,6 +308,11 @@ Autopilot behavior:
   - `AUTOPILOT_MANIFEST.json`
   - `autopilot.html` (human-friendly landing page with deep links)
   - `sha256.txt` (covers all autopilot output files/subtrees; excludes itself)
+- Persist structured verify-report evidence under `VERIFY/`:
+  - `VERIFY/VERIFY_SUMMARY.txt`
+  - `VERIFY/VERIFY_MANIFEST.json`
+  - `VERIFY/verify.html`
+  - `VERIFY/sha256.txt`
 - If a baseline PASS bundle exists and verification succeeds, persist compare evidence under:
   - `COMPARE/COMPARE_SUMMARY.txt`
   - `COMPARE/COMPARE_MANIFEST.json`

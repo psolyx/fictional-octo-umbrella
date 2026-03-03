@@ -284,6 +284,23 @@ def render_signoff_autopilot(
         )
     links_lines.append("</ul>")
 
+    verify_overall_ok = bool(manifest.get("verify_overall_ok"))
+    verify_exit_code = str(manifest.get("verify_exit_code", ""))
+    verify_status = "OK" if verify_overall_ok else "FAIL"
+    verify_status_class = "pass" if verify_overall_ok else "fail"
+    verify_html_rel = str(manifest.get("verify_html_rel", ""))
+    verify_dir_rel = str(manifest.get("verify_report_dir", ""))
+    verify_links = []
+    if verify_html_rel:
+        verify_links.append((verify_html_rel, verify_html_rel))
+    if verify_dir_rel:
+        verify_links.append((f"{verify_dir_rel}/VERIFY_MANIFEST.json", f"{verify_dir_rel}/VERIFY_MANIFEST.json"))
+        verify_links.append((f"{verify_dir_rel}/sha256.txt", f"{verify_dir_rel}/sha256.txt"))
+    verify_lines = ["<ul>"]
+    for href, label in verify_links:
+        verify_lines.append(f'  <li><a href="{html_escape(href)}">{html_escape(label)}</a></li>')
+    verify_lines.append("</ul>")
+
     body = "\n".join(
         [
             "    <header>",
@@ -302,6 +319,11 @@ def render_signoff_autopilot(
             "    <section aria-labelledby=\"artifacts-heading\">",
             '      <h2 id="artifacts-heading">Artifacts</h2>',
             "      " + "\n      ".join(links_lines),
+            "    </section>",
+            "    <section aria-labelledby=\"verification-heading\">",
+            '      <h2 id="verification-heading">Verification</h2>',
+            f'      <p class="status {verify_status_class}" role="status">status={html_escape(verify_status)} exit_code={html_escape(verify_exit_code)}</p>',
+            "      " + "\n      ".join(verify_lines),
             "    </section>",
             "    <section aria-labelledby=\"manifest-heading\">",
             '      <h2 id="manifest-heading">Manifest fields</h2>',

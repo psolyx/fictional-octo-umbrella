@@ -138,6 +138,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("PHASE5_2_SIGNOFF_AUTOPILOT", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_autopilot.sh", self.production_spec)
         self.assertIn("autopilot.html", self.production_spec)
+        self.assertIn("AUTOPILOT_VERIFY_REPORT_V1", self.production_spec)
 
     def test_phase5_2_signoff_finalize_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_V1", self.production_spec)
@@ -254,6 +255,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             "baseline_bundle_dir_name": "phase5_2_signoff_bundle_20251231T235959Z",
             "compare_result": "PASS",
             "regression_count": 0,
+            "verify_html_rel": "VERIFY/verify.html",
         }
         rendered_a = render_phase5_2_signoff_txt(
             manifest=manifest,
@@ -275,6 +277,9 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("signoff_txt_name=PHASE5_2_SIGNOFF.txt", rendered_a)
         self.assertIn("autopilot_sha256_rel=sha256.txt", rendered_a)
         self.assertIn("compare_manifest_rel=COMPARE/COMPARE_MANIFEST.json", rendered_a)
+        self.assertIn("verify_html_rel=VERIFY/verify.html", rendered_a)
+        self.assertIn("verify_manifest_rel=VERIFY/VERIFY_MANIFEST.json", rendered_a)
+        self.assertIn("verify_sha256_rel=VERIFY/sha256.txt", rendered_a)
         self.assertIn("PHASE5_2_SIGNOFF_FINALIZE_END", rendered_a)
         self.assertIsNone(re.search(r"(^|\s)/[A-Za-z]", rendered_a, flags=re.MULTILINE))
         self.assertIsNone(re.search(r"[A-Za-z]:\\", rendered_a))
@@ -437,7 +442,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
 
     def test_signoff_autopilot_html_has_required_a11y_structure(self):
         rendered = render_signoff_autopilot(
-            manifest={"success": True, "autopilot_version": "PHASE5_2_SIGNOFF_AUTOPILOT_V1"},
+            manifest={"success": True, "autopilot_version": "PHASE5_2_SIGNOFF_AUTOPILOT_V1", "verify_html_rel": "VERIFY/verify.html", "verify_report_dir": "VERIFY", "verify_overall_ok": True, "verify_exit_code": 0},
             summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
             artifact_links=[("COMPARE/compare.html", "COMPARE/compare.html")],
         )
@@ -447,6 +452,8 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("<caption>", rendered)
         self.assertIn('<main id="content">', rendered)
         self.assertIn(":focus-visible", rendered)
+        self.assertIn('href="VERIFY/verify.html"', rendered)
+        self.assertIn("status=OK exit_code=0", rendered)
 
     def test_signoff_verify_html_has_required_a11y_structure(self):
         rendered = render_signoff_verify(
@@ -495,7 +502,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", rendered)
 
         autopilot_rendered = render_signoff_autopilot(
-            manifest={"success": False, "bundle_dir_name": '<script>alert(1)</script>'},
+            manifest={"success": False, "bundle_dir_name": '<script>alert(1)</script>', "verify_html_rel": '<script>alert(1)</script>', "verify_report_dir": '<script>alert(1)</script>', "verify_overall_ok": False, "verify_exit_code": '<script>alert(1)</script>'},
             summary_lines=["line=<script>alert(1)</script>"],
             artifact_links=[('<script>.html', 'label <script>alert(1)</script>')],
         )
@@ -543,12 +550,12 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertEqual(first, second)
 
         auto_first = render_signoff_autopilot(
-            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1"},
+            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1", "verify_html_rel": "VERIFY/verify.html", "verify_report_dir": "VERIFY", "verify_overall_ok": True, "verify_exit_code": 0},
             summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "compare_result=PASS", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
             artifact_links=[("autopilot.html", "autopilot.html"), ("COMPARE/compare.html", "COMPARE/compare.html")],
         )
         auto_second = render_signoff_autopilot(
-            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1"},
+            manifest={"success": True, "bundle_dir_name": "bundle", "autopilot_version": "v1", "verify_html_rel": "VERIFY/verify.html", "verify_report_dir": "VERIFY", "verify_overall_ok": True, "verify_exit_code": 0},
             summary_lines=["PHASE5_2_SIGNOFF_AUTOPILOT_BEGIN", "compare_result=PASS", "PHASE5_2_SIGNOFF_AUTOPILOT_END"],
             artifact_links=[("autopilot.html", "autopilot.html"), ("COMPARE/compare.html", "COMPARE/compare.html")],
         )
