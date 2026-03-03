@@ -209,8 +209,12 @@ def render_signoff_compare(
 def render_signoff_catalog(catalog: dict) -> str:
     bundles_raw = catalog.get("bundles")
     compares_raw = catalog.get("compares")
+    autopilots_raw = catalog.get("autopilots")
+    verify_reports_raw = catalog.get("verify_reports")
     bundles = bundles_raw if isinstance(bundles_raw, list) else []
     compares = compares_raw if isinstance(compares_raw, list) else []
+    autopilots = autopilots_raw if isinstance(autopilots_raw, list) else []
+    verify_reports = verify_reports_raw if isinstance(verify_reports_raw, list) else []
 
     def _table_with_html_cells(caption: str, headers: list[str], rows: list[list[str]]) -> str:
         header_cells = "".join(f'<th scope="col">{html_escape(header)}</th>' for header in headers)
@@ -220,6 +224,17 @@ def render_signoff_catalog(catalog: dict) -> str:
             lines.append(f"    <tr>{row_cells}</tr>")
         lines.extend(["  </tbody>", "</table>"])
         return "\n".join(lines)
+
+    def _latest_pass(items: list[dict], predicate) -> dict | None:
+        for item in items:
+            if isinstance(item, dict) and predicate(item):
+                return item
+        return None
+
+    def _latest_row(label: str, href: str, text: str) -> list[str]:
+        safe_href = html_escape(href)
+        safe_text = html_escape(text)
+        return [f"  <dt>{html_escape(label)}</dt>", f'  <dd><a href="{safe_href}">{safe_text}</a></dd>']
 
     bundle_rows: list[list[str]] = []
     for item in bundles:
@@ -258,13 +273,108 @@ def render_signoff_catalog(catalog: dict) -> str:
             ]
         )
 
+    autopilot_rows: list[list[str]] = []
+    for item in autopilots:
+        if not isinstance(item, dict):
+            continue
+        verify_status = "OK" if bool(item.get("verify_overall_ok")) else "FAIL"
+        links = [
+            f'<a href="{html_escape(str(item.get("autopilot_href", "")))}">autopilot.html</a>',
+            f'<a href="{html_escape(str(item.get("autopilot_manifest_href", "")))}">AUTOPILOT_MANIFEST.json</a>',
+        ]
+        if item.get("signoff_txt_href"):
+            links.append(f'<a href="{html_escape(str(item.get("signoff_txt_href", "")))}">PHASE5_2_SIGNOFF.txt</a>')
+        if item.get("verify_href"):
+            links.append(f'<a href="{html_escape(str(item.get("verify_href", "")))}">VERIFY/verify.html</a>')
+        if item.get("compare_href"):
+            links.append(f'<a href="{html_escape(str(item.get("compare_href", "")))}">COMPARE/compare.html</a>')
+        autopilot_rows.append(
+            [
+                html_escape(str(item.get("created_utc", ""))),
+                html_escape(str(item.get("result", ""))),
+                html_escape(verify_status),
+                html_escape(str(item.get("compare_result", ""))),
+                html_escape(str(item.get("regression_count", ""))),
+                html_escape(str(item.get("bundle_dir_name", ""))),
+                html_escape(str(item.get("baseline_bundle_dir_name", ""))),
+                "<br>".join(links),
+            ]
+        )
+
+    verify_rows: list[list[str]] = []
+    for item in verify_reports:
+        if not isinstance(item, dict):
+            continue
+        links = [
+            f'<a href="{html_escape(str(item.get("verify_href", "")))}">verify.html</a>',
+            f'<a href="{html_escape(str(item.get("verify_manifest_href", "")))}">VERIFY_MANIFEST.json</a>',
+        ]
+        verify_rows.append(
+            [
+                html_escape(str(item.get("created_utc", ""))),
+                html_escape(str(item.get("result", ""))),
+                html_escape(str(item.get("target_type", ""))),
+                html_escape(str(item.get("target_name", ""))),
+                html_escape(str(item.get("exit_code", ""))),
+                "<br>".join(links),
+            ]
+        )
+
+    latest_lines = ["<dl>"]
+    latest_bundle_pass = _latest_pass(bundles, lambda i: str(i.get("result", "")) == "PASS")
+    if latest_bundle_pass:
+        latest_lines.extend(
+            _latest_row(
+                "Latest bundle PASS",
+                str(latest_bundle_pass.get("index_href", "")),
+                str(latest_bundle_pass.get("dir_name", "index.html")),
+            )
+        )
+    latest_compare_pass = _latest_pass(compares, lambda i: str(i.get("result", "")) == "PASS")
+    if latest_compare_pass:
+        latest_lines.extend(
+            _latest_row(
+                "Latest compare PASS",
+                str(latest_compare_pass.get("compare_href", "")),
+                str(latest_compare_pass.get("dir_name", "compare.html")),
+            )
+        )
+    latest_autopilot_success = _latest_pass(
+        autopilots,
+        lambda i: bool(i.get("success")) and (i.get("verify_overall_ok") in (None, True)),
+    )
+    if latest_autopilot_success:
+        latest_lines.extend(
+            _latest_row(
+                "Latest autopilot success",
+                str(latest_autopilot_success.get("autopilot_href", "")),
+                str(latest_autopilot_success.get("dir_name", "autopilot.html")),
+            )
+        )
+    latest_verify_ok = _latest_pass(verify_reports, lambda i: bool(i.get("overall_ok")))
+    if latest_verify_ok:
+        latest_lines.extend(
+            _latest_row(
+                "Latest verify OK",
+                str(latest_verify_ok.get("verify_href", "")),
+                str(latest_verify_ok.get("dir_name", "verify.html")),
+            )
+        )
+    if latest_lines == ["<dl>"]:
+        latest_lines.extend(["  <dt>Latest</dt>", "  <dd>none</dd>"])
+    latest_lines.append("</dl>")
+
     body = "\n".join(
         [
             "    <header>",
             "      <h1>Phase 5.2 Signoff Catalog</h1>",
             f"      <p>evidence_root_basename={html_escape(str(catalog.get('evidence_root_basename', '')))}</p>",
-            f"      <p>bundle_count={html_escape(str(catalog.get('bundle_count', 0)))} compare_count={html_escape(str(catalog.get('compare_count', 0)))}</p>",
+            f"      <p>bundle_count={html_escape(str(catalog.get('bundle_count', 0)))} compare_count={html_escape(str(catalog.get('compare_count', 0)))} autopilot_count={html_escape(str(catalog.get('autopilot_count', 0)))} verify_report_count={html_escape(str(catalog.get('verify_report_count', 0)))}</p>",
             "    </header>",
+            '    <section aria-labelledby="latest-heading">',
+            '      <h2 id="latest-heading">Latest</h2>',
+            "      " + "\n      ".join(latest_lines),
+            "    </section>",
             "    <section aria-labelledby=\"bundles-heading\">",
             '      <h2 id="bundles-heading">Bundles</h2>',
             "      "
@@ -281,6 +391,33 @@ def render_signoff_catalog(catalog: dict) -> str:
                 caption="Compares",
                 headers=["created_utc", "result", "regression_count", "links"],
                 rows=compare_rows,
+            ).replace("\n", "\n      "),
+            "    </section>",
+            "    <section aria-labelledby=\"autopilots-heading\">",
+            '      <h2 id="autopilots-heading">Autopilots</h2>',
+            "      "
+            + _table_with_html_cells(
+                caption="Autopilots",
+                headers=[
+                    "created_utc",
+                    "result",
+                    "verify_status",
+                    "compare_result",
+                    "regression_count",
+                    "bundle_dir_name",
+                    "baseline_bundle_dir_name",
+                    "links",
+                ],
+                rows=autopilot_rows,
+            ).replace("\n", "\n      "),
+            "    </section>",
+            "    <section aria-labelledby=\"verify-reports-heading\">",
+            '      <h2 id="verify-reports-heading">Verify reports</h2>',
+            "      "
+            + _table_with_html_cells(
+                caption="Verify reports",
+                headers=["created_utc", "result", "target_type", "target_name", "exit_code", "links"],
+                rows=verify_rows,
             ).replace("\n", "\n      "),
             "    </section>",
         ]
