@@ -22,7 +22,19 @@ class _CompareFailure(Exception):
     pass
 
 
-def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]]]:
+def _is_expected_churn(relpath: str) -> bool:
+    churn_relpaths = {
+        "MANIFEST.json",
+        "SIGNOFF_SUMMARY.txt",
+        "ENV.txt",
+        "index.html",
+        "sha256.txt",
+        "GATEWAY_SERVER.txt",
+    }
+    return relpath in churn_relpaths
+
+
+def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]], dict[str, dict[str, str]]]:
     data = json.loads((root / "MANIFEST.json").read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise _CompareFailure("compare_fail manifest_invalid")
@@ -31,6 +43,7 @@ def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]
     if not isinstance(raw_steps, list):
         raise _CompareFailure("compare_fail manifest_invalid")
     out: dict[str, dict[str, object]] = {}
+    step_output_map: dict[str, dict[str, str]] = {}
     for step in raw_steps:
         if not isinstance(step, dict):
             raise _CompareFailure("compare_fail manifest_invalid")
@@ -49,7 +62,14 @@ def _parse_manifest_steps(root: Path) -> tuple[bool, dict[str, dict[str, object]
             "exit_code": exit_code,
             "duration_s": round(float(duration_s), 3),
         }
-    return success, out
+        label = step.get("label", "")
+        output = step.get("output", "")
+        if isinstance(output, str) and output and output not in step_output_map:
+            step_output_map[output] = {
+                "step_id": step_id,
+                "step_label": label if isinstance(label, str) else "",
+            }
+    return success, out, step_output_map
 
 
 def _parse_sha256_map(root: Path) -> dict[str, str]:
@@ -101,8 +121,8 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
             out_stream.write("compare_fail bundle_verify_failed\n")
             return 1
 
-        success_a, steps_a = _parse_manifest_steps(root_a)
-        success_b, steps_b = _parse_manifest_steps(root_b)
+        success_a, steps_a, _ = _parse_manifest_steps(root_a)
+        success_b, steps_b, step_output_map = _parse_manifest_steps(root_b)
         sha_a = _parse_sha256_map(root_a)
         sha_b = _parse_sha256_map(root_b)
 
@@ -133,6 +153,8 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
 
         relpaths = sorted(set(sha_a.keys()) | set(sha_b.keys()))
         changed: list[dict[str, str]] = []
+        changed_signal: list[dict[str, str]] = []
+        changed_churn: list[dict[str, str]] = []
         added: list[str] = []
         removed: list[str] = []
         unchanged_count = 0
@@ -148,13 +170,21 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
             if digest_a == digest_b:
                 unchanged_count += 1
                 continue
-            changed.append(
-                {
-                    "relpath": relpath,
-                    "a_digest_short": _short(digest_a),
-                    "b_digest_short": _short(digest_b),
-                }
-            )
+            step_meta = step_output_map.get(relpath, {})
+            category = "churn" if _is_expected_churn(relpath) else "signal"
+            changed_entry = {
+                "relpath": relpath,
+                "category": category,
+                "step_id": str(step_meta.get("step_id", "")),
+                "step_label": str(step_meta.get("step_label", "")),
+                "a_digest_short": _short(digest_a),
+                "b_digest_short": _short(digest_b),
+            }
+            changed.append(changed_entry)
+            if category == "signal":
+                changed_signal.append(changed_entry)
+            else:
+                changed_churn.append(changed_entry)
 
         compare_result = "PASS" if regression_count == 0 and success_a and success_b else "FAIL"
         compare_exit = 0 if compare_result == "PASS" else 2
@@ -162,6 +192,8 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
         artifact_deltas: dict[str, object] = {
             "unchanged_count": unchanged_count,
             "changed_count": len(changed),
+            "changed_signal_count": len(changed_signal),
+            "changed_churn_count": len(changed_churn),
             "added_count": len(added),
             "removed_count": len(removed),
             "changed": changed,
@@ -194,13 +226,33 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
                 "artifact_deltas_begin",
                 f"unchanged={artifact_deltas['unchanged_count']}",
                 f"changed={artifact_deltas['changed_count']}",
+                f"changed_signal={artifact_deltas['changed_signal_count']}",
+                f"changed_churn={artifact_deltas['changed_churn_count']}",
                 f"added={artifact_deltas['added_count']}",
                 f"removed={artifact_deltas['removed_count']}",
+                "artifact_signal_begin",
             ]
         )
+        for entry in changed_signal:
+            summary_lines.append(
+                "signal relpath={relpath} step_id={step_id} step_label={step_label} digest={a_digest_short}->{b_digest_short}".format(
+                    **entry
+                )
+            )
+        summary_lines.append("artifact_signal_end")
+        summary_lines.append("artifact_churn_begin")
+        for entry in changed_churn:
+            summary_lines.append(
+                "churn relpath={relpath} step_id={step_id} step_label={step_label} digest={a_digest_short}->{b_digest_short}".format(
+                    **entry
+                )
+            )
+        summary_lines.append("artifact_churn_end")
         for entry in changed:
             summary_lines.append(
-                f"changed relpath={entry['relpath']} digest={entry['a_digest_short']}->{entry['b_digest_short']}"
+                "changed relpath={relpath} category={category} step_id={step_id} step_label={step_label} digest={a_digest_short}->{b_digest_short}".format(
+                    **entry
+                )
             )
         for relpath in added:
             summary_lines.append(f"added relpath={relpath}")
@@ -237,13 +289,25 @@ def compare_signoff_bundles(*, mode: str, bundle_a: str, bundle_b: str, out_dir:
             for step in step_deltas
         ]
         artifact_sections = {
-            "changed": [
+            "signal": [
                 [
                     str(entry["relpath"]),
+                    str(entry["step_id"]),
+                    str(entry["step_label"]),
                     str(entry["a_digest_short"]),
                     str(entry["b_digest_short"]),
                 ]
-                for entry in changed
+                for entry in changed_signal
+            ],
+            "churn": [
+                [
+                    str(entry["relpath"]),
+                    str(entry["step_id"]),
+                    str(entry["step_label"]),
+                    str(entry["a_digest_short"]),
+                    str(entry["b_digest_short"]),
+                ]
+                for entry in changed_churn
             ],
             "added": [[str(value), "", ""] for value in added],
             "removed": [[str(value), "", ""] for value in removed],
