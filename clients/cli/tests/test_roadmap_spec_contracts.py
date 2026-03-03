@@ -11,6 +11,7 @@ import unittest
 from cli_app.signoff_bundle_io import build_deterministic_tgz, safe_extract_tgz, verify_sha256_manifest
 from cli_app.phase5_2_signoff_finalize import render_phase5_2_signoff_txt
 from cli_app.phase5_2_signoff_catalog import scan_signoff_catalog
+from cli_app.phase5_2_signoff_compare import _is_expected_churn
 from cli_app.signoff_html import (
     render_signoff_autopilot,
     render_signoff_catalog,
@@ -129,6 +130,7 @@ class TestRoadmapSpecContracts(unittest.TestCase):
     def test_phase5_2_signoff_compare_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_COMPARE", self.production_spec)
         self.assertIn("./scripts/phase5_2_signoff_compare.sh", self.production_spec)
+        self.assertIn("SIGNOFF_COMPARE_SIGNAL_CHURN_V1", self.production_spec)
 
     def test_phase5_2_signoff_catalog_doc_markers_exist(self):
         self.assertIn("PHASE5_2_SIGNOFF_CATALOG", self.production_spec)
@@ -423,12 +425,23 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn(':focus-visible', rendered)
 
     def test_signoff_compare_html_has_required_a11y_structure(self):
-        compare_manifest = {"compare_result": "FAIL", "regression_count": 2}
+        compare_manifest = {
+            "compare_result": "FAIL",
+            "regression_count": 2,
+            "artifact_deltas": {
+                "changed_signal_count": 1,
+                "changed_churn_count": 1,
+                "added_count": 1,
+                "removed_count": 1,
+                "unchanged_count": 3,
+            },
+        }
         rendered = render_signoff_compare(
             compare_manifest=compare_manifest,
             step_rows=[["t01", "PASS", "0", "1.000", "FAIL", "1", "2.000", "1.000"]],
             artifact_sections={
-                "changed": [["a.txt", "aaa", "bbb"]],
+                "signal": [["a.txt", "t01", "label", "aaa", "bbb"]],
+                "churn": [["index.html", "", "", "111", "222"]],
                 "added": [["b.txt", "", ""]],
                 "removed": [["c.txt", "", ""]],
             },
@@ -439,6 +452,10 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("<caption>", rendered)
         self.assertIn('<th scope="col">', rendered)
         self.assertIn(":focus-visible", rendered)
+        self.assertIn("Signal", rendered)
+        self.assertIn("Expected churn", rendered)
+        self.assertIn('<th scope="col">step_id</th>', rendered)
+        self.assertIn('<th scope="col">step_label</th>', rendered)
 
     def test_signoff_autopilot_html_has_required_a11y_structure(self):
         rendered = render_signoff_autopilot(
@@ -500,6 +517,29 @@ class TestRoadmapSpecContracts(unittest.TestCase):
         self.assertIn("A &amp; B &quot;quoted&quot;", rendered)
         self.assertIn("artifact &quot;x&quot; &amp; y", rendered)
         self.assertNotIn("<script>alert(1)</script>", rendered)
+
+        compare_rendered = render_signoff_compare(
+            compare_manifest={
+                "compare_result": "FAIL",
+                "regression_count": 1,
+                "artifact_deltas": {
+                    "changed_signal_count": 1,
+                    "changed_churn_count": 0,
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "unchanged_count": 0,
+                },
+            },
+            step_rows=[["t01", "PASS", "0", "1.000", "PASS", "0", "1.000", "0.000"]],
+            artifact_sections={
+                "signal": [["<script>alert(1)</script>", "t01", '<script>alert(1)</script>', "aaa", "bbb"]],
+                "churn": [],
+                "added": [],
+                "removed": [],
+            },
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", compare_rendered)
+        self.assertNotIn("<script>alert(1)</script>", compare_rendered)
 
         autopilot_rendered = render_signoff_autopilot(
             manifest={"success": False, "bundle_dir_name": '<script>alert(1)</script>', "verify_html_rel": '<script>alert(1)</script>', "verify_report_dir": '<script>alert(1)</script>', "verify_overall_ok": False, "verify_exit_code": '<script>alert(1)</script>'},
@@ -589,6 +629,35 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             summary_lines=["PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN", "PHASE5_2_SIGNOFF_VERIFY_REPORT_END"],
             artifact_links=[("verify.html", "verify.html")],
         )
+        compare_manifest = {
+            "compare_result": "PASS",
+            "regression_count": 0,
+            "artifact_deltas": {
+                "changed_signal_count": 1,
+                "changed_churn_count": 1,
+                "added_count": 0,
+                "removed_count": 0,
+                "unchanged_count": 2,
+            },
+        }
+        compare_sections = {
+            "signal": [["signal.txt", "t01", "stable", "aaaa", "bbbb"]],
+            "churn": [["index.html", "", "", "1111", "2222"]],
+            "added": [],
+            "removed": [],
+        }
+        compare_first = render_signoff_compare(
+            compare_manifest=compare_manifest,
+            step_rows=[["t01", "PASS", "0", "1.000", "PASS", "0", "1.000", "0.000"]],
+            artifact_sections=compare_sections,
+        )
+        compare_second = render_signoff_compare(
+            compare_manifest=compare_manifest,
+            step_rows=[["t01", "PASS", "0", "1.000", "PASS", "0", "1.000", "0.000"]],
+            artifact_sections=compare_sections,
+        )
+        self.assertEqual(compare_first, compare_second)
+
         self.assertEqual(verify_first, verify_second)
 
     def test_phase5_2_signoff_verify_report_dry_run_markers_are_stable(self):
@@ -664,6 +733,25 @@ class TestRoadmapSpecContracts(unittest.TestCase):
             catalog = scan_signoff_catalog(root)
             self.assertEqual(1, catalog["compare_count"])
             self.assertEqual("2026-01-02T03:04:05Z", catalog["compares"][0]["created_utc"])
+
+    def test_expected_churn_classifier_is_deterministic(self):
+        churn_relpaths = [
+            "MANIFEST.json",
+            "SIGNOFF_SUMMARY.txt",
+            "ENV.txt",
+            "index.html",
+            "sha256.txt",
+            "GATEWAY_SERVER.txt",
+        ]
+        signal_relpaths = ["rooms/trace.json", "VERIFY/verify.html", "artifacts/out.bin"]
+        for relpath in churn_relpaths:
+            with self.subTest(relpath=relpath):
+                self.assertTrue(_is_expected_churn(relpath))
+                self.assertTrue(_is_expected_churn(relpath))
+        for relpath in signal_relpaths:
+            with self.subTest(relpath=relpath):
+                self.assertFalse(_is_expected_churn(relpath))
+                self.assertFalse(_is_expected_churn(relpath))
 
     def test_phase5_2_static_audit_checklist_markers_exist(self):
         self.assertTrue(SECURITY_CHECKLIST_PATH.exists(), msg="baseline security checklist must exist")

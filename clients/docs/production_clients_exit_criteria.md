@@ -254,7 +254,10 @@ Compare semantics:
 - Both inputs are verified with the existing signoff verifier contract before diffing.
 - Step deltas are built from `MANIFEST.json` union of `step_id`, sorted lexicographically.
 - Artifact deltas are built from `sha256.txt` union of relpaths, sorted lexicographically.
+- Changed artifacts are split deterministically into `signal` and `expected churn` buckets; `compare.html` renders signal rows first for triage.
+- Compare manifest changed entries include additive attribution fields (`step_id`, `step_label`) when relpath matches a producing step `output`.
 - Changed files are reported as relpath + short digest delta only; file contents are never printed.
+- SIGNOFF_COMPARE_SIGNAL_CHURN_V1
 
 Exit code contract:
 - `0`: compare_result=PASS (no regressions and bundle B success=true)

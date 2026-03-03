@@ -137,15 +137,23 @@ def render_signoff_compare(
     compare_result = str(compare_manifest.get("compare_result", "FAIL"))
     regression_count = str(compare_manifest.get("regression_count", "0"))
     status_class = "pass" if compare_result == "PASS" else "fail"
+    artifact_deltas = compare_manifest.get("artifact_deltas") if isinstance(compare_manifest.get("artifact_deltas"), dict) else {}
+    summary_line = (
+        f"changed_signal_count={artifact_deltas.get('changed_signal_count', 0)} "
+        f"changed_churn_count={artifact_deltas.get('changed_churn_count', 0)} "
+        f"added_count={artifact_deltas.get('added_count', 0)} "
+        f"removed_count={artifact_deltas.get('removed_count', 0)} "
+        f"unchanged_count={artifact_deltas.get('unchanged_count', 0)}"
+    )
 
-    def _section_table(title: str, caption: str, rows: list[list[str]]) -> str:
+    def _section_table(title: str, caption: str, headers: list[str], rows: list[list[str]]) -> str:
         return "\n".join(
             [
                 f"      <h3>{html_escape(title)}</h3>",
                 "      "
                 + render_table(
                     caption=caption,
-                    headers=["relpath", "A", "B"],
+                    headers=headers,
                     rows=rows,
                 ).replace("\n", "\n      "),
             ]
@@ -157,10 +165,12 @@ def render_signoff_compare(
             "      <h1>Phase 5.2 Signoff Compare</h1>",
             f'      <p class="status {status_class}" role="status">Result: {html_escape(compare_result)}</p>',
             f"      <p>regression_count={html_escape(regression_count)}</p>",
+            f"      <p>{html_escape(summary_line)}</p>",
             "    </header>",
-            "    <section aria-labelledby=\"step-delta-heading\">",
+            '    <section aria-labelledby="step-delta-heading">',
             '      <h2 id="step-delta-heading">Step delta</h2>',
-            "      " + render_table(
+            "      "
+            + render_table(
                 caption="Deterministic step-by-step comparison from MANIFEST.json",
                 headers=[
                     "step_id",
@@ -175,16 +185,26 @@ def render_signoff_compare(
                 rows=step_rows,
             ).replace("\n", "\n      "),
             "    </section>",
-            "    <section aria-labelledby=\"artifact-delta-heading\">",
+            '    <section aria-labelledby="artifact-delta-heading">',
             '      <h2 id="artifact-delta-heading">Artifact delta</h2>',
-            _section_table("Changed", "Changed artifact digests (short)", artifact_sections.get("changed", [])),
-            _section_table("Added", "Added artifacts", artifact_sections.get("added", [])),
-            _section_table("Removed", "Removed artifacts", artifact_sections.get("removed", [])),
+            _section_table(
+                "Signal (review first)",
+                "Signal artifact digest deltas (short)",
+                ["relpath", "step_id", "step_label", "A", "B"],
+                artifact_sections.get("signal", []),
+            ),
+            _section_table(
+                "Expected churn",
+                "Expected churn digest deltas (short)",
+                ["relpath", "step_id", "step_label", "A", "B"],
+                artifact_sections.get("churn", []),
+            ),
+            _section_table("Added", "Added artifacts", ["relpath", "A", "B"], artifact_sections.get("added", [])),
+            _section_table("Removed", "Removed artifacts", ["relpath", "A", "B"], artifact_sections.get("removed", [])),
             "    </section>",
         ]
     )
     return render_page("Phase 5.2 Signoff Compare Report", body)
-
 
 def render_signoff_catalog(catalog: dict) -> str:
     bundles_raw = catalog.get("bundles")
