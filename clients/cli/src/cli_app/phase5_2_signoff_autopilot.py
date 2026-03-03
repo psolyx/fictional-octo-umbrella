@@ -13,6 +13,7 @@ from cli_app.phase5_2_signoff_bundle import run_signoff_bundle
 from cli_app.phase5_2_signoff_catalog import discover_signoff_bundle_entries
 from cli_app.phase5_2_signoff_compare import compare_signoff_bundles
 from cli_app.phase5_2_signoff_verify import verify_signoff_archive, verify_signoff_bundle
+from cli_app.phase5_2_signoff_verify_report import write_verify_report_evidence
 from cli_app.signoff_bundle_io import write_sha256_manifest
 from cli_app.signoff_html import render_signoff_autopilot
 from cli_app.redact import redact_text
@@ -101,6 +102,21 @@ def run_autopilot(
     autopilot_dir.mkdir(parents=True, exist_ok=True)
     autopilot_dir_rel = os.path.relpath(autopilot_dir, repo_root).replace("\\", "/")
 
+    verify_report_dir_name = "VERIFY"
+    verify_report_dir = autopilot_dir / verify_report_dir_name
+    if verify_mode == "archive" and archive is not None:
+        verify_target_type = "archive"
+        verify_target_path = archive
+    else:
+        verify_target_type = "dir"
+        verify_target_path = bundle_dir
+    verify_report = write_verify_report_evidence(
+        out_dir=verify_report_dir,
+        repo_root=repo_root,
+        target_type=verify_target_type,
+        target_path=verify_target_path,
+    )
+
     compare_mode = "skipped"
     compare_result = "SKIPPED"
     regression_count = 0
@@ -185,6 +201,10 @@ def run_autopilot(
         "signoff_txt_name": "PHASE5_2_SIGNOFF.txt",
         "success": success,
         "verify_mode": verify_mode,
+        "verify_report_dir": verify_report_dir_name,
+        "verify_html_rel": f"{verify_report_dir_name}/verify.html",
+        "verify_overall_ok": bool(verify_report.get("overall_ok")),
+        "verify_exit_code": int(verify_report.get("exit_code", verify_rc)),
     }
 
     summary_path = autopilot_dir / "AUTOPILOT_SUMMARY.txt"
@@ -210,6 +230,10 @@ def run_autopilot(
         artifact_links.append(("COMPARE/compare.html", "COMPARE/compare.html"))
         artifact_links.append(("COMPARE/sha256.txt", "COMPARE/sha256.txt"))
         artifact_links.append(("COMPARE/COMPARE_MANIFEST.json", "COMPARE/COMPARE_MANIFEST.json"))
+
+    artifact_links.append(("VERIFY/verify.html", "VERIFY/verify.html"))
+    artifact_links.append(("VERIFY/VERIFY_MANIFEST.json", "VERIFY/VERIFY_MANIFEST.json"))
+    artifact_links.append(("VERIFY/sha256.txt", "VERIFY/sha256.txt"))
 
     if isinstance(baseline, dict):
         baseline_dir = baseline.get("bundle_dir")

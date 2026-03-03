@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import os
 import pathlib
 import platform
@@ -9,12 +8,9 @@ import sys
 
 from cli_app.phase5_2_signoff_verify_report import (
     PHASE5_2_SIGNOFF_VERIFY_REPORT_V1,
-    build_verify_report_for_archive,
-    build_verify_report_for_dir,
+    write_verify_report_evidence,
 )
 from cli_app.redact import redact_text
-from cli_app.signoff_bundle_io import write_sha256_manifest
-from cli_app.signoff_html import render_signoff_verify
 
 PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN = "PHASE5_2_SIGNOFF_VERIFY_REPORT_BEGIN"
 PHASE5_2_SIGNOFF_VERIFY_REPORT_OK = "PHASE5_2_SIGNOFF_VERIFY_REPORT_OK"
@@ -66,10 +62,12 @@ def main() -> int:
 
         try:
             if evid_dir:
-                rc, report, summary_lines = build_verify_report_for_dir(pathlib.Path(evid_dir))
+                target_type = "dir"
+                target_path = pathlib.Path(evid_dir)
             else:
                 assert archive_path is not None
-                rc, report, summary_lines = build_verify_report_for_archive(pathlib.Path(archive_path))
+                target_type = "archive"
+                target_path = pathlib.Path(archive_path)
         except ValueError as exc:
             _emit(f"verify_report_fail {exc}")
             return 3
@@ -82,23 +80,13 @@ def main() -> int:
         stamp = now_utc.strftime("%Y%m%dT%H%M%SZ")
         verify_dir = out_evid_root / f"{day}-{_platform_tag()}-verify" / f"phase5_2_signoff_verify_report_{stamp}"
         verify_dir.mkdir(parents=True, exist_ok=False)
-
-        (verify_dir / "VERIFY_SUMMARY.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8", newline="\n")
-        with (verify_dir / "VERIFY_MANIFEST.json").open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(report, indent=2, sort_keys=True))
-            handle.write("\n")
-
-        artifact_links = [
-            ("VERIFY_SUMMARY.txt", "VERIFY_SUMMARY.txt"),
-            ("VERIFY_MANIFEST.json", "VERIFY_MANIFEST.json"),
-            ("sha256.txt", "sha256.txt"),
-        ]
-        (verify_dir / "verify.html").write_text(
-            render_signoff_verify(report=report, summary_lines=summary_lines, artifact_links=artifact_links) + "\n",
-            encoding="utf-8",
-            newline="\n",
+        report = write_verify_report_evidence(
+            out_dir=verify_dir,
+            repo_root=repo_root,
+            target_type=target_type,
+            target_path=target_path,
         )
-        write_sha256_manifest(verify_dir, manifest_name="sha256.txt")
+        rc = int(report.get("exit_code", 1))
 
         verify_dir_rel = pathlib.Path(os.path.relpath(verify_dir, repo_root)).as_posix()
         _emit(f"verify_dir_name={verify_dir.name}")
